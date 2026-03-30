@@ -1,0 +1,44 @@
+[package]
+name = "eink-bridge"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "eink_bridge"
+path = "src/lib.rs"
+
+[[bin]]
+name = "eink-serve"
+path = "src/main.rs"
+
+[[bin]]
+name = "eink-review"
+path = "src/cli.rs"
+
+[[bin]]
+name = "eink-mock-device"
+path = "src/mock_device.rs"
+
+[dependencies]
+axum = { version = "0.8", features = ["ws", "multipart"] }
+tokio = { version = "1", features = ["full"] }
+pulldown-cmark = "0.13"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tower-http = { version = "0.6", features = ["cors", "fs"] }
+uuid = { version = "1", features = ["v4"] }
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+notify = "7"
+directories = "6"
+toml = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+reqwest = { version = "0.12", features = ["json", "multipart"] }
+anyhow = "1"
+urlencoding = "2"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+tempfile = "3"
