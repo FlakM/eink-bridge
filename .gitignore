@@ -1,3 +1,7 @@
 target/
 result
 .direnv/
+android/app/build/
+android/local.properties
+android/.gradle/
+android/build/
