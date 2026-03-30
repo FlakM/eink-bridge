@@ -21,6 +21,7 @@ pub struct Session {
     pub status: SessionStatus,
     pub content: String,
     pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
     pub typed_notes: Option<String>,
     pub annotation_images: Vec<String>,
     pub state_dir: PathBuf,
@@ -90,6 +91,7 @@ impl SessionManager {
             status: SessionStatus::Active,
             content,
             created_at: Utc::now(),
+            updated_at: Utc::now(),
             typed_notes: None,
             annotation_images: Vec::new(),
             state_dir: session_dir,
@@ -117,6 +119,7 @@ impl SessionManager {
     pub fn cancel(&mut self, id: &str) -> bool {
         if let Some(s) = self.sessions.get_mut(id) {
             s.status = SessionStatus::Cancelled;
+            s.updated_at = Utc::now();
             s.persist();
             true
         } else {
@@ -129,6 +132,7 @@ impl SessionManager {
             s.typed_notes = Some(typed_notes);
             s.annotation_images = images;
             s.status = SessionStatus::Submitted;
+            s.updated_at = Utc::now();
             s.persist();
             true
         } else {

@@ -10,6 +10,7 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        maven { url = uri("https://repo.boox.com/repository/maven-public/") }
     }
 }
 rootProject.name = "eink-bridge"

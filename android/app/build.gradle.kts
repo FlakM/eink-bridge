@@ -29,6 +29,12 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+
+    packaging {
+        jniLibs {
+            pickFirsts += setOf("**/libc++_shared.so")
+        }
+    }
 }
 
 dependencies {
@@ -38,4 +44,7 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.json:json:20240303")
+    implementation("com.onyx.android.sdk:onyxsdk-pen:1.4.11") {
+        exclude(group = "com.android.support")
+    }
 }

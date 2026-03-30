@@ -51,8 +51,26 @@ class SessionAdapter(
             else -> "\u25CB"
         }
         holder.title.text = "$icon  ${session.title}"
-        holder.subtitle.text = "${session.status} \u2014 ${session.id}"
+        val time = formatTime(session.updatedAt)
+        holder.subtitle.text = "${session.status} \u2014 $time"
         holder.itemView.setOnClickListener { onClick(session) }
+    }
+
+    private fun formatTime(iso: String): String {
+        return try {
+            val instant = java.time.Instant.parse(iso)
+            val local = java.time.LocalDateTime.ofInstant(instant, java.time.ZoneId.systemDefault())
+            val now = java.time.LocalDateTime.now()
+            val diff = java.time.Duration.between(local, now)
+            when {
+                diff.toMinutes() < 1 -> "just now"
+                diff.toMinutes() < 60 -> "${diff.toMinutes()}m ago"
+                diff.toHours() < 24 -> "${diff.toHours()}h ago"
+                else -> local.format(java.time.format.DateTimeFormatter.ofPattern("MMM d, HH:mm"))
+            }
+        } catch (_: Exception) {
+            iso.take(16)
+        }
     }
 
     companion object {

@@ -97,22 +97,27 @@ async fn list_sessions(
 ) -> impl IntoResponse {
     let mgr = state.sessions.read().await;
     let all = mgr.list();
-    let filtered: Vec<_> = all
+    let mut filtered: Vec<_> = all
         .into_iter()
         .filter(|s| match &params.status {
             Some(st) => format!("{:?}", s.status).to_lowercase() == st.to_lowercase(),
             None => true,
         })
+        .collect();
+    filtered.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    let result: Vec<_> = filtered
+        .iter()
         .map(|s| {
             serde_json::json!({
                 "id": s.id,
                 "title": s.title,
                 "status": format!("{:?}", s.status),
                 "created_at": s.created_at,
+                "updated_at": s.updated_at,
             })
         })
         .collect();
-    Json(filtered)
+    Json(result)
 }
 
 async fn get_session(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
