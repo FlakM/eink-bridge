@@ -33,6 +33,17 @@
             android:layout_height="0dp"
             android:layout_weight="1" />
 
+        <TextView
+            android:id="@+id/emptyState"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:gravity="center"
+            android:text="No sessions yet"
+            android:textSize="20sp"
+            android:textColor="#999999"
+            android:visibility="gone" />
+
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -64,6 +75,16 @@
         android:layout_height="match_parent"
         android:visibility="gone" />
 
+    <!-- Persistent stroke layer: survives Onyx SDK enable/disable cycles caused by finger scroll. -->
+    <com.flakm.einkbridge.StrokeView
+        android:id="@+id/strokeView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:clickable="false"
+        android:focusable="false"
+        android:visibility="gone" />
+
+    <!-- Toolbar sits on top of the WebView. It is explicitly excluded from the pen drawing area. -->
     <LinearLayout
         android:id="@+id/penToolbar"
         android:layout_width="match_parent"
@@ -90,11 +111,11 @@
             android:progressBackgroundTint="#CCCCCC" />
 
         <View
-            android:layout_width="1dp"
+            android:layout_width="2dp"
             android:layout_height="48dp"
             android:layout_marginStart="8dp"
             android:layout_marginEnd="8dp"
-            android:background="#CCCCCC" />
+            android:background="#999999" />
 
         <Button
             android:id="@+id/btnPencil"
@@ -114,12 +135,30 @@
             android:textSize="36sp"
             android:textColor="#000000" />
 
+        <Button
+            android:id="@+id/btnEraser"
+            style="?android:attr/buttonBarButtonStyle"
+            android:layout_width="64dp"
+            android:layout_height="64dp"
+            android:text="⌫"
+            android:textSize="36sp"
+            android:textColor="#000000" />
+
         <View
-            android:layout_width="1dp"
+            android:layout_width="2dp"
             android:layout_height="48dp"
             android:layout_marginStart="8dp"
             android:layout_marginEnd="8dp"
-            android:background="#CCCCCC" />
+            android:background="#999999" />
+
+        <Button
+            android:id="@+id/btnUndo"
+            style="?android:attr/buttonBarButtonStyle"
+            android:layout_width="64dp"
+            android:layout_height="64dp"
+            android:text="↩"
+            android:textSize="36sp"
+            android:textColor="#000000" />
 
         <Button
             android:id="@+id/btnClear"
