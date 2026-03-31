@@ -6,6 +6,7 @@ import android.graphics.Rect
 import android.view.MotionEvent
 import android.view.View
 import android.webkit.WebView
+import com.onyx.android.sdk.api.device.epd.EpdController
 import com.onyx.android.sdk.data.note.TouchPoint
 import com.onyx.android.sdk.pen.RawInputCallback
 import com.onyx.android.sdk.pen.TouchHelper
@@ -28,11 +29,14 @@ internal fun rawDrawingAction(
     actionMasked: Int,
 ): Boolean? {
     val toolTypeStylus = 2  // MotionEvent.TOOL_TYPE_STYLUS
+    val toolTypeEraser = 4  // MotionEvent.TOOL_TYPE_ERASER
     val actionDown = 0      // MotionEvent.ACTION_DOWN
     val actionUp = 1        // MotionEvent.ACTION_UP
     val actionCancel = 3    // MotionEvent.ACTION_CANCEL
 
-    val hasStylus = (0 until pointerCount).any { getToolType(it) == toolTypeStylus }
+    val hasStylus = (0 until pointerCount).any {
+        val t = getToolType(it); t == toolTypeStylus || t == toolTypeEraser
+    }
     if (hasStylus) return null
     return when (actionMasked) {
         actionDown -> false
@@ -49,6 +53,7 @@ internal class OnyxPenController(
     internal var onStrokeProgress: (() -> Unit)? = null,
 ) : PenInputController {
     private var touchHelper: TouchHelper? = null
+    private var penViewRef: java.lang.ref.WeakReference<View>? = null
     private var pendingWidth: Float? = null
     private var eraseMode = false
     private var eraserPath = mutableListOf<Pair<Float, Float>>()
@@ -80,6 +85,11 @@ internal class OnyxPenController(
                 buf.commit()
                 onStrokeProgress?.invoke()
             }
+            // Briefly disable raw drawing so pending finger taps on the
+            // toolbar aren't blocked, then re-enable for the next pen stroke.
+            val helper = touchHelper ?: return
+            helper.setRawDrawingEnabled(false)
+            penViewRef?.get()?.postDelayed({ helper.setRawDrawingEnabled(true) }, 50)
         }
         override fun onRawDrawingTouchPointMoveReceived(tp: TouchPoint) {
             moveCount++
@@ -101,12 +111,16 @@ internal class OnyxPenController(
             buf.erase(eraserPath, ERASER_RADIUS, getTransform())
             eraserPath.clear()
             onEraseApplied()
+            val helper = touchHelper ?: return
+            helper.setRawDrawingEnabled(false)
+            penViewRef?.get()?.postDelayed({ helper.setRawDrawingEnabled(true) }, 50)
         }
     }
 
     override fun open(view: View, limitRect: Rect, excludeRects: List<Rect>) {
         val helper = TouchHelper.create(view, callback)
         touchHelper = helper
+        penViewRef = java.lang.ref.WeakReference(view)
         helper.setStrokeWidth(3.0f)
             .setLimitRect(limitRect, excludeRects)
             .openRawDrawing()
@@ -204,8 +218,15 @@ internal class PenOverlay(
                 controller.resetRenderBuffer()
                 notifyStrokeView()
             }
+            false
+        } else {
+            // Stylus/eraser event — consume it so the WebView doesn't scroll.
+            val hasPen = (0 until event.pointerCount).any {
+                val t = event.getToolType(it)
+                t == MotionEvent.TOOL_TYPE_STYLUS || t == MotionEvent.TOOL_TYPE_ERASER
+            }
+            hasPen
         }
-        false
     }
 
     private val scrollListener = object : View.OnScrollChangeListener {

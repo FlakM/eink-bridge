@@ -13,6 +13,7 @@ import org.junit.Test
 class TouchRoutingTest {
     private val finger = { _: Int -> 1 }  // TOOL_TYPE_FINGER
     private val stylus = { _: Int -> 2 }  // TOOL_TYPE_STYLUS
+    private val eraser = { _: Int -> 4 }  // TOOL_TYPE_ERASER
 
     @Test fun fingerDownDisablesRawDrawing() {
         assertEquals(false, rawDrawingAction(1, finger, actionDown))
@@ -51,6 +52,14 @@ class TouchRoutingTest {
 
     @Test fun stylusCancelIsNoop() {
         assertNull(rawDrawingAction(1, stylus, actionCancel))
+    }
+
+    @Test fun eraserDownIsNoop() {
+        assertNull(rawDrawingAction(1, eraser, actionDown))
+    }
+
+    @Test fun eraserUpIsNoop() {
+        assertNull(rawDrawingAction(1, eraser, actionUp))
     }
 
     @Test fun stylusMoveIsNoop() {
