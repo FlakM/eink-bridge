@@ -39,7 +39,7 @@ async fn long_poll_returns_on_submit() {
         let start = Instant::now();
         let resp = app2
             .oneshot(
-                Request::get(&format!("/api/sessions/{id2}/result"))
+                Request::get(format!("/api/sessions/{id2}/result"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -58,7 +58,7 @@ async fn long_poll_returns_on_submit() {
          --{boundary}--\r\n"
     );
     app.oneshot(
-        Request::post(&format!("/api/sessions/{id}/submit"))
+        Request::post(format!("/api/sessions/{id}/submit"))
             .header(
                 "content-type",
                 format!("multipart/form-data; boundary={boundary}"),
@@ -98,7 +98,7 @@ async fn long_poll_timeout_returns_204() {
     let start = Instant::now();
     let resp = app
         .oneshot(
-            Request::get(&format!("/api/sessions/{id}/result"))
+            Request::get(format!("/api/sessions/{id}/result"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -137,7 +137,7 @@ async fn long_poll_cancel_returns_410() {
 
     let poll_handle = tokio::spawn(async move {
         app2.oneshot(
-            Request::get(&format!("/api/sessions/{id2}/result"))
+            Request::get(format!("/api/sessions/{id2}/result"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -147,7 +147,7 @@ async fn long_poll_cancel_returns_410() {
 
     tokio::time::sleep(Duration::from_millis(100)).await;
     app.oneshot(
-        Request::delete(&format!("/api/sessions/{id}"))
+        Request::delete(format!("/api/sessions/{id}"))
             .body(Body::empty())
             .unwrap(),
     )

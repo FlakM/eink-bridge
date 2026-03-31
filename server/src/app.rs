@@ -1,22 +1,33 @@
 use axum::{
     Router,
-    extract::{Multipart, Path, Query, State},
-    http::StatusCode,
-    response::{Html, IntoResponse, Json},
+    body::Bytes,
+    extract::{Path, Query, State},
+    http::{HeaderMap, StatusCode, header},
+    response::{Html, IntoResponse, Json, Response},
     routing::{get, post},
 };
+use futures_util::stream;
+use multer::{Multipart as MulterMultipart, parse_boundary};
 use serde::Deserialize;
 use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 use tokio::sync::{Notify, RwLock};
+use tower_http::services::ServeDir;
+use tower_http::trace::TraceLayer;
 
+use crate::api::{
+    CreateSessionRequest, CreateSessionResponse, SCHEMA_VERSION, SessionDetailResponse,
+    SessionResultResponse, SessionSummaryResponse, SubmitReviewRequest, openapi_spec,
+};
 use crate::render;
-use crate::session::{SessionManager, SessionStatus};
+use crate::session::{Session, SessionManager, SessionStatus, SubmitResult};
+use crate::verdict::{Verdict, parse_verdict};
 
 #[derive(Clone)]
 pub struct AppState {
     pub sessions: Arc<RwLock<SessionManager>>,
     pub notifiers: Arc<RwLock<HashMap<String, Arc<Notify>>>>,
     pub long_poll_seconds: u64,
+    pub assets_dir: PathBuf,
 }
 
 impl AppState {
@@ -29,6 +40,7 @@ impl AppState {
             sessions: Arc::new(RwLock::new(SessionManager::new(state_dir))),
             notifiers: Arc::new(RwLock::new(HashMap::new())),
             long_poll_seconds,
+            assets_dir: default_assets_dir(),
         }
     }
 
@@ -39,17 +51,45 @@ impl AppState {
             .clone()
     }
 
-    async fn notify_session(&self, id: &str) {
-        let map = self.notifiers.read().await;
-        if let Some(n) = map.get(id) {
+    async fn notify_and_cleanup(&self, id: &str) {
+        let mut map = self.notifiers.write().await;
+        if let Some(n) = map.remove(id) {
             n.notify_waiters();
         }
     }
 }
 
+fn default_assets_dir() -> PathBuf {
+    if let Ok(exe) = std::env::current_exe() {
+        let share_assets = exe
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join("../share/eink-bridge/assets");
+        if share_assets.exists() {
+            return share_assets;
+        }
+    }
+    PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/assets"))
+}
+
+const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
+
+use crate::api::AnnotationGroup;
+
+type SubmitPayload = (
+    String,
+    Vec<String>,
+    Option<Verdict>,
+    Option<serde_json::Value>,
+    Vec<AnnotationGroup>,
+);
+type SubmitError = (StatusCode, String);
+
 pub fn build_app(state: AppState) -> Router {
+    let assets_dir = state.assets_dir.clone();
     Router::new()
         .route("/api/health", get(health))
+        .route("/api/openapi.json", get(openapi_json))
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route(
             "/api/sessions/{id}",
@@ -58,6 +98,9 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/sessions/{id}/result", get(get_result))
         .route("/api/sessions/{id}/submit", post(submit_review))
         .route("/session/{id}", get(render_session))
+        .nest_service("/assets", ServeDir::new(assets_dir))
+        .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY_SIZE))
+        .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
 
@@ -65,25 +108,77 @@ async fn health() -> &'static str {
     "ok"
 }
 
+async fn openapi_json() -> Json<serde_json::Value> {
+    Json(openapi_spec())
+}
+
 #[derive(Deserialize, Default)]
 struct CreateParams {
     title: Option<String>,
+    callback_url: Option<String>,
 }
 
 async fn create_session(
     State(state): State<AppState>,
     Query(params): Query<CreateParams>,
-    body: String,
-) -> impl IntoResponse {
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let content_type = content_type(&headers);
+    let request = if content_type.starts_with("application/json") {
+        match serde_json::from_slice::<CreateSessionRequest>(&body) {
+            Ok(mut request) => {
+                if request.schema_version.is_none() {
+                    request.schema_version = Some(SCHEMA_VERSION);
+                }
+                if request.title.is_none() {
+                    request.title = params.title.clone();
+                }
+                if request.callback_url.is_none() {
+                    request.callback_url = params.callback_url.clone();
+                }
+                request
+            }
+            Err(error) => return bad_request(format!("invalid create-session JSON: {error}")),
+        }
+    } else {
+        let content = match String::from_utf8(body.to_vec()) {
+            Ok(content) => content,
+            Err(error) => return bad_request(format!("request body must be valid UTF-8: {error}")),
+        };
+        CreateSessionRequest {
+            schema_version: Some(SCHEMA_VERSION),
+            title: params.title,
+            content,
+            callback_url: params.callback_url,
+            tags: HashMap::new(),
+        }
+    };
+
+    let content_len = request.content.len();
     let mut mgr = state.sessions.write().await;
-    let session = mgr.create(body, params.title);
+    let session = mgr.create(
+        request.content,
+        request.title,
+        request.callback_url,
+        request.tags,
+    );
+    tracing::info!(
+        id = %session.id,
+        title = ?session.title,
+        content_bytes = content_len,
+        "session created"
+    );
+
     (
         StatusCode::CREATED,
-        Json(serde_json::json!({
-            "id": session.id,
-            "url": format!("/session/{}", session.id),
-        })),
+        Json(CreateSessionResponse {
+            schema_version: SCHEMA_VERSION,
+            id: session.id.clone(),
+            url: format!("/session/{}", session.id),
+        }),
     )
+        .into_response()
 }
 
 #[derive(Deserialize, Default)]
@@ -94,41 +189,32 @@ struct ListParams {
 async fn list_sessions(
     State(state): State<AppState>,
     Query(params): Query<ListParams>,
-) -> impl IntoResponse {
+) -> Json<Vec<SessionSummaryResponse>> {
     let mgr = state.sessions.read().await;
     let all = mgr.list();
     let mut filtered: Vec<_> = all
         .into_iter()
         .filter(|s| match &params.status {
-            Some(st) => format!("{:?}", s.status).to_lowercase() == st.to_lowercase(),
+            Some(st) => s.status.as_str().eq_ignore_ascii_case(st),
             None => true,
         })
         .collect();
     filtered.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-    let result: Vec<_> = filtered
-        .iter()
-        .map(|s| {
-            serde_json::json!({
-                "id": s.id,
-                "title": s.title,
-                "status": format!("{:?}", s.status),
-                "created_at": s.created_at,
-                "updated_at": s.updated_at,
-            })
-        })
-        .collect();
-    Json(result)
+    Json(
+        filtered
+            .iter()
+            .map(|s| SessionSummaryResponse::from_session(s))
+            .collect(),
+    )
 }
 
-async fn get_session(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+async fn get_session(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<SessionDetailResponse>, StatusCode> {
     let mgr = state.sessions.read().await;
     match mgr.get(&id) {
-        Some(s) => Ok(Json(serde_json::json!({
-            "id": s.id,
-            "title": s.title,
-            "status": format!("{:?}", s.status),
-            "created_at": s.created_at,
-        }))),
+        Some(s) => Ok(Json(SessionDetailResponse::from_session(s))),
         None => Err(StatusCode::NOT_FOUND),
     }
 }
@@ -140,59 +226,73 @@ async fn cancel_session(
     let mut mgr = state.sessions.write().await;
     match mgr.cancel(&id) {
         true => {
+            tracing::info!(id = %id, "session cancelled");
+            let webhook = mgr.get(&id).and_then(webhook_payload);
             drop(mgr);
-            state.notify_session(&id).await;
+            state.notify_and_cleanup(&id).await;
+            if let Some((url, body)) = webhook {
+                fire_webhook(url, body);
+            }
             StatusCode::OK
         }
         false => StatusCode::NOT_FOUND,
     }
 }
 
-async fn get_result(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
-    // Check if session exists and is already resolved
+fn webhook_payload(session: &Session) -> Option<(String, SessionResultResponse)> {
+    session
+        .callback_url
+        .clone()
+        .map(|url| (url, SessionResultResponse::from_session(session)))
+}
+
+fn fire_webhook(callback_url: String, body: SessionResultResponse) {
+    tokio::spawn(async move {
+        let client = reqwest::Client::new();
+        if let Err(error) = client.post(&callback_url).json(&body).send().await {
+            tracing::warn!("webhook POST to {callback_url} failed: {error}");
+        }
+    });
+}
+
+async fn get_result(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<SessionResultResponse>, StatusCode> {
     {
         let mgr = state.sessions.read().await;
         match mgr.get(&id) {
             None => return Err(StatusCode::NOT_FOUND),
             Some(s) if s.status == SessionStatus::Submitted => {
-                return Ok(Json(serde_json::json!({
-                    "id": s.id,
-                    "status": "submitted",
-                    "typed_notes": s.typed_notes,
-                    "annotation_images": s.annotation_images,
-                })));
+                return Ok(Json(SessionResultResponse::from_session(s)));
             }
-            Some(s) if s.status == SessionStatus::Cancelled => {
-                return Err(StatusCode::GONE);
-            }
-            Some(s) if s.status == SessionStatus::Expired => {
+            Some(s) if matches!(s.status, SessionStatus::Cancelled | SessionStatus::Expired) => {
                 return Err(StatusCode::GONE);
             }
             _ => {}
         }
     }
 
+    tracing::debug!(id = %id, "long-poll waiting");
     let notify = state.get_or_create_notify(&id).await;
-    let timeout = Duration::from_secs(state.long_poll_seconds);
-
     tokio::select! {
-        _ = notify.notified() => {}
-        _ = tokio::time::sleep(timeout) => {}
+        _ = notify.notified() => {
+            tracing::debug!(id = %id, "long-poll: notified");
+        }
+        _ = tokio::time::sleep(Duration::from_secs(state.long_poll_seconds)) => {
+            tracing::debug!(id = %id, "long-poll: timeout");
+        }
     }
 
-    // Re-check after wake
     let mgr = state.sessions.read().await;
     match mgr.get(&id) {
-        Some(s) if s.status == SessionStatus::Submitted => Ok(Json(serde_json::json!({
-            "id": s.id,
-            "status": "submitted",
-            "typed_notes": s.typed_notes,
-            "annotation_images": s.annotation_images,
-        }))),
-        Some(s) if s.status == SessionStatus::Cancelled || s.status == SessionStatus::Expired => {
+        Some(s) if s.status == SessionStatus::Submitted => {
+            Ok(Json(SessionResultResponse::from_session(s)))
+        }
+        Some(s) if matches!(s.status, SessionStatus::Cancelled | SessionStatus::Expired) => {
             Err(StatusCode::GONE)
         }
-        Some(_) => Err(StatusCode::NO_CONTENT), // still active, timeout
+        Some(_) => Err(StatusCode::NO_CONTENT),
         None => Err(StatusCode::NOT_FOUND),
     }
 }
@@ -200,38 +300,187 @@ async fn get_result(State(state): State<AppState>, Path(id): Path<String>) -> im
 async fn submit_review(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    mut multipart: Multipart,
-) -> impl IntoResponse {
-    let mut typed_notes = String::new();
-    let mut images: Vec<String> = Vec::new();
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let Some(session) = ({
+        let mgr = state.sessions.read().await;
+        mgr.get(&id).cloned()
+    }) else {
+        tracing::debug!(id = %id, "submit: session not found");
+        return StatusCode::NOT_FOUND.into_response();
+    };
 
-    while let Ok(Some(field)) = multipart.next_field().await {
+    let content_type = content_type(&headers);
+    let parsed = if content_type.starts_with("application/json") {
+        parse_json_submit(&body)
+    } else if content_type.starts_with("multipart/form-data") {
+        parse_multipart_submit(&session, &headers, body).await
+    } else {
+        Err((
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            format!("unsupported content-type: {content_type}"),
+        ))
+    };
+
+    let (typed_notes, images, verdict_override, stroke_data, annotations) = match parsed {
+        Ok(parsed) => parsed,
+        Err((status, message)) => return (status, message).into_response(),
+    };
+
+    let mut mgr = state.sessions.write().await;
+    match mgr.submit(
+        &id,
+        typed_notes,
+        images,
+        verdict_override,
+        stroke_data,
+        annotations,
+    ) {
+        SubmitResult::Ok => {
+            let webhook = mgr.get(&id).and_then(webhook_payload);
+            let verdict = mgr
+                .get(&id)
+                .and_then(|s| s.verdict.as_ref().map(|v| v.as_str().to_string()));
+            let image_count = mgr.get(&id).map(|s| s.annotation_images.len()).unwrap_or(0);
+            drop(mgr);
+            tracing::info!(id = %id, ?verdict, images = image_count, "review submitted");
+            state.notify_and_cleanup(&id).await;
+            if let Some((url, body)) = webhook {
+                fire_webhook(url, body);
+            }
+            StatusCode::OK.into_response()
+        }
+        SubmitResult::NotFound => {
+            tracing::debug!(id = %id, "submit: session not found");
+            StatusCode::NOT_FOUND.into_response()
+        }
+        SubmitResult::NotActive => {
+            tracing::debug!(id = %id, "submit: session not active");
+            StatusCode::CONFLICT.into_response()
+        }
+    }
+}
+
+fn parse_json_submit(body: &[u8]) -> Result<SubmitPayload, SubmitError> {
+    let request: SubmitReviewRequest = serde_json::from_slice(body).map_err(|error| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("invalid submit-review JSON: {error}"),
+        )
+    })?;
+    let verdict_override = parse_verdict_override(request.verdict)?;
+    Ok((
+        request.typed_notes,
+        Vec::new(),
+        verdict_override,
+        None,
+        request.annotations,
+    ))
+}
+
+async fn parse_multipart_submit(
+    session: &Session,
+    headers: &HeaderMap,
+    body: Bytes,
+) -> Result<SubmitPayload, SubmitError> {
+    let content_type = content_type(headers);
+    let boundary = parse_boundary(content_type).map_err(|error| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("invalid multipart boundary: {error}"),
+        )
+    })?;
+    let stream = stream::once(async move { Ok::<Bytes, std::io::Error>(body) });
+    let mut multipart = MulterMultipart::new(stream, boundary);
+    let mut typed_notes = String::new();
+    let mut images = Vec::new();
+    let mut stroke_data: Option<serde_json::Value> = None;
+    let mut annotations: Vec<AnnotationGroup> = Vec::new();
+
+    while let Some(field) = multipart.next_field().await.map_err(|error| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("failed to parse multipart body: {error}"),
+        )
+    })? {
         let name = field.name().unwrap_or("").to_string();
         match name.as_str() {
             "typed_notes" => {
-                typed_notes = field.text().await.unwrap_or_default();
+                typed_notes = field.text().await.map_err(|error| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        format!("failed to read typed_notes: {error}"),
+                    )
+                })?;
             }
             "annotation" => {
-                let data = field.bytes().await.unwrap_or_default();
-                let mgr = state.sessions.read().await;
-                if let Some(session) = mgr.get(&id) {
-                    let img_path = session.save_annotation(&data);
-                    images.push(img_path);
+                let data = field.bytes().await.map_err(|error| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        format!("failed to read annotation: {error}"),
+                    )
+                })?;
+                images.push(session.save_annotation(&data));
+            }
+            "stroke_data" => {
+                let text = field.text().await.map_err(|error| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        format!("failed to read stroke_data: {error}"),
+                    )
+                })?;
+                if !text.is_empty() {
+                    stroke_data = serde_json::from_str(&text).ok();
+                }
+            }
+            "annotations" => {
+                let text = field.text().await.map_err(|error| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        format!("failed to read annotations: {error}"),
+                    )
+                })?;
+                if !text.is_empty() {
+                    annotations = serde_json::from_str(&text).map_err(|error| {
+                        (
+                            StatusCode::BAD_REQUEST,
+                            format!("invalid annotations JSON: {error}"),
+                        )
+                    })?;
                 }
             }
             _ => {}
         }
     }
 
-    let mut mgr = state.sessions.write().await;
-    match mgr.submit(&id, typed_notes, images) {
-        true => {
-            drop(mgr);
-            state.notify_session(&id).await;
-            StatusCode::OK
-        }
-        false => StatusCode::NOT_FOUND,
+    Ok((typed_notes, images, None, stroke_data, annotations))
+}
+
+fn parse_verdict_override(verdict: Option<String>) -> Result<Option<Verdict>, SubmitError> {
+    match verdict {
+        Some(verdict_text) if verdict_text.trim().is_empty() => Ok(None),
+        Some(verdict_text) => parse_verdict(&verdict_text)
+            .ok_or_else(|| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("invalid verdict: {verdict_text}"),
+                )
+            })
+            .map(Some),
+        None => Ok(None),
     }
+}
+
+fn content_type(headers: &HeaderMap) -> &str {
+    headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("text/plain")
+}
+
+fn bad_request(message: String) -> Response {
+    (StatusCode::BAD_REQUEST, message).into_response()
 }
 
 async fn render_session(
@@ -240,7 +489,13 @@ async fn render_session(
 ) -> impl IntoResponse {
     let mgr = state.sessions.read().await;
     match mgr.get(&id) {
-        Some(s) => Ok(Html(render::to_eink_html(&s.content, &s.id))),
-        None => Err(StatusCode::NOT_FOUND),
+        Some(s) => {
+            tracing::debug!(id = %id, "rendering session HTML");
+            Ok(Html(render::to_eink_html(&s.content, &s.id)))
+        }
+        None => {
+            tracing::debug!(id = %id, "render: session not found");
+            Err(StatusCode::NOT_FOUND)
+        }
     }
 }

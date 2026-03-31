@@ -1,0 +1,17 @@
+{
+  "annotation_images": [],
+  "created_at": "<timestamp>",
+  "has_annotation": false,
+  "id": "<id>",
+  "review_duration_seconds": 0,
+  "schema_version": 1,
+  "status": "Submitted",
+  "stroke_data": null,
+  "tags": {
+    "type": "review"
+  },
+  "title": "Result Doc",
+  "typed_notes": "LGTM: ship it",
+  "updated_at": "<timestamp>",
+  "verdict": "lgtm"
+}

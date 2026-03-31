@@ -51,6 +51,7 @@ internal class OnyxPenController(
     private val getTransform: () -> ViewTransform,
     private val onEraseApplied: () -> Unit = {},
     internal var onStrokeProgress: (() -> Unit)? = null,
+    private val onStrokeCommitted: (() -> Unit)? = null,
 ) : PenInputController {
     private var touchHelper: TouchHelper? = null
     private var penViewRef: java.lang.ref.WeakReference<View>? = null
@@ -84,6 +85,7 @@ internal class OnyxPenController(
             } else {
                 buf.commit()
                 onStrokeProgress?.invoke()
+                onStrokeCommitted?.invoke()
             }
             // Briefly disable raw drawing so pending finger taps on the
             // toolbar aren't blocked, then re-enable for the next pen stroke.
@@ -173,12 +175,17 @@ internal class PenOverlay(
     private val controllerOverride: PenInputController? = null,
     internal val limitRectOverride: Rect? = null,
     internal val transformOverride: (() -> ViewTransform)? = null,
+    /** Called whenever committed strokes change (draw, undo, clear, erase). */
+    private val onStrokesChanged: (() -> Unit)? = null,
 ) {
     private val controller: PenInputController by lazy {
         val c = controllerOverride ?: OnyxPenController(buf, ::currentTransform, onEraseApplied = {
             notifyStrokeView()
             controller.resetRenderBuffer()
-        }, onStrokeProgress = { notifyStrokeViewLive() })
+            onStrokesChanged?.invoke()
+        }, onStrokeProgress = { notifyStrokeViewLive() }, onStrokeCommitted = {
+            onStrokesChanged?.invoke()
+        })
         if (c is OnyxPenController && c.onStrokeProgress == null) {
             c.onStrokeProgress = { notifyStrokeViewLive() }
         }
@@ -241,9 +248,9 @@ internal class PenOverlay(
         excludeView?.addOnLayoutChangeListener(layoutListener)
         webView.setOnTouchListener(touchRouter)
         webView.setOnScrollChangeListener(scrollListener)
-        // Poll scale changes during pinch-zoom via touch events
         setupScaleTracker()
         maybeInit()
+        if (!buf.isEmpty) notifyStrokeView()
     }
 
     /**
@@ -316,12 +323,14 @@ internal class PenOverlay(
         buf.undo()
         notifyStrokeView()
         controller.resetRenderBuffer()
+        onStrokesChanged?.invoke()
     }
 
     fun clearStrokes() {
         buf.clear()
         notifyStrokeView()
         controller.resetRenderBuffer()
+        onStrokesChanged?.invoke()
     }
 
     private fun notifyStrokeView() {
@@ -330,6 +339,60 @@ internal class PenOverlay(
 
     private fun notifyStrokeViewLive() {
         strokeView?.update(buf.allStrokes(), currentTransform())
+    }
+
+    private val _explicitBindings = mutableMapOf<Int, MutableList<ElementEntry>>()
+    val explicitBindings: Map<Int, List<ElementEntry>> get() = _explicitBindings
+
+    fun queryElementMap(callback: (List<ElementEntry>) -> Unit) {
+        webView.evaluateJavascript("JSON.stringify(window.__einkElementMap || [])") { json ->
+            val cleaned = json?.trim()?.removeSurrounding("\"")
+                ?.replace("\\\"", "\"")
+                ?.replace("\\\\", "\\") ?: "[]"
+            try {
+                callback(parseElementMap(cleaned))
+            } catch (_: Exception) {
+                callback(emptyList())
+            }
+        }
+    }
+
+    fun tapToBindElement(screenX: Float, screenY: Float, callback: (ElementEntry?, Boolean) -> Unit) {
+        val t = currentTransform()
+        val docX = t.screenToDocX(screenX)
+        val docY = t.screenToDocY(screenY)
+        webView.evaluateJavascript("window.__einkTapElement($docX, $docY)") { raw ->
+            val cleaned = raw?.trim()?.removeSurrounding("\"")
+                ?.replace("\\\"", "\"")
+                ?.replace("\\\\", "\\") ?: "null"
+            try {
+                val obj = JSONObject(cleaned)
+                val entry = ElementEntry(
+                    i = obj.getInt("i"),
+                    tag = obj.getString("tag"),
+                    id = obj.optString("id", null),
+                    t = 0f, b = 0f, l = 0f, r = 0f,
+                    text = obj.optString("text", ""),
+                )
+                val anchored = obj.getBoolean("anchored")
+                if (anchored) {
+                    val lastStrokeIdx = buf.size - 1
+                    if (lastStrokeIdx >= 0) {
+                        _explicitBindings.getOrPut(lastStrokeIdx) { mutableListOf() }.add(entry)
+                    }
+                } else {
+                    _explicitBindings.values.forEach { list -> list.removeAll { it.i == entry.i } }
+                    _explicitBindings.entries.removeAll { it.value.isEmpty() }
+                }
+                callback(entry, anchored)
+            } catch (_: Exception) {
+                callback(null, false)
+            }
+        }
+    }
+
+    fun clearExplicitBindings() {
+        _explicitBindings.clear()
     }
 
     fun exportToPng(): ByteArray? {

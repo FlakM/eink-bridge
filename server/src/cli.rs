@@ -3,6 +3,8 @@ use reqwest::Client;
 use std::io::Read as _;
 use std::time::{Duration, Instant};
 
+use eink_bridge::api::SCHEMA_VERSION;
+
 #[derive(Parser)]
 #[command(name = "eink-review", about = "E-ink review session CLI")]
 struct Cli {
@@ -28,11 +30,17 @@ enum Command {
         /// Non-blocking: print session ID and exit
         #[arg(long = "async")]
         non_blocking: bool,
+        /// Output result as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Get result of a session
     Result {
         /// Session ID
         id: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Cancel a session
     Cancel {
@@ -58,8 +66,20 @@ async fn main() {
             title,
             timeout,
             non_blocking,
-        } => cmd_push(&client, &cli.server, &file, title, timeout, non_blocking).await,
-        Command::Result { id } => cmd_result(&client, &cli.server, &id).await,
+            json,
+        } => {
+            cmd_push(
+                &client,
+                &cli.server,
+                &file,
+                title,
+                timeout,
+                non_blocking,
+                json,
+            )
+            .await
+        }
+        Command::Result { id, json } => cmd_result(&client, &cli.server, &id, json).await,
         Command::Cancel { id } => cmd_cancel(&client, &cli.server, &id).await,
         Command::List { status } => cmd_list(&client, &cli.server, status).await,
     };
@@ -77,6 +97,7 @@ async fn cmd_push(
     title: Option<String>,
     timeout_minutes: u64,
     non_blocking: bool,
+    json_output: bool,
 ) -> anyhow::Result<()> {
     let content = if file == "-" {
         let mut buf = String::new();
@@ -88,12 +109,15 @@ async fn cmd_push(
 
     let title = title.or_else(|| extract_title(&content));
 
-    let mut url = format!("{server}/api/sessions");
-    if let Some(t) = &title {
-        url = format!("{url}?title={}", urlencoding::encode(t));
-    }
-
-    let resp = client.post(&url).body(content).send().await?;
+    let resp = client
+        .post(format!("{server}/api/sessions"))
+        .json(&serde_json::json!({
+            "schema_version": SCHEMA_VERSION,
+            "title": title,
+            "content": content,
+        }))
+        .send()
+        .await?;
     if !resp.status().is_success() {
         anyhow::bail!("failed to create session: {}", resp.status());
     }
@@ -125,7 +149,12 @@ async fn cmd_push(
         match resp.status().as_u16() {
             200 => {
                 let body: serde_json::Value = resp.json().await?;
-                print_result(id, &body);
+                if json_output {
+                    println!("{}", serde_json::to_string_pretty(&body)?);
+                } else {
+                    print_result(id, &body);
+                }
+                exit_for_verdict(&body);
                 return Ok(());
             }
             204 => continue, // long-poll timeout, retry
@@ -136,7 +165,12 @@ async fn cmd_push(
     }
 }
 
-async fn cmd_result(client: &Client, server: &str, id: &str) -> anyhow::Result<()> {
+async fn cmd_result(
+    client: &Client,
+    server: &str,
+    id: &str,
+    json_output: bool,
+) -> anyhow::Result<()> {
     let resp = client
         .get(format!("{server}/api/sessions/{id}/result"))
         .send()
@@ -145,7 +179,12 @@ async fn cmd_result(client: &Client, server: &str, id: &str) -> anyhow::Result<(
     match resp.status().as_u16() {
         200 => {
             let body: serde_json::Value = resp.json().await?;
-            print_result(id, &body);
+            if json_output {
+                println!("{}", serde_json::to_string_pretty(&body)?);
+            } else {
+                print_result(id, &body);
+            }
+            exit_for_verdict(&body);
             Ok(())
         }
         204 => {
@@ -195,15 +234,63 @@ async fn cmd_list(client: &Client, server: &str, status: Option<String>) -> anyh
     Ok(())
 }
 
+fn exit_for_verdict(body: &serde_json::Value) {
+    let code = match body["verdict"].as_str() {
+        Some("lgtm") => 0,
+        Some("changes") => 2,
+        Some("reject") => 3,
+        Some("question") => 4,
+        _ => return, // no verdict → keep default exit 0
+    };
+    if code != 0 {
+        std::process::exit(code);
+    }
+}
+
 fn print_result(id: &str, body: &serde_json::Value) {
     println!("--- review notes (session {id}) ---");
     println!();
+    if let Some(v) = body["verdict"].as_str() {
+        println!("Verdict: {}", v.to_uppercase());
+        println!();
+    }
     if let Some(notes) = body["typed_notes"].as_str()
         && !notes.is_empty()
     {
         println!("## Typed Notes");
         println!("{notes}");
         println!();
+    }
+    if let Some(annotations) = body["annotations"].as_array()
+        && !annotations.is_empty()
+    {
+        println!("## Annotations");
+        for ann in annotations {
+            if let Some(anchor) = ann.get("anchor") {
+                let elements = anchor["elements"].as_array();
+                let anchor_type = anchor["type"].as_str().unwrap_or("unknown");
+                if let Some(elems) = elements {
+                    let label: Vec<String> = elems
+                        .iter()
+                        .map(|e| {
+                            let tag = e["tag"].as_str().unwrap_or("?");
+                            let text = e["text"].as_str().unwrap_or("");
+                            let preview = if text.len() > 60 { &text[..60] } else { text };
+                            format!("{tag}: {preview}")
+                        })
+                        .collect();
+                    println!("### On {} ({})", label.join(", "), anchor_type);
+                }
+            } else {
+                println!("### Unanchored");
+            }
+            if let Some(text) = ann["recognized_text"].as_str()
+                && !text.is_empty()
+            {
+                println!("> {text}");
+            }
+            println!();
+        }
     }
     if let Some(images) = body["annotation_images"].as_array()
         && !images.is_empty()
@@ -225,4 +312,62 @@ fn extract_title(markdown: &str) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_title;
+
+    #[test]
+    fn finds_h1_on_first_line() {
+        assert_eq!(
+            extract_title("# My Doc\n\nsome text"),
+            Some("My Doc".into())
+        );
+    }
+
+    #[test]
+    fn finds_h1_not_on_first_line() {
+        assert_eq!(
+            extract_title("intro\n\n# Buried Title\n\ntext"),
+            Some("Buried Title".into())
+        );
+    }
+
+    #[test]
+    fn trims_trailing_whitespace_from_title() {
+        assert_eq!(extract_title("#  Padded  \n\n"), Some("Padded".into()));
+    }
+
+    #[test]
+    fn returns_none_when_no_h1() {
+        assert_eq!(extract_title("## Only H2\n\nsome text"), None);
+        assert_eq!(extract_title("plain text only"), None);
+        assert_eq!(extract_title(""), None);
+    }
+
+    #[test]
+    fn ignores_h2_and_deeper() {
+        assert_eq!(extract_title("## Section\n### Sub"), None);
+    }
+
+    #[test]
+    fn requires_space_after_hash() {
+        // "#NoSpace" is not a valid h1
+        assert_eq!(extract_title("#NoSpace\n\ntext"), None);
+    }
+
+    #[test]
+    fn returns_first_h1_when_multiple_exist() {
+        assert_eq!(extract_title("# First\n\n# Second"), Some("First".into()));
+    }
+
+    #[test]
+    fn works_with_indented_heading() {
+        // trimmed before checking, so indented h1 is recognized
+        assert_eq!(
+            extract_title("  # Indented\n\ntext"),
+            Some("Indented".into())
+        );
+    }
 }

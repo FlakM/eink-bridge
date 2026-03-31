@@ -1,0 +1,4 @@
+{
+  "description": "cancelled session returns 410 GONE",
+  "status_code": 410
+}

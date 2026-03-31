@@ -24,6 +24,10 @@ struct Cli {
     #[arg(long, default_value = "2")]
     poll_interval: u64,
 
+    /// Only process this specific session ID (implies --once)
+    #[arg(long)]
+    session_id: Option<String>,
+
     /// Handle one session and exit
     #[arg(long)]
     once: bool,
@@ -39,7 +43,27 @@ async fn main() -> anyhow::Result<()> {
     let client = Client::new();
 
     loop {
-        let sessions = poll_active(&client, &cli.server).await?;
+        let sessions = if let Some(ref id) = cli.session_id {
+            // Fetch the specific session directly
+            let resp = client
+                .get(format!("{}/api/sessions/{id}", cli.server))
+                .send()
+                .await?;
+            if resp.status().is_success() {
+                let s: serde_json::Value = resp.json().await?;
+                if s["status"].as_str() == Some("Active") {
+                    vec![s]
+                } else {
+                    tokio::time::sleep(Duration::from_secs(cli.poll_interval)).await;
+                    continue;
+                }
+            } else {
+                tokio::time::sleep(Duration::from_secs(cli.poll_interval)).await;
+                continue;
+            }
+        } else {
+            poll_active(&client, &cli.server).await?
+        };
         for session in sessions {
             let id = session["id"].as_str().unwrap_or_default();
             if id.is_empty() {
@@ -85,7 +109,7 @@ async fn main() -> anyhow::Result<()> {
                 eprintln!("mock-device: submit failed for {id}: {}", resp.status());
             }
 
-            if cli.once {
+            if cli.once || cli.session_id.is_some() {
                 return Ok(());
             }
         }

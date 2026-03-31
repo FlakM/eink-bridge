@@ -1,0 +1,400 @@
+{
+  "components": {
+    "schemas": {
+      "AnnotationGroup": {
+        "description": "A group of strokes optionally anchored to document elements",
+        "properties": {
+          "anchor": {
+            "description": "Anchor binding strokes to document elements"
+          },
+          "recognized_text": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "strokes": {
+            "description": "Array of strokes, each stroke is an array of [x,y] points",
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "CreateSessionRequest": {
+        "properties": {
+          "callback_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "content": {
+            "type": "string"
+          },
+          "schema_version": {
+            "type": "integer"
+          },
+          "tags": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "content"
+        ],
+        "type": "object"
+      },
+      "CreateSessionResponse": {
+        "properties": {
+          "id": "<id>",
+          "schema_version": {
+            "type": "integer"
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ElementRef": {
+        "properties": {
+          "section_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tag": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "SessionDetailResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/SessionSummaryResponse"
+          },
+          {
+            "properties": {
+              "callback_url": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "SessionResultResponse": {
+        "properties": {
+          "annotation_images": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "annotations": {
+            "items": {
+              "$ref": "#/components/schemas/AnnotationGroup"
+            },
+            "type": "array"
+          },
+          "created_at": "<timestamp>",
+          "has_annotation": {
+            "type": "boolean"
+          },
+          "id": "<id>",
+          "review_duration_seconds": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "schema_version": {
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          },
+          "stroke_data": {
+            "description": "Raw pen strokes: {canvas_width, canvas_height, strokes:[[[x,y],...],...]}"
+          },
+          "tags": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "typed_notes": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "updated_at": "<timestamp>",
+          "verdict": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "SessionSummaryResponse": {
+        "properties": {
+          "created_at": "<timestamp>",
+          "id": "<id>",
+          "schema_version": {
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          },
+          "tags": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "updated_at": "<timestamp>"
+        },
+        "type": "object"
+      },
+      "SubmitReviewRequest": {
+        "properties": {
+          "annotations": {
+            "items": {
+              "$ref": "#/components/schemas/AnnotationGroup"
+            },
+            "type": "array"
+          },
+          "schema_version": {
+            "type": "integer"
+          },
+          "typed_notes": {
+            "type": "string"
+          },
+          "verdict": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "AI-friendly review session API for pushing markdown to the e-ink device and collecting structured review results.",
+    "title": "E-Ink Bridge API",
+    "version": "1.0.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/health": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Server healthy"
+          }
+        },
+        "summary": "Health check"
+      }
+    },
+    "/api/openapi.json": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "OpenAPI spec"
+          }
+        },
+        "summary": "OpenAPI document"
+      }
+    },
+    "/api/sessions": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SessionSummaryResponse"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Session summaries"
+          }
+        },
+        "summary": "List sessions"
+      },
+      "post": {
+        "description": "Supports either plain text markdown body with optional query params or JSON request body.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSessionRequest"
+              }
+            },
+            "text/plain": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateSessionResponse"
+                }
+              }
+            },
+            "description": "Session created"
+          }
+        },
+        "summary": "Create session"
+      }
+    },
+    "/api/sessions/{id}": {
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "Session cancelled"
+          },
+          "404": {
+            "description": "Session not found"
+          }
+        },
+        "summary": "Cancel session"
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionDetailResponse"
+                }
+              }
+            },
+            "description": "Session detail"
+          },
+          "404": {
+            "description": "Session not found"
+          }
+        },
+        "summary": "Get session metadata"
+      }
+    },
+    "/api/sessions/{id}/result": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionResultResponse"
+                }
+              }
+            },
+            "description": "Submitted review result"
+          },
+          "204": {
+            "description": "No change yet"
+          },
+          "404": {
+            "description": "Session not found"
+          },
+          "410": {
+            "description": "Session cancelled or expired"
+          }
+        },
+        "summary": "Poll session result"
+      }
+    },
+    "/api/sessions/{id}/submit": {
+      "post": {
+        "description": "Supports multipart form submissions from the Android client and JSON submissions from AI/native clients.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubmitReviewRequest"
+              }
+            },
+            "multipart/form-data": {
+              "schema": {
+                "properties": {
+                  "annotation": {
+                    "format": "binary",
+                    "type": "string"
+                  },
+                  "annotations": {
+                    "description": "JSON array of AnnotationGroup objects",
+                    "type": "string"
+                  },
+                  "stroke_data": {
+                    "description": "JSON: {canvas_width, canvas_height, strokes:[[[x,y],...],...]}",
+                    "type": "string"
+                  },
+                  "typed_notes": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Review submitted"
+          },
+          "404": {
+            "description": "Session not found"
+          },
+          "409": {
+            "description": "Session not active"
+          }
+        },
+        "summary": "Submit review"
+      }
+    }
+  }
+}

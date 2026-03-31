@@ -1,0 +1,5 @@
+{
+  "id": "<id>",
+  "schema_version": 1,
+  "url": "/session/<id>"
+}

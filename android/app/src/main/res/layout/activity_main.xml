@@ -144,6 +144,15 @@
             android:textSize="36sp"
             android:textColor="#000000" />
 
+        <Button
+            android:id="@+id/btnLink"
+            style="?android:attr/buttonBarButtonStyle"
+            android:layout_width="64dp"
+            android:layout_height="64dp"
+            android:text="🔗"
+            android:textSize="36sp"
+            android:textColor="#000000" />
+
         <View
             android:layout_width="2dp"
             android:layout_height="48dp"

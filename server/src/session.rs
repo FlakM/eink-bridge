@@ -4,7 +4,15 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
+use tracing::{error, warn};
 use uuid::Uuid;
+
+use crate::api::{AnnotationGroup, SCHEMA_VERSION};
+use crate::verdict::{Verdict, parse_verdict};
+
+fn default_schema_version() -> u32 {
+    SCHEMA_VERSION
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SessionStatus {
@@ -14,34 +22,78 @@ pub enum SessionStatus {
     Expired,
 }
 
+pub enum SubmitResult {
+    Ok,
+    NotFound,
+    NotActive,
+}
+
+impl SessionStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SessionStatus::Active => "Active",
+            SessionStatus::Submitted => "Submitted",
+            SessionStatus::Cancelled => "Cancelled",
+            SessionStatus::Expired => "Expired",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
     pub id: String,
+    #[serde(default)]
     pub title: Option<String>,
     pub status: SessionStatus,
     pub content: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    #[serde(default)]
     pub typed_notes: Option<String>,
+    #[serde(default)]
+    pub verdict: Option<Verdict>,
+    #[serde(default)]
     pub annotation_images: Vec<String>,
+    #[serde(default)]
+    pub stroke_data: Option<serde_json::Value>,
+    #[serde(default)]
+    pub annotations: Vec<AnnotationGroup>,
+    #[serde(default)]
+    pub callback_url: Option<String>,
+    #[serde(default)]
+    pub tags: HashMap<String, String>,
     pub state_dir: PathBuf,
 }
 
 impl Session {
     pub fn save_annotation(&self, data: &[u8]) -> String {
         let dir = self.state_dir.join("annotations");
-        fs::create_dir_all(&dir).ok();
+        if let Err(e) = fs::create_dir_all(&dir) {
+            error!(path = %dir.display(), error = %e, "failed to create annotations dir");
+        }
         let filename = format!("img_{}.png", Uuid::new_v4().as_simple());
         let path = dir.join(&filename);
-        fs::write(&path, data).ok();
+        if let Err(e) = fs::write(&path, data) {
+            error!(path = %path.display(), error = %e, "failed to write annotation");
+        }
         path.to_string_lossy().to_string()
     }
 
     fn persist(&self) {
-        fs::create_dir_all(&self.state_dir).ok();
+        if let Err(e) = fs::create_dir_all(&self.state_dir) {
+            error!(path = %self.state_dir.display(), error = %e, "failed to create session dir");
+            return;
+        }
         let path = self.state_dir.join("session.json");
-        if let Ok(json) = serde_json::to_string_pretty(self) {
-            fs::write(path, json).ok();
+        match serde_json::to_string_pretty(self) {
+            Ok(json) => {
+                if let Err(e) = fs::write(&path, json) {
+                    error!(path = %path.display(), error = %e, "failed to persist session");
+                }
+            }
+            Err(e) => error!(session = %self.id, error = %e, "failed to serialize session"),
         }
     }
 }
@@ -53,7 +105,9 @@ pub struct SessionManager {
 
 impl SessionManager {
     pub fn new(state_dir: PathBuf) -> Self {
-        fs::create_dir_all(&state_dir).ok();
+        if let Err(e) = fs::create_dir_all(&state_dir) {
+            error!(path = %state_dir.display(), error = %e, "failed to create state dir");
+        }
         let mut mgr = Self {
             sessions: HashMap::new(),
             state_dir,
@@ -68,6 +122,7 @@ impl SessionManager {
             Ok(e) => e,
             Err(_) => return,
         };
+        let mut loaded = 0usize;
         for entry in entries.flatten() {
             let json_path = entry.path().join("session.json");
             if json_path.exists()
@@ -77,15 +132,32 @@ impl SessionManager {
                     || session.status == SessionStatus::Submitted)
             {
                 self.sessions.insert(session.id.clone(), session);
+                loaded += 1;
             }
+        }
+        if loaded > 0 {
+            tracing::info!(count = loaded, "restored sessions from disk");
         }
     }
 
-    pub fn create(&mut self, content: String, title: Option<String>) -> Session {
-        let id = Uuid::new_v4().as_simple().to_string()[..8].to_string();
+    pub fn create(
+        &mut self,
+        content: String,
+        title: Option<String>,
+        callback_url: Option<String>,
+        tags: HashMap<String, String>,
+    ) -> Session {
+        let id = loop {
+            let candidate = Uuid::new_v4().as_simple().to_string()[..12].to_string();
+            if !self.sessions.contains_key(&candidate) {
+                break candidate;
+            }
+            warn!(id = %candidate, "session ID collision, retrying");
+        };
         let session_dir = self.state_dir.join("sessions").join(&id);
 
         let session = Session {
+            schema_version: SCHEMA_VERSION,
             id: id.clone(),
             title,
             status: SessionStatus::Active,
@@ -93,7 +165,12 @@ impl SessionManager {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             typed_notes: None,
+            verdict: None,
             annotation_images: Vec::new(),
+            stroke_data: None,
+            annotations: Vec::new(),
+            callback_url,
+            tags,
             state_dir: session_dir,
         };
         session.persist();
@@ -109,13 +186,6 @@ impl SessionManager {
         self.sessions.values().collect()
     }
 
-    pub fn list_by_status(&self, status: &SessionStatus) -> Vec<&Session> {
-        self.sessions
-            .values()
-            .filter(|s| s.status == *status)
-            .collect()
-    }
-
     pub fn cancel(&mut self, id: &str) -> bool {
         if let Some(s) = self.sessions.get_mut(id) {
             s.status = SessionStatus::Cancelled;
@@ -127,16 +197,29 @@ impl SessionManager {
         }
     }
 
-    pub fn submit(&mut self, id: &str, typed_notes: String, images: Vec<String>) -> bool {
-        if let Some(s) = self.sessions.get_mut(id) {
-            s.typed_notes = Some(typed_notes);
-            s.annotation_images = images;
-            s.status = SessionStatus::Submitted;
-            s.updated_at = Utc::now();
-            s.persist();
-            true
-        } else {
-            false
+    pub fn submit(
+        &mut self,
+        id: &str,
+        typed_notes: String,
+        images: Vec<String>,
+        verdict_override: Option<Verdict>,
+        stroke_data: Option<serde_json::Value>,
+        annotations: Vec<AnnotationGroup>,
+    ) -> SubmitResult {
+        match self.sessions.get_mut(id) {
+            None => SubmitResult::NotFound,
+            Some(s) if s.status != SessionStatus::Active => SubmitResult::NotActive,
+            Some(s) => {
+                s.verdict = verdict_override.or_else(|| parse_verdict(&typed_notes));
+                s.typed_notes = Some(typed_notes);
+                s.annotation_images = images;
+                s.stroke_data = stroke_data;
+                s.annotations = annotations;
+                s.status = SessionStatus::Submitted;
+                s.updated_at = Utc::now();
+                s.persist();
+                SubmitResult::Ok
+            }
         }
     }
 
@@ -151,5 +234,150 @@ impl SessionManager {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn mgr() -> (SessionManager, tempfile::TempDir) {
+        let dir = tempdir().unwrap();
+        (SessionManager::new(dir.path().to_path_buf()), dir)
+    }
+
+    #[test]
+    fn create_returns_active_session() {
+        let (mut m, _d) = mgr();
+        let s = m.create("# Hello".into(), Some("title".into()), None, HashMap::new());
+        assert_eq!(s.status, SessionStatus::Active);
+        assert_eq!(s.title.unwrap(), "title");
+    }
+
+    #[test]
+    fn get_returns_created_session() {
+        let (mut m, _d) = mgr();
+        let s = m.create("content".into(), None, None, HashMap::new());
+        assert!(m.get(&s.id).is_some());
+    }
+
+    #[test]
+    fn get_unknown_returns_none() {
+        let (m, _d) = mgr();
+        assert!(m.get("nope").is_none());
+    }
+
+    #[test]
+    fn cancel_known_session_returns_true() {
+        let (mut m, _d) = mgr();
+        let s = m.create("x".into(), None, None, HashMap::new());
+        assert!(m.cancel(&s.id));
+        assert_eq!(m.get(&s.id).unwrap().status, SessionStatus::Cancelled);
+    }
+
+    #[test]
+    fn cancel_unknown_session_returns_false() {
+        let (mut m, _d) = mgr();
+        assert!(!m.cancel("ghost"));
+    }
+
+    #[test]
+    fn submit_known_session_returns_ok() {
+        let (mut m, _d) = mgr();
+        let s = m.create("x".into(), None, None, HashMap::new());
+        assert!(matches!(
+            m.submit(&s.id, "notes".into(), vec![], None, None, vec![]),
+            SubmitResult::Ok
+        ));
+        let updated = m.get(&s.id).unwrap();
+        assert_eq!(updated.status, SessionStatus::Submitted);
+        assert_eq!(updated.typed_notes.as_deref(), Some("notes"));
+    }
+
+    #[test]
+    fn submit_unknown_session_returns_not_found() {
+        let (mut m, _d) = mgr();
+        assert!(matches!(
+            m.submit("ghost", "notes".into(), vec![], None, None, vec![]),
+            SubmitResult::NotFound
+        ));
+    }
+
+    #[test]
+    fn submit_already_submitted_returns_not_active() {
+        let (mut m, _d) = mgr();
+        let s = m.create("x".into(), None, None, HashMap::new());
+        m.submit(&s.id, "first".into(), vec![], None, None, vec![]);
+        assert!(matches!(
+            m.submit(&s.id, "second".into(), vec![], None, None, vec![]),
+            SubmitResult::NotActive
+        ));
+    }
+
+    #[test]
+    fn expire_stale_only_affects_active_sessions() {
+        let (mut m, _d) = mgr();
+        let active = m.create("a".into(), None, None, HashMap::new());
+        let will_cancel = m.create("b".into(), None, None, HashMap::new());
+        m.cancel(&will_cancel.id);
+
+        m.expire_stale(Duration::ZERO);
+
+        assert_eq!(m.get(&active.id).unwrap().status, SessionStatus::Expired);
+        // Cancelled should remain Cancelled, not change to Expired
+        assert_eq!(
+            m.get(&will_cancel.id).unwrap().status,
+            SessionStatus::Cancelled
+        );
+    }
+
+    #[test]
+    fn list_returns_all_sessions() {
+        let (mut m, _d) = mgr();
+        m.create("a".into(), None, None, HashMap::new());
+        m.create("b".into(), None, None, HashMap::new());
+        assert_eq!(m.list().len(), 2);
+    }
+
+    #[test]
+    fn ids_are_12_chars() {
+        let (mut m, _d) = mgr();
+        let s = m.create("x".into(), None, None, HashMap::new());
+        assert_eq!(s.id.len(), 12);
+        assert!(s.id.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn status_as_str_matches_expected_strings() {
+        assert_eq!(SessionStatus::Active.as_str(), "Active");
+        assert_eq!(SessionStatus::Submitted.as_str(), "Submitted");
+        assert_eq!(SessionStatus::Cancelled.as_str(), "Cancelled");
+        assert_eq!(SessionStatus::Expired.as_str(), "Expired");
+    }
+
+    #[test]
+    fn status_as_str_case_insensitive_filter_works() {
+        // mirrors the filter logic in list_sessions
+        let matches =
+            |s: &SessionStatus, filter: &str| s.as_str().to_lowercase() == filter.to_lowercase();
+        assert!(matches(&SessionStatus::Active, "active"));
+        assert!(matches(&SessionStatus::Active, "Active"));
+        assert!(matches(&SessionStatus::Active, "ACTIVE"));
+        assert!(!matches(&SessionStatus::Active, "cancelled"));
+    }
+
+    #[test]
+    fn session_persists_to_disk_and_reloads() {
+        let dir = tempdir().unwrap();
+        let id = {
+            let mut m = SessionManager::new(dir.path().to_path_buf());
+            m.create("persisted".into(), Some("doc".into()), None, HashMap::new())
+                .id
+        };
+        let m2 = SessionManager::new(dir.path().to_path_buf());
+        let s = m2.get(&id).unwrap();
+        assert_eq!(s.title.as_deref(), Some("doc"));
+        assert_eq!(s.status, SessionStatus::Active);
     }
 }

@@ -1,0 +1,12 @@
+{
+  "callback_url": "http://localhost/hook",
+  "created_at": "<timestamp>",
+  "id": "<id>",
+  "schema_version": 1,
+  "status": "Active",
+  "tags": {
+    "env": "test"
+  },
+  "title": "Detail Test",
+  "updated_at": "<timestamp>"
+}

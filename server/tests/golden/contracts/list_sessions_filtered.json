@@ -1,0 +1,13 @@
+[
+  {
+    "created_at": "<timestamp>",
+    "id": "<id>",
+    "schema_version": 1,
+    "status": "Submitted",
+    "tags": {
+      "purpose": "filter"
+    },
+    "title": null,
+    "updated_at": "<timestamp>"
+  }
+]

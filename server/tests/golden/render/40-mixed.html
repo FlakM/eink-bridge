@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=2800, initial-scale=1.0, minimum-scale=0.3, maximum-scale=3.0, user-scalable=yes">
+<title>E-Ink Review</title>
+<style>...styles omitted...</style>
+</head>
+<body data-session-id="<session-id>">
+<div id="content"><button id="toc-toggle">&#9776; Contents</button><nav id="toc" class="collapsed"></nav><h1>Architecture Review</h1>
+<p>The system uses a layered approach with three main components.</p>
+<h2>Components</h2>
+<table><thead><tr><th>Component</th><th>Language</th><th>Role</th></tr></thead><tbody>
+<tr><td>Server</td><td>Rust</td><td>HTTP API and rendering</td></tr>
+<tr><td>CLI</td><td>Rust</td><td>Push/pull interface</td></tr>
+<tr><td>App</td><td>Kotlin</td><td>Tablet UI</td></tr>
+</tbody></table>
+<h2>Data Flow</h2>
+<section class="diagram-block" data-kind="mermaid">
+<div class="diagram-header"><span>Diagram</span><span>mermaid</span></div>
+<div class="diagram-body"><div class="diagram-placeholder">Rendering Diagram...</div></div>
+<script type="application/json" class="diagram-payload">{"kind":"mermaid","source":"sequenceDiagram\n  participant C as CLI\n  participant S as Server\n  participant A as App\n  C->>S: POST /api/sessions\n  A->>S: GET /session/{id}\n  A->>S: POST /submit\n  S-->>C: 200 result"}</script>
+</section><h2>Key Code</h2>
+<pre style="background-color:#fdf6e3;">
+<span style="color:#586e75;">pub </span><span style="color:#268bd2;">fn </span><span style="color:#b58900;">render</span><span style="color:#657b83;">(</span><span style="color:#268bd2;">markdown</span><span style="color:#657b83;">: </span><span style="color:#859900;">&amp;</span><span style="color:#268bd2;">str</span><span style="color:#657b83;">) -&gt; String {
+</span><span style="color:#657b83;">    </span><span style="color:#859900;">to_eink_html</span><span style="color:#657b83;">(markdown, </span><span style="color:#839496;">&quot;</span><span style="color:#2aa198;">preview</span><span style="color:#839496;">&quot;</span><span style="color:#657b83;">)
+</span><span style="color:#657b83;">}
+</span></pre>
+<blockquote>
+<p>Note: The renderer handles mermaid, mindmap, and graph blocks natively.</p>
+</blockquote>
+</div>
+<script src="/assets/diagram/mermaid.min.js"></script>
+<script src="/assets/diagram/elk.bundled.js"></script>
+<script>...script omitted...</script>
+<script>...script omitted...</script>
+<script>...script omitted...</script>
+</body>
+</html>

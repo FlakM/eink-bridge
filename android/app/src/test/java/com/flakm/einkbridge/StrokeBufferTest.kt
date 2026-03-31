@@ -228,9 +228,122 @@ class StrokeBufferTest {
         assertTrue(buf.allStrokes().isEmpty())
     }
 
+    @Test fun toJsonAndLoadJsonRoundTrip() {
+        buf.begin(10f, 20f, 5f)
+        buf.addPoint(30f, 40f)
+        buf.end(50f, 60f)
+        buf.begin(100f, 200f, 2f)
+        buf.addPoint(110f, 210f)
+        buf.end(120f, 220f)
+
+        val json = buf.toJson()
+        val restored = StrokeBuffer()
+        restored.loadJson(json)
+
+        assertEquals(buf.size, restored.size)
+        for (i in 0 until buf.size) {
+            assertEquals(buf.strokes[i].width, restored.strokes[i].width, 0.001f)
+            assertEquals(buf.strokes[i].points, restored.strokes[i].points)
+        }
+    }
+
+    @Test fun loadJsonEmptyArray() {
+        buf.begin(0f, 0f); buf.end(10f, 10f)
+        buf.loadJson("[]")
+        assertTrue(buf.isEmpty)
+    }
+
+    @Test fun toJsonEmptyBuffer() {
+        assertEquals("[]", buf.toJson())
+    }
+
     private fun stroke(b: StrokeBuffer) {
         b.begin(0f, 0f)
         b.addPoint(5f, 5f)
         b.end(10f, 10f)
+    }
+
+    // --- Proximity grouping tests ---
+
+    private fun element(i: Int, tag: String, l: Float, t: Float, r: Float, b: Float, text: String = "el$i") =
+        ElementEntry(i = i, tag = tag, id = "section-$i", t = t, b = b, l = l, r = r, text = text)
+
+    @Test fun proximityGroupsStrokeNearElement() {
+        val stroke = Stroke(listOf(100f to 100f, 110f to 110f), 3f)
+        val el = element(0, "H2", 80f, 80f, 200f, 130f)
+        val (groups, unanchored) = groupStrokesWithProximity(listOf(stroke), listOf(el))
+        assertEquals(1, groups.size)
+        assertTrue(unanchored.isEmpty())
+        assertTrue(groups[0].anchor is Anchor.Proximity)
+        assertEquals("H2", (groups[0].anchor as Anchor.Proximity).elements[0].tag)
+    }
+
+    @Test fun strokeFarFromAllElementsIsUnanchored() {
+        val stroke = Stroke(listOf(500f to 500f, 510f to 510f), 3f)
+        val el = element(0, "P", 10f, 10f, 50f, 30f)
+        val (groups, unanchored) = groupStrokesWithProximity(listOf(stroke), listOf(el))
+        assertTrue(groups.isEmpty())
+        assertEquals(1, unanchored.size)
+    }
+
+    @Test fun multipleStrokesNearSameElementGrouped() {
+        val s1 = Stroke(listOf(100f to 100f, 110f to 110f), 3f)
+        val s2 = Stroke(listOf(105f to 105f, 115f to 115f), 3f)
+        val el = element(0, "PRE", 80f, 80f, 200f, 130f)
+        val (groups, unanchored) = groupStrokesWithProximity(listOf(s1, s2), listOf(el))
+        assertEquals(1, groups.size)
+        assertEquals(2, groups[0].strokes.size)
+        assertTrue(unanchored.isEmpty())
+    }
+
+    @Test fun strokesGroupToNearestElement() {
+        val s1 = Stroke(listOf(100f to 100f, 110f to 110f), 3f)
+        val s2 = Stroke(listOf(300f to 300f, 310f to 310f), 3f)
+        val el1 = element(0, "H2", 80f, 80f, 150f, 130f)
+        val el2 = element(1, "P", 280f, 280f, 350f, 330f)
+        val (groups, unanchored) = groupStrokesWithProximity(listOf(s1, s2), listOf(el1, el2))
+        assertEquals(2, groups.size)
+        assertTrue(unanchored.isEmpty())
+    }
+
+    @Test fun explicitBindingOverridesProximity() {
+        val stroke = Stroke(listOf(100f to 100f, 110f to 110f), 3f)
+        val el1 = element(0, "H2", 80f, 80f, 150f, 130f)
+        val el2 = element(1, "PRE", 280f, 280f, 350f, 330f)
+        val bindings = mapOf(0 to listOf(el2))
+        val (groups, unanchored) = groupStrokesWithProximity(listOf(stroke), listOf(el1, el2), bindings)
+        assertEquals(1, groups.size)
+        assertTrue(groups[0].anchor is Anchor.Explicit)
+        assertEquals("PRE", (groups[0].anchor as Anchor.Explicit).elements[0].tag)
+        assertTrue(unanchored.isEmpty())
+    }
+
+    @Test fun emptyElementsAllUnanchored() {
+        val stroke = Stroke(listOf(100f to 100f, 110f to 110f), 3f)
+        val (groups, unanchored) = groupStrokesWithProximity(listOf(stroke), emptyList())
+        assertTrue(groups.isEmpty())
+        assertEquals(1, unanchored.size)
+    }
+
+    @Test fun parseElementMapRoundTrip() {
+        val json = """[{"i":0,"tag":"H2","id":"sec-1","t":10,"b":50,"l":0,"r":100,"text":"Hello"}]"""
+        val entries = parseElementMap(json)
+        assertEquals(1, entries.size)
+        assertEquals("H2", entries[0].tag)
+        assertEquals("sec-1", entries[0].id)
+        assertEquals("Hello", entries[0].text)
+    }
+
+    @Test fun annotationsToJsonProducesValidJson() {
+        val ref = ElementRef(sectionId = "s1", tag = "H2", text = "Heading")
+        val group = StrokeGroup(
+            anchor = Anchor.Proximity(listOf(ref)),
+            strokes = listOf(Stroke(listOf(1f to 2f, 3f to 4f), 3f)),
+        )
+        val json = annotationsToJson(listOf(group), emptyList())
+        val arr = org.json.JSONArray(json)
+        assertEquals(1, arr.length())
+        val obj = arr.getJSONObject(0)
+        assertEquals("proximity", obj.getJSONObject("anchor").getString("type"))
     }
 }

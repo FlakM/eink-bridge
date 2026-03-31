@@ -1,0 +1,20 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  server:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - name: Check formatting
+        run: nix develop -c just check-fmt
+      - name: Clippy
+        run: nix develop -c just clippy
+      - name: Tests
+        run: nix develop -c just test
+      - name: Eval
+        run: nix develop -c just eval

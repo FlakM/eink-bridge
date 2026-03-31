@@ -1,0 +1,34 @@
+[
+  {
+    "created_at": "<timestamp>",
+    "id": "<id>",
+    "schema_version": 1,
+    "status": "Active",
+    "tags": {
+      "type": "list"
+    },
+    "title": "List Doc",
+    "updated_at": "<timestamp>"
+  },
+  {
+    "created_at": "<timestamp>",
+    "id": "<id>",
+    "schema_version": 1,
+    "status": "Active",
+    "tags": {},
+    "title": "Plain Text",
+    "updated_at": "<timestamp>"
+  },
+  {
+    "created_at": "<timestamp>",
+    "id": "<id>",
+    "schema_version": 1,
+    "status": "Active",
+    "tags": {
+      "repo": "eink-bridge",
+      "type": "contract"
+    },
+    "title": "Contract Doc",
+    "updated_at": "<timestamp>"
+  }
+]

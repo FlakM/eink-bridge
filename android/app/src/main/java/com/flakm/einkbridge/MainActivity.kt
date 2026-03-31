@@ -125,14 +125,18 @@ class MainActivity : AppCompatActivity() {
 
     private val styleButtons = mutableListOf<Button>()
     internal lateinit var strokeSlider: SeekBar
+    private lateinit var btnLink: Button
     private var selectedStyleIndex = 0
+    private var linkMode = false
 
+    @SuppressLint("ClickableViewAccessibility")
     private fun setupPenToolbar() {
         strokeSlider = findViewById(R.id.strokeSlider)
         val btnPencil = findViewById<Button>(R.id.btnPencil)
         val btnBrush = findViewById<Button>(R.id.btnBrush)
         val btnUndo = findViewById<Button>(R.id.btnUndo)
         val btnClear = findViewById<Button>(R.id.btnClear)
+        btnLink = findViewById(R.id.btnLink)
 
         val btnEraser = findViewById<Button>(R.id.btnEraser)
         styleButtons.addAll(listOf(btnPencil, btnBrush, btnEraser))
@@ -145,11 +149,12 @@ class MainActivity : AppCompatActivity() {
             override fun onStopTrackingTouch(seekBar: SeekBar) {}
         })
 
-        btnPencil.setOnClickListener { selectStyle(0); penOverlay?.setStylePencil() }
-        btnBrush.setOnClickListener { selectStyle(1); penOverlay?.setStyleBrush() }
-        btnEraser.setOnClickListener { selectStyle(2); penOverlay?.setStyleEraser() }
+        btnPencil.setOnClickListener { exitLinkMode(); selectStyle(0); penOverlay?.setStylePencil() }
+        btnBrush.setOnClickListener { exitLinkMode(); selectStyle(1); penOverlay?.setStyleBrush() }
+        btnEraser.setOnClickListener { exitLinkMode(); selectStyle(2); penOverlay?.setStyleEraser() }
         btnUndo.setOnClickListener { penOverlay?.undoLastStroke() }
-        btnClear.setOnClickListener { penOverlay?.clearStrokes() }
+        btnClear.setOnClickListener { penOverlay?.clearStrokes(); penOverlay?.clearExplicitBindings() }
+        btnLink.setOnClickListener { toggleLinkMode() }
         findViewById<Button>(R.id.btnSubmit).setOnClickListener { submitAndGoBack() }
 
         selectStyle(0)
@@ -162,6 +167,37 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    @SuppressLint("ClickableViewAccessibility")
+    private fun toggleLinkMode() {
+        linkMode = !linkMode
+        btnLink.alpha = if (linkMode) 1.0f else 0.35f
+        if (linkMode) {
+            penOverlay?.disableDrawing()
+            strokeView.setOnTouchListener { _, event ->
+                if (event.actionMasked == android.view.MotionEvent.ACTION_UP) {
+                    penOverlay?.tapToBindElement(event.x, event.y) { entry, anchored ->
+                        val msg = if (entry != null) {
+                            if (anchored) "Linked: ${entry.tag} — ${entry.text.take(40)}"
+                            else "Unlinked: ${entry.tag}"
+                        } else "No element nearby"
+                        Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+                    }
+                }
+                true
+            }
+        } else {
+            exitLinkMode()
+        }
+    }
+
+    private fun exitLinkMode() {
+        if (!linkMode) return
+        linkMode = false
+        btnLink.alpha = 0.35f
+        strokeView.setOnTouchListener(null)
+        penOverlay?.enableDrawing()
+    }
+
     private fun openSession(sessionId: String) {
         currentSessionId = sessionId
         pollJob?.cancel()
@@ -172,9 +208,31 @@ class MainActivity : AppCompatActivity() {
         strokeView.visibility = View.VISIBLE
         penToolbar.visibility = View.VISIBLE
         webView.loadUrl("$serverUrl/session/$sessionId")
-        val overlay = PenOverlay(webView, penToolbar, strokeView)
+        val buf = StrokeBuffer()
+        loadStrokes(sessionId, buf)
+        val overlay = PenOverlay(webView, penToolbar, strokeView, buf = buf,
+            onStrokesChanged = { saveStrokes(sessionId, buf) })
         overlay.init()
         penOverlay = overlay
+    }
+
+    private fun saveStrokes(sessionId: String, buf: StrokeBuffer) {
+        val key = "strokes_$sessionId"
+        if (buf.isEmpty) prefs.edit().remove(key).apply()
+        else prefs.edit().putString(key, buf.toJson()).apply()
+    }
+
+    private fun loadStrokes(sessionId: String, buf: StrokeBuffer) {
+        val json = prefs.getString("strokes_$sessionId", null) ?: return
+        try { buf.loadJson(json) } catch (_: Exception) {}
+    }
+
+    private fun clearSavedStrokes(sessionId: String) {
+        prefs.edit().remove("strokes_$sessionId").apply()
+    }
+
+    private fun hasStrokes(sessionId: String): Boolean {
+        return prefs.contains("strokes_$sessionId")
     }
 
     private fun showSessionList() {
@@ -190,43 +248,53 @@ class MainActivity : AppCompatActivity() {
 
     private fun submitAndGoBack() {
         val sessionId = currentSessionId ?: return
-        scope.launch {
-            try {
-                val pngData = penOverlay?.exportToPng()
-                val strokeJson = penOverlay?.exportStrokeJson()
-                withContext(Dispatchers.IO) {
-                    val builder = MultipartBody.Builder()
-                        .setType(MultipartBody.FORM)
-                        .addFormDataPart("typed_notes", "")
+        val overlay = penOverlay ?: return
+        overlay.queryElementMap { elements ->
+            scope.launch {
+                try {
+                    val pngData = overlay.exportToPng()
+                    val strokeJson = overlay.exportStrokeJson()
+                    val (groups, unanchored) = groupStrokesWithProximity(
+                        overlay.buf.strokes, elements, overlay.explicitBindings
+                    )
+                    val annotationsJson = annotationsToJson(groups, unanchored)
 
-                    if (pngData != null) {
-                        builder.addFormDataPart(
-                            "annotation", "strokes.png",
-                            pngData.toRequestBody("image/png".toMediaType())
-                        )
-                    }
-                    if (strokeJson != null) {
-                        builder.addFormDataPart("stroke_data", strokeJson)
-                    }
+                    withContext(Dispatchers.IO) {
+                        val builder = MultipartBody.Builder()
+                            .setType(MultipartBody.FORM)
+                            .addFormDataPart("typed_notes", "")
+                            .addFormDataPart("annotations", annotationsJson)
 
-                    val request = Request.Builder()
-                        .url("$serverUrl/api/sessions/$sessionId/submit")
-                        .post(builder.build())
-                        .build()
+                        if (pngData != null) {
+                            builder.addFormDataPart(
+                                "annotation", "strokes.png",
+                                pngData.toRequestBody("image/png".toMediaType())
+                            )
+                        }
+                        if (strokeJson != null) {
+                            builder.addFormDataPart("stroke_data", strokeJson)
+                        }
 
-                    val response = client.newCall(request).execute()
-                    withContext(Dispatchers.Main) {
-                        if (response.isSuccessful) {
-                            Toast.makeText(this@MainActivity, "Submitted!", Toast.LENGTH_SHORT).show()
-                            showSessionList()
-                            startPolling()
-                        } else {
-                            Toast.makeText(this@MainActivity, "Submit failed: ${response.code}", Toast.LENGTH_SHORT).show()
+                        val request = Request.Builder()
+                            .url("$serverUrl/api/sessions/$sessionId/submit")
+                            .post(builder.build())
+                            .build()
+
+                        val response = client.newCall(request).execute()
+                        withContext(Dispatchers.Main) {
+                            if (response.isSuccessful) {
+                                clearSavedStrokes(sessionId)
+                                Toast.makeText(this@MainActivity, "Submitted!", Toast.LENGTH_SHORT).show()
+                                showSessionList()
+                                startPolling()
+                            } else {
+                                Toast.makeText(this@MainActivity, "Submit failed: ${response.code}", Toast.LENGTH_SHORT).show()
+                            }
                         }
                     }
+                } catch (e: Exception) {
+                    Toast.makeText(this@MainActivity, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
                 }
-            } catch (e: Exception) {
-                Toast.makeText(this@MainActivity, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -263,7 +331,9 @@ class MainActivity : AppCompatActivity() {
                         ))
                     }
                     val hadSessions = adapter.itemCount
+                    val pending = sessions.filter { hasStrokes(it.id) }.map { it.id }.toSet()
                     withContext(Dispatchers.Main) {
+                        adapter.setPendingStrokes(pending)
                         adapter.submitList(sessions)
                         if (sessions.isEmpty()) {
                             sessionList.visibility = View.GONE
