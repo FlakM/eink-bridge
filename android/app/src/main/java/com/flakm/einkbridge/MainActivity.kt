@@ -539,6 +539,9 @@ class MainActivity : AppCompatActivity() {
                     isProcessing = true
                     updateProcessingUi(json.optString("message", "Processing..."))
                 }
+                "annotation_result" -> {
+                    updateProcessingUi("Agent updating document...")
+                }
                 "version_updated" -> {
                     isProcessing = false
                     updateProcessingUi()

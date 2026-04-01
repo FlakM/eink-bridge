@@ -177,7 +177,7 @@ async fn handle_request_update(
                     .ws_send(
                         &ocr_id,
                         ServerMessage::AnnotationResult {
-                            annotations,
+                            annotations: strip_strokes(annotations),
                             version,
                         },
                     )
@@ -189,7 +189,7 @@ async fn handle_request_update(
             .ws_send(
                 id,
                 ServerMessage::AnnotationResult {
-                    annotations,
+                    annotations: strip_strokes(annotations),
                     version,
                 },
             )
@@ -220,4 +220,14 @@ async fn handle_update_content(state: &AppState, id: &str, content: String) {
                 .await;
         }
     }
+}
+
+fn strip_strokes(annotations: Vec<AnnotationGroup>) -> Vec<AnnotationGroup> {
+    annotations
+        .into_iter()
+        .map(|mut a| {
+            a.strokes = vec![];
+            a
+        })
+        .collect()
 }
