@@ -246,6 +246,17 @@
             android:layout_weight="1" />
 
         <Button
+            android:id="@+id/btnRequestUpdate"
+            android:layout_width="wrap_content"
+            android:layout_height="56dp"
+            android:minWidth="120dp"
+            android:text="↻ Update"
+            android:textSize="18sp"
+            android:textColor="#FFFFFF"
+            android:backgroundTint="#555555"
+            android:layout_marginEnd="8dp" />
+
+        <Button
             android:id="@+id/btnSubmit"
             android:layout_width="wrap_content"
             android:layout_height="56dp"
@@ -255,4 +266,33 @@
             android:textColor="#FFFFFF"
             android:backgroundTint="#000000" />
     </LinearLayout>
+
+    <!-- Processing overlay: shown while OCR / agent update is in flight -->
+    <LinearLayout
+        android:id="@+id/processingOverlay"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top"
+        android:background="#CC000000"
+        android:gravity="center"
+        android:orientation="horizontal"
+        android:padding="12dp"
+        android:visibility="gone">
+
+        <ProgressBar
+            style="?android:attr/progressBarStyleSmall"
+            android:layout_width="24dp"
+            android:layout_height="24dp"
+            android:indeterminateTint="#FFFFFF" />
+
+        <TextView
+            android:id="@+id/processingStatus"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Processing..."
+            android:textColor="#FFFFFF"
+            android:textSize="16sp"
+            android:layout_marginStart="8dp" />
+    </LinearLayout>
+
 </FrameLayout>

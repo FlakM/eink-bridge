@@ -5,3 +5,4 @@ pub mod ocr;
 pub mod render;
 pub mod session;
 pub mod verdict;
+pub mod ws;

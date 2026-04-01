@@ -1,7 +1,9 @@
 use clap::{Parser, Subcommand};
+use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;
 use std::io::Read as _;
 use std::time::{Duration, Instant};
+use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use eink_bridge::api::SCHEMA_VERSION;
 
@@ -33,6 +35,16 @@ enum Command {
         /// Output result as JSON
         #[arg(long)]
         json: bool,
+        /// Interactive mode: stay connected via WebSocket, emit structured events
+        #[arg(long)]
+        interactive: bool,
+    },
+    /// Push updated content to an existing session (interactive mode)
+    Update {
+        /// Session ID
+        id: String,
+        /// File with updated content
+        file: String,
     },
     /// Get result of a session
     Result {
@@ -67,6 +79,7 @@ async fn main() {
             timeout,
             non_blocking,
             json,
+            interactive,
         } => {
             cmd_push(
                 &client,
@@ -76,9 +89,11 @@ async fn main() {
                 timeout,
                 non_blocking,
                 json,
+                interactive,
             )
             .await
         }
+        Command::Update { id, file } => cmd_update(&cli.server, &id, &file).await,
         Command::Result { id, json } => cmd_result(&client, &cli.server, &id, json).await,
         Command::Cancel { id } => cmd_cancel(&client, &cli.server, &id).await,
         Command::List { status } => cmd_list(&client, &cli.server, status).await,
@@ -90,6 +105,7 @@ async fn main() {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn cmd_push(
     client: &Client,
     server: &str,
@@ -98,6 +114,7 @@ async fn cmd_push(
     timeout_minutes: u64,
     non_blocking: bool,
     json_output: bool,
+    interactive: bool,
 ) -> anyhow::Result<()> {
     let content = if file == "-" {
         let mut buf = String::new();
@@ -132,6 +149,10 @@ async fn cmd_push(
         return Ok(());
     }
 
+    if interactive {
+        return cmd_push_interactive(server, id, timeout_minutes).await;
+    }
+
     eprintln!("Session: {session_url}");
     eprintln!("Waiting for review... (timeout: {timeout_minutes}m)");
 
@@ -163,6 +184,115 @@ async fn cmd_push(
             s => anyhow::bail!("unexpected status: {s}"),
         }
     }
+}
+
+async fn cmd_push_interactive(server: &str, id: &str, timeout_minutes: u64) -> anyhow::Result<()> {
+    println!("SESSION_ID:{id}");
+    let url = ws_url(server, &format!("/ws/{id}"));
+    let (mut ws, _) = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio_tungstenite::connect_async(&url),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("WS connect timeout"))?
+    .map_err(|e| anyhow::anyhow!("WS connect failed: {e}"))?;
+
+    ws.send(WsMessage::Text(
+        serde_json::json!({"type": "subscribe"}).to_string(),
+    ))
+    .await?;
+
+    let deadline = Instant::now() + Duration::from_secs(timeout_minutes * 60);
+    loop {
+        if Instant::now() > deadline {
+            anyhow::bail!("timeout waiting for review");
+        }
+        let msg = tokio::time::timeout(Duration::from_secs(60), ws.next())
+            .await
+            .ok()
+            .flatten();
+
+        match msg {
+            Some(Ok(WsMessage::Text(text))) => {
+                let v: serde_json::Value = serde_json::from_str(&text)?;
+                match v["type"].as_str() {
+                    Some("annotation_result") => {
+                        println!("EVENT:ANNOTATION_RESULT {text}");
+                    }
+                    Some("session_submitted") => {
+                        println!("EVENT:SUBMITTED {text}");
+                        let body = &v["result"];
+                        print_result(id, body);
+                        exit_for_verdict(body);
+                        return Ok(());
+                    }
+                    Some("error") => {
+                        anyhow::bail!(
+                            "server error: {}",
+                            v["message"].as_str().unwrap_or("unknown")
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            Some(Ok(WsMessage::Close(_))) | None => {
+                anyhow::bail!("WebSocket closed unexpectedly");
+            }
+            Some(Err(e)) => anyhow::bail!("WebSocket error: {e}"),
+            _ => {}
+        }
+    }
+}
+
+async fn cmd_update(server: &str, id: &str, file: &str) -> anyhow::Result<()> {
+    let content = std::fs::read_to_string(file)?;
+    let url = ws_url(server, &format!("/ws/{id}"));
+    let (mut ws, _) = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio_tungstenite::connect_async(&url),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("WS connect timeout"))?
+    .map_err(|e| anyhow::anyhow!("WS connect failed: {e}"))?;
+
+    ws.send(WsMessage::Text(
+        serde_json::json!({"type": "update_content", "content": content}).to_string(),
+    ))
+    .await?;
+
+    loop {
+        match ws.next().await {
+            Some(Ok(WsMessage::Text(text))) => {
+                let v: serde_json::Value = serde_json::from_str(&text)?;
+                match v["type"].as_str() {
+                    Some("version_updated") => {
+                        let version = v["version"].as_u64().unwrap_or(0);
+                        eprintln!("version updated to {version}");
+                        return Ok(());
+                    }
+                    Some("error") => {
+                        anyhow::bail!(
+                            "server error: {}",
+                            v["message"].as_str().unwrap_or("unknown")
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            Some(Ok(WsMessage::Close(_))) | None => {
+                anyhow::bail!("WebSocket closed without version_updated");
+            }
+            Some(Err(e)) => anyhow::bail!("WebSocket error: {e}"),
+            _ => {}
+        }
+    }
+}
+
+fn ws_url(server: &str, path: &str) -> String {
+    let base = server
+        .replacen("http://", "ws://", 1)
+        .replacen("https://", "wss://", 1);
+    format!("{base}{path}")
 }
 
 async fn cmd_result(

@@ -10,7 +10,7 @@ use futures_util::stream;
 use multer::{Multipart as MulterMultipart, parse_boundary};
 use serde::Deserialize;
 use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
-use tokio::sync::{Notify, RwLock};
+use tokio::sync::{Notify, RwLock, broadcast};
 use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 
@@ -27,6 +27,7 @@ use crate::verdict::{Verdict, parse_verdict};
 pub struct AppState {
     pub sessions: Arc<RwLock<SessionManager>>,
     pub notifiers: Arc<RwLock<HashMap<String, Arc<Notify>>>>,
+    pub ws_senders: Arc<RwLock<HashMap<String, broadcast::Sender<crate::ws::ServerMessage>>>>,
     pub long_poll_seconds: u64,
     pub assets_dir: PathBuf,
     pub ocr_engine: Option<Arc<OcrEngine>>,
@@ -51,6 +52,7 @@ impl AppState {
         Self {
             sessions: Arc::new(RwLock::new(SessionManager::new(state_dir))),
             notifiers: Arc::new(RwLock::new(HashMap::new())),
+            ws_senders: Arc::new(RwLock::new(HashMap::new())),
             long_poll_seconds,
             assets_dir: default_assets_dir(),
             ocr_engine,
@@ -69,6 +71,28 @@ impl AppState {
         if let Some(n) = map.remove(id) {
             n.notify_waiters();
         }
+    }
+
+    pub async fn ws_subscribe(&self, id: &str) -> broadcast::Receiver<crate::ws::ServerMessage> {
+        type Map = std::collections::HashMap<String, broadcast::Sender<crate::ws::ServerMessage>>;
+        let mut map: tokio::sync::RwLockWriteGuard<'_, Map> = self.ws_senders.write().await;
+        map.entry(id.to_string())
+            .or_insert_with(|| broadcast::channel::<crate::ws::ServerMessage>(16).0)
+            .subscribe()
+    }
+
+    pub async fn ws_send(&self, id: &str, msg: crate::ws::ServerMessage) {
+        type Map = std::collections::HashMap<String, broadcast::Sender<crate::ws::ServerMessage>>;
+        let map: tokio::sync::RwLockReadGuard<'_, Map> = self.ws_senders.read().await;
+        if let Some(sender) = map.get(id) {
+            let _ = sender.send(msg as crate::ws::ServerMessage);
+        }
+    }
+
+    pub async fn ws_cleanup(&self, id: &str) {
+        type Map = std::collections::HashMap<String, broadcast::Sender<crate::ws::ServerMessage>>;
+        let mut map: tokio::sync::RwLockWriteGuard<'_, Map> = self.ws_senders.write().await;
+        map.remove(id);
     }
 }
 
@@ -110,6 +134,7 @@ pub fn build_app(state: AppState) -> Router {
         )
         .route("/api/sessions/{id}/result", get(get_result))
         .route("/api/sessions/{id}/submit", post(submit_review))
+        .route("/ws/{id}", get(crate::ws::ws_handler))
         .route("/session/{id}", get(render_session))
         .nest_service("/assets", ServeDir::new(assets_dir))
         .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY_SIZE))
@@ -243,6 +268,15 @@ async fn cancel_session(
             let webhook = mgr.get(&id).and_then(webhook_payload);
             drop(mgr);
             state.notify_and_cleanup(&id).await;
+            state
+                .ws_send(
+                    &id,
+                    crate::ws::ServerMessage::Error {
+                        message: "session cancelled".into(),
+                    },
+                )
+                .await;
+            state.ws_cleanup(&id).await;
             if let Some((url, body)) = webhook {
                 fire_webhook(url, body);
             }
@@ -357,6 +391,7 @@ async fn submit_review(
                 .and_then(|s| s.verdict.as_ref().map(|v| v.as_str().to_string()));
             let image_count = mgr.get(&id).map(|s| s.annotation_images.len()).unwrap_or(0);
             let ocr_annotations = mgr.get(&id).map(|s| s.annotations.clone());
+            let ws_result = mgr.get(&id).map(SessionResultResponse::from_session);
             drop(mgr);
             tracing::info!(id = %id, ?verdict, images = image_count, "review submitted");
             if let (Some(engine), Some(mut annotations)) =
@@ -378,6 +413,17 @@ async fn submit_review(
                 });
             }
             state.notify_and_cleanup(&id).await;
+            if let Some(result) = ws_result {
+                state
+                    .ws_send(
+                        &id,
+                        crate::ws::ServerMessage::SessionSubmitted {
+                            result: Box::new(result),
+                        },
+                    )
+                    .await;
+                state.ws_cleanup(&id).await;
+            }
             if let Some((url, body)) = webhook {
                 fire_webhook(url, body);
             }

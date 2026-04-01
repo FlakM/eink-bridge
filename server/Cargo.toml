@@ -43,6 +43,7 @@ multer = "3"
 futures-util = "0.3"
 leptess = "0.14"
 image = "0.25"
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

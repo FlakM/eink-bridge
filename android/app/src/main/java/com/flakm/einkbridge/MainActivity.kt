@@ -20,6 +20,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
+import org.json.JSONObject
 import org.json.JSONTokener
 import java.util.concurrent.TimeUnit
 
@@ -36,6 +37,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var prefs: SharedPreferences
     private var penOverlay: PenOverlay? = null
     private lateinit var docCache: DocumentCache
+    private var wsClient: WebSocketClient? = null
+    private var isProcessing = false
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(5, TimeUnit.SECONDS)
@@ -225,6 +228,7 @@ class MainActivity : AppCompatActivity() {
         }
         btnLink.setOnClickListener { enterBindMode() }
         btnColor.setOnClickListener { showColorPicker() }
+        findViewById<Button>(R.id.btnRequestUpdate).setOnClickListener { sendRequestUpdate() }
         findViewById<Button>(R.id.btnSubmit).setOnClickListener { submitAndGoBack() }
 
         selectStyle(0)
@@ -280,9 +284,17 @@ class MainActivity : AppCompatActivity() {
 
     private fun openSession(sessionId: String) {
         currentSessionId = sessionId
+        isProcessing = false
         pollJob?.cancel()
         penOverlay?.destroy()
         penOverlay = null
+        wsClient?.disconnect()
+        wsClient = WebSocketClient(
+            serverUrl = serverUrl,
+            sessionId = sessionId,
+            onMessage = { type, json -> handleWsMessage(type, json) },
+            onClosed = {},
+        ).also { it.connect() }
         sessionListContainer.visibility = View.GONE
         webView.visibility = View.VISIBLE
         strokeView.visibility = View.VISIBLE
@@ -350,10 +362,14 @@ class MainActivity : AppCompatActivity() {
         penOverlay?.disableDrawing()
         penOverlay?.destroy()
         penOverlay = null
+        wsClient?.disconnect()
+        wsClient = null
+        isProcessing = false
         currentSessionId = null
         webView.visibility = View.GONE
         strokeView.visibility = View.GONE
         penToolbar.visibility = View.GONE
+        findViewById<View>(R.id.processingOverlay).visibility = View.GONE
         sessionListContainer.visibility = View.VISIBLE
     }
 
@@ -511,8 +527,86 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         penOverlay?.destroy()
+        wsClient?.disconnect()
         scope.cancel()
         super.onDestroy()
+    }
+
+    private fun handleWsMessage(type: String, json: JSONObject) {
+        runOnUiThread {
+            when (type) {
+                "processing_status" -> {
+                    isProcessing = true
+                    updateProcessingUi(json.optString("message", "Processing..."))
+                }
+                "version_updated" -> {
+                    isProcessing = false
+                    updateProcessingUi()
+                    webView.reload()
+                    Toast.makeText(this, "Document updated ✓", Toast.LENGTH_SHORT).show()
+                }
+                "session_submitted" -> {
+                    isProcessing = false
+                    Toast.makeText(this, "Session submitted", Toast.LENGTH_SHORT).show()
+                    showSessionList()
+                    startPolling()
+                }
+                "error" -> {
+                    isProcessing = false
+                    updateProcessingUi()
+                    Toast.makeText(
+                        this,
+                        json.optString("message", "Unknown error"),
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+            }
+        }
+    }
+
+    private fun sendRequestUpdate() {
+        val sessionId = currentSessionId ?: return
+        val overlay = penOverlay ?: return
+        if (isProcessing) return
+        overlay.queryElementMap { elements ->
+            scope.launch {
+                val (explicitGroups, unanchoredStrokes) = bindGroupsToAnnotations(
+                    overlay.buf.strokes, overlay.bindGroups
+                )
+                val (proximityGroups, _) = groupStrokesWithProximity(
+                    unanchoredStrokes, elements
+                )
+                val annotationsJson = annotationsToJson(explicitGroups + proximityGroups, emptyList())
+                val msg = JSONObject()
+                msg.put("type", "request_update")
+                msg.put("annotations", JSONArray(annotationsJson))
+                msg.put("typed_notes", "")
+                wsClient?.send(msg)
+                isProcessing = true
+                updateProcessingUi()
+            }
+        }
+    }
+
+    internal fun updateProcessingUi(statusText: String? = null) {
+        val overlay = findViewById<View>(R.id.processingOverlay)
+        val statusView = findViewById<TextView>(R.id.processingStatus)
+        val btnRequestUpdate = findViewById<Button>(R.id.btnRequestUpdate)
+        val btnSubmit = findViewById<Button>(R.id.btnSubmit)
+        if (isProcessing) {
+            overlay.visibility = View.VISIBLE
+            statusView.text = statusText ?: "Processing..."
+            btnRequestUpdate.isEnabled = false
+            btnRequestUpdate.alpha = 0.4f
+            btnSubmit.isEnabled = false
+            btnSubmit.alpha = 0.6f
+        } else {
+            overlay.visibility = View.GONE
+            btnRequestUpdate.isEnabled = true
+            btnRequestUpdate.alpha = 1.0f
+            btnSubmit.isEnabled = true
+            btnSubmit.alpha = 1.0f
+        }
     }
 }
 

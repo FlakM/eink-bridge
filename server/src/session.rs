@@ -14,9 +14,14 @@ fn default_schema_version() -> u32 {
     SCHEMA_VERSION
 }
 
+fn default_version() -> u32 {
+    1
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SessionStatus {
     Active,
+    Processing,
     Submitted,
     Cancelled,
     Expired,
@@ -32,6 +37,7 @@ impl SessionStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
             SessionStatus::Active => "Active",
+            SessionStatus::Processing => "Processing",
             SessionStatus::Submitted => "Submitted",
             SessionStatus::Cancelled => "Cancelled",
             SessionStatus::Expired => "Expired",
@@ -47,6 +53,8 @@ pub struct Session {
     #[serde(default)]
     pub title: Option<String>,
     pub status: SessionStatus,
+    #[serde(default = "default_version")]
+    pub version: u32,
     pub content: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -128,8 +136,10 @@ impl SessionManager {
             if json_path.exists()
                 && let Ok(content) = fs::read_to_string(&json_path)
                 && let Ok(session) = serde_json::from_str::<Session>(&content)
-                && (session.status == SessionStatus::Active
-                    || session.status == SessionStatus::Submitted)
+                && matches!(
+                    session.status,
+                    SessionStatus::Active | SessionStatus::Processing | SessionStatus::Submitted
+                )
             {
                 self.sessions.insert(session.id.clone(), session);
                 loaded += 1;
@@ -161,6 +171,7 @@ impl SessionManager {
             id: id.clone(),
             title,
             status: SessionStatus::Active,
+            version: 1,
             content,
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -208,7 +219,9 @@ impl SessionManager {
     ) -> SubmitResult {
         match self.sessions.get_mut(id) {
             None => SubmitResult::NotFound,
-            Some(s) if s.status != SessionStatus::Active => SubmitResult::NotActive,
+            Some(s) if !matches!(s.status, SessionStatus::Active | SessionStatus::Processing) => {
+                SubmitResult::NotActive
+            }
             Some(s) => {
                 s.verdict = verdict_override.or_else(|| parse_verdict(&typed_notes));
                 s.typed_notes = Some(typed_notes);
@@ -230,10 +243,48 @@ impl SessionManager {
         }
     }
 
+    /// Transition Active → Processing, saving interim annotations.
+    /// Returns the annotations on success, None if session is not Active.
+    pub fn request_update(
+        &mut self,
+        id: &str,
+        annotations: Vec<AnnotationGroup>,
+        typed_notes: String,
+    ) -> Option<Vec<AnnotationGroup>> {
+        let s = self.sessions.get_mut(id)?;
+        if s.status != SessionStatus::Active {
+            return None;
+        }
+        s.annotations = annotations.clone();
+        s.typed_notes = Some(typed_notes);
+        s.status = SessionStatus::Processing;
+        s.updated_at = Utc::now();
+        s.persist();
+        Some(annotations)
+    }
+
+    /// Transition Processing → Active, updating content and incrementing version.
+    /// Returns the new version on success, None if session is not Processing.
+    pub fn apply_update(&mut self, id: &str, content: String) -> Option<u32> {
+        let s = self.sessions.get_mut(id)?;
+        if s.status != SessionStatus::Processing {
+            return None;
+        }
+        s.content = content;
+        s.version += 1;
+        s.status = SessionStatus::Active;
+        s.updated_at = Utc::now();
+        s.persist();
+        Some(s.version)
+    }
+
     pub fn expire_stale(&mut self, timeout: Duration) {
         let now = Utc::now();
         for session in self.sessions.values_mut() {
-            if session.status == SessionStatus::Active {
+            if matches!(
+                session.status,
+                SessionStatus::Active | SessionStatus::Processing
+            ) {
                 let age = now.signed_duration_since(session.created_at);
                 if age.to_std().unwrap_or(Duration::ZERO) > timeout {
                     session.status = SessionStatus::Expired;
@@ -358,6 +409,7 @@ mod tests {
     #[test]
     fn status_as_str_matches_expected_strings() {
         assert_eq!(SessionStatus::Active.as_str(), "Active");
+        assert_eq!(SessionStatus::Processing.as_str(), "Processing");
         assert_eq!(SessionStatus::Submitted.as_str(), "Submitted");
         assert_eq!(SessionStatus::Cancelled.as_str(), "Cancelled");
         assert_eq!(SessionStatus::Expired.as_str(), "Expired");
@@ -372,6 +424,58 @@ mod tests {
         assert!(matches(&SessionStatus::Active, "Active"));
         assert!(matches(&SessionStatus::Active, "ACTIVE"));
         assert!(!matches(&SessionStatus::Active, "cancelled"));
+    }
+
+    #[test]
+    fn request_update_transitions_to_processing() {
+        let (mut m, _d) = mgr();
+        let s = m.create("content".into(), None, None, HashMap::new());
+        let result = m.request_update(&s.id, vec![], "interim notes".into());
+        assert!(result.is_some());
+        let updated = m.get(&s.id).unwrap();
+        assert_eq!(updated.status, SessionStatus::Processing);
+        assert_eq!(updated.typed_notes.as_deref(), Some("interim notes"));
+    }
+
+    #[test]
+    fn request_update_on_non_active_returns_none() {
+        let (mut m, _d) = mgr();
+        let s = m.create("content".into(), None, None, HashMap::new());
+        m.submit(&s.id, "done".into(), vec![], None, None, vec![]);
+        assert!(m.request_update(&s.id, vec![], "".into()).is_none());
+    }
+
+    #[test]
+    fn apply_update_increments_version_and_returns_active() {
+        let (mut m, _d) = mgr();
+        let s = m.create("v1".into(), None, None, HashMap::new());
+        assert_eq!(m.get(&s.id).unwrap().version, 1);
+        m.request_update(&s.id, vec![], "".into()).unwrap();
+        let new_version = m.apply_update(&s.id, "v2".into()).unwrap();
+        assert_eq!(new_version, 2);
+        let updated = m.get(&s.id).unwrap();
+        assert_eq!(updated.status, SessionStatus::Active);
+        assert_eq!(updated.version, 2);
+        assert_eq!(updated.content, "v2");
+    }
+
+    #[test]
+    fn apply_update_on_non_processing_returns_none() {
+        let (mut m, _d) = mgr();
+        let s = m.create("content".into(), None, None, HashMap::new());
+        assert!(m.apply_update(&s.id, "new".into()).is_none());
+    }
+
+    #[test]
+    fn submit_from_processing_state_succeeds() {
+        let (mut m, _d) = mgr();
+        let s = m.create("x".into(), None, None, HashMap::new());
+        m.request_update(&s.id, vec![], "".into()).unwrap();
+        assert!(matches!(
+            m.submit(&s.id, "notes".into(), vec![], None, None, vec![]),
+            SubmitResult::Ok
+        ));
+        assert_eq!(m.get(&s.id).unwrap().status, SessionStatus::Submitted);
     }
 
     #[test]
