@@ -1,12 +1,13 @@
 package com.flakm.einkbridge
 
+import android.graphics.Color
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sqrt
 
-internal data class Stroke(val points: List<Pair<Float, Float>>, val width: Float)
+internal data class Stroke(val points: List<Pair<Float, Float>>, val width: Float, val color: Int = Color.BLACK)
 
 internal data class ElementEntry(
     val i: Int,
@@ -33,6 +34,20 @@ internal sealed class Anchor {
 internal data class StrokeGroup(
     val anchor: Anchor?,
     val strokes: List<Stroke>,
+)
+
+internal data class FoundElement(val i: Int, val tag: String, val id: String?, val text: String, val cx: Float = 0f, val cy: Float = 0f)
+
+internal data class BindGroup(
+    val id: Int,
+    val color: Int,
+    val strokeIndices: Set<Int>,
+    val elementIndices: List<Int>,
+    val elementRefs: List<ElementRef>,
+    val markerDocX: Float,
+    val markerDocY: Float,
+    val strokeDocCenters: List<Pair<Float, Float>> = emptyList(),
+    val elementDocCenters: List<Pair<Float, Float>> = emptyList(),
 )
 
 /**
@@ -62,22 +77,24 @@ internal class StrokeBuffer {
     private val _strokes = mutableListOf<Stroke>()
     private var currentPoints = mutableListOf<Pair<Float, Float>>()
     private var currentWidth = 3f
+    private var currentColor: Int = Color.BLACK
     private var currentTransform = ViewTransform()
 
     val strokes: List<Stroke> get() = _strokes.toList()
     val isEmpty: Boolean get() = _strokes.isEmpty() && currentPoints.size < 2
     val size: Int get() = _strokes.size
 
+    fun setColor(color: Int) { currentColor = color }
+
     /** Returns committed strokes plus the in-progress stroke (if any). */
     fun allStrokes(): List<Stroke> {
         if (currentPoints.size < 2) return _strokes.toList()
-        return _strokes + Stroke(currentPoints.toList(), currentWidth)
+        return _strokes + Stroke(currentPoints.toList(), currentWidth, currentColor)
     }
 
     fun begin(x: Float, y: Float, width: Float = 3f, transform: ViewTransform = ViewTransform()) {
         currentTransform = transform
-        val docW = width / transform.scale
-        currentWidth = docW
+        currentWidth = width / transform.scale
         val docPt = transform.screenToDocX(x) to transform.screenToDocY(y)
         currentPoints = mutableListOf(docPt)
     }
@@ -94,7 +111,7 @@ internal class StrokeBuffer {
 
     fun commit() {
         if (currentPoints.size > 1) {
-            _strokes.add(Stroke(currentPoints.toList(), currentWidth))
+            _strokes.add(Stroke(currentPoints.toList(), currentWidth, currentColor))
         }
         currentPoints = mutableListOf()
     }
@@ -133,6 +150,7 @@ internal class StrokeBuffer {
         for (stroke in _strokes) {
             val obj = JSONObject()
             obj.put("w", stroke.width.toDouble())
+            if (stroke.color != Color.BLACK) obj.put("c", stroke.color)
             val pts = JSONArray()
             for ((x, y) in stroke.points) {
                 pts.put(JSONArray().apply { put(x.toDouble()); put(y.toDouble()) })
@@ -150,13 +168,14 @@ internal class StrokeBuffer {
         for (i in 0 until arr.length()) {
             val obj = arr.getJSONObject(i)
             val w = obj.getDouble("w").toFloat()
+            val color = if (obj.has("c")) obj.getInt("c") else Color.BLACK
             val pts = obj.getJSONArray("pts")
             val points = mutableListOf<Pair<Float, Float>>()
             for (j in 0 until pts.length()) {
                 val p = pts.getJSONArray(j)
                 points.add(p.getDouble(0).toFloat() to p.getDouble(1).toFloat())
             }
-            if (points.size > 1) _strokes.add(Stroke(points, w))
+            if (points.size > 1) _strokes.add(Stroke(points, w, color))
         }
     }
 }
@@ -265,6 +284,20 @@ internal fun annotationsToJson(groups: List<StrokeGroup>, unanchored: List<Strok
     return arr.toString()
 }
 
+internal fun bindGroupsToAnnotations(
+    strokes: List<Stroke>,
+    bindGroups: List<BindGroup>,
+): Pair<List<StrokeGroup>, List<Stroke>> {
+    val usedIndices = bindGroups.flatMap { it.strokeIndices }.toSet()
+    val groups = bindGroups.mapNotNull { bg ->
+        val groupStrokes = bg.strokeIndices.mapNotNull { strokes.getOrNull(it) }
+        if (groupStrokes.isEmpty() && bg.elementRefs.isEmpty()) return@mapNotNull null
+        StrokeGroup(anchor = Anchor.Explicit(bg.elementRefs), strokes = groupStrokes)
+    }
+    val unanchored = strokes.filterIndexed { idx, _ -> idx !in usedIndices }
+    return groups to unanchored
+}
+
 private fun elementsToJson(refs: List<ElementRef>): JSONArray {
     val arr = JSONArray()
     for (ref in refs) {
@@ -275,6 +308,88 @@ private fun elementsToJson(refs: List<ElementRef>): JSONArray {
         })
     }
     return arr
+}
+
+internal fun bindGroupsToJson(groups: List<BindGroup>): String {
+    val arr = JSONArray()
+    for (g in groups) {
+        val obj = JSONObject()
+        obj.put("id", g.id)
+        obj.put("color", g.color)
+        obj.put("strokeIndices", JSONArray(g.strokeIndices.toList()))
+        obj.put("elementIndices", JSONArray(g.elementIndices))
+        val refs = JSONArray()
+        for (r in g.elementRefs) {
+            refs.put(JSONObject().apply {
+                put("section_id", r.sectionId)
+                put("tag", r.tag)
+                put("text", r.text)
+            })
+        }
+        obj.put("elementRefs", refs)
+        obj.put("markerDocX", g.markerDocX.toDouble())
+        obj.put("markerDocY", g.markerDocY.toDouble())
+        obj.put("strokeDocCenters", pairsToJson(g.strokeDocCenters))
+        obj.put("elementDocCenters", pairsToJson(g.elementDocCenters))
+        arr.put(obj)
+    }
+    return arr.toString()
+}
+
+internal fun bindGroupsFromJson(json: String): List<BindGroup> {
+    val arr = JSONArray(json)
+    return (0 until arr.length()).map { i ->
+        val obj = arr.getJSONObject(i)
+        val strokeIndices = obj.getJSONArray("strokeIndices").let { a ->
+            (0 until a.length()).map { a.getInt(it) }.toSet()
+        }
+        val elementIndices = obj.getJSONArray("elementIndices").let { a ->
+            (0 until a.length()).map { a.getInt(it) }
+        }
+        val refs = obj.getJSONArray("elementRefs").let { a ->
+            (0 until a.length()).map { j ->
+                val ro = a.getJSONObject(j)
+                ElementRef(ro.optString("section_id", null), ro.getString("tag"), ro.optString("text", ""))
+            }
+        }
+        BindGroup(
+            id = obj.getInt("id"),
+            color = obj.getInt("color"),
+            strokeIndices = strokeIndices,
+            elementIndices = elementIndices,
+            elementRefs = refs,
+            markerDocX = obj.getDouble("markerDocX").toFloat(),
+            markerDocY = obj.getDouble("markerDocY").toFloat(),
+            strokeDocCenters = pairsFromJson(obj.optJSONArray("strokeDocCenters") ?: JSONArray()),
+            elementDocCenters = pairsFromJson(obj.optJSONArray("elementDocCenters") ?: JSONArray()),
+        )
+    }
+}
+
+private fun pairsToJson(pairs: List<Pair<Float, Float>>): JSONArray {
+    val arr = JSONArray()
+    for ((x, y) in pairs) arr.put(JSONArray().apply { put(x.toDouble()); put(y.toDouble()) })
+    return arr
+}
+
+private fun pairsFromJson(arr: JSONArray): List<Pair<Float, Float>> =
+    (0 until arr.length()).map { i ->
+        val p = arr.getJSONArray(i)
+        p.getDouble(0).toFloat() to p.getDouble(1).toFloat()
+    }
+
+internal fun pointInPolygon(px: Float, py: Float, polygon: List<Pair<Float, Float>>): Boolean {
+    var inside = false
+    var j = polygon.size - 1
+    for (i in polygon.indices) {
+        val (ix, iy) = polygon[i]
+        val (jx, jy) = polygon[j]
+        if ((iy > py) != (jy > py) && px < (jx - ix) * (py - iy) / (jy - iy) + ix) {
+            inside = !inside
+        }
+        j = i
+    }
+    return inside
 }
 
 private fun strokesToPointArrays(strokes: List<Stroke>): JSONArray {

@@ -40,10 +40,18 @@ class SessionAdapter(
 ) : ListAdapter<SessionInfo, SessionAdapter.ViewHolder>(DIFF) {
 
     private var pendingStrokeIds: Set<String> = emptySet()
+    private var cachedSessionIds: Set<String> = emptySet()
 
     fun setPendingStrokes(ids: Set<String>) {
         if (ids != pendingStrokeIds) {
             pendingStrokeIds = ids
+            notifyDataSetChanged()
+        }
+    }
+
+    fun setCachedSessions(ids: Set<String>) {
+        if (ids != cachedSessionIds) {
+            cachedSessionIds = ids
             notifyDataSetChanged()
         }
     }
@@ -61,11 +69,15 @@ class SessionAdapter(
     override fun onBindViewHolder(holder: ViewHolder, position: Int) {
         val session = getItem(position)
         val hasPending = session.id in pendingStrokeIds
+        val isCached = session.id in cachedSessionIds
         val icon = statusIcon(session.status)
-        val pendingMark = if (hasPending) "  \u270E" else "" // ✎ pencil
-        holder.title.text = "$icon  ${session.title}$pendingMark"
-        val status = if (hasPending) "${session.status} \u2014 unsaved strokes" else session.status
-        holder.subtitle.text = "$status \u2014 ${formatSessionTime(session.updatedAt)}"
+        val pendingMark = if (hasPending) "  \u270E" else ""
+        val cachedMark = if (isCached) "  \u2B07" else ""
+        holder.title.text = "$icon  ${session.title}$pendingMark$cachedMark"
+        val statusParts = mutableListOf(session.status)
+        if (hasPending) statusParts.add("unsaved strokes")
+        if (isCached) statusParts.add("cached")
+        holder.subtitle.text = "${statusParts.joinToString(" \u2014 ")} \u2014 ${formatSessionTime(session.updatedAt)}"
         holder.itemView.setOnClickListener { onClick(session) }
     }
 

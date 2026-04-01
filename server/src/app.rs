@@ -18,6 +18,7 @@ use crate::api::{
     CreateSessionRequest, CreateSessionResponse, SCHEMA_VERSION, SessionDetailResponse,
     SessionResultResponse, SessionSummaryResponse, SubmitReviewRequest, openapi_spec,
 };
+use crate::ocr::OcrEngine;
 use crate::render;
 use crate::session::{Session, SessionManager, SessionStatus, SubmitResult};
 use crate::verdict::{Verdict, parse_verdict};
@@ -28,6 +29,7 @@ pub struct AppState {
     pub notifiers: Arc<RwLock<HashMap<String, Arc<Notify>>>>,
     pub long_poll_seconds: u64,
     pub assets_dir: PathBuf,
+    pub ocr_engine: Option<Arc<OcrEngine>>,
 }
 
 impl AppState {
@@ -36,11 +38,22 @@ impl AppState {
     }
 
     pub fn with_config(state_dir: PathBuf, long_poll_seconds: u64) -> Self {
+        let ocr_engine = match OcrEngine::new() {
+            Ok(engine) => {
+                tracing::info!("OCR engine initialized");
+                Some(Arc::new(engine))
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "OCR engine unavailable, recognized_text will not be populated");
+                None
+            }
+        };
         Self {
             sessions: Arc::new(RwLock::new(SessionManager::new(state_dir))),
             notifiers: Arc::new(RwLock::new(HashMap::new())),
             long_poll_seconds,
             assets_dir: default_assets_dir(),
+            ocr_engine,
         }
     }
 
@@ -343,8 +356,27 @@ async fn submit_review(
                 .get(&id)
                 .and_then(|s| s.verdict.as_ref().map(|v| v.as_str().to_string()));
             let image_count = mgr.get(&id).map(|s| s.annotation_images.len()).unwrap_or(0);
+            let ocr_annotations = mgr.get(&id).map(|s| s.annotations.clone());
             drop(mgr);
             tracing::info!(id = %id, ?verdict, images = image_count, "review submitted");
+            if let (Some(engine), Some(mut annotations)) =
+                (state.ocr_engine.clone(), ocr_annotations)
+            {
+                let ocr_state = state.clone();
+                let ocr_id = id.clone();
+                tokio::spawn(async move {
+                    let annotations = tokio::task::spawn_blocking(move || {
+                        crate::ocr::ocr_annotation_groups(&engine, &mut annotations);
+                        annotations
+                    })
+                    .await;
+                    if let Ok(annotations) = annotations {
+                        let mut mgr = ocr_state.sessions.write().await;
+                        mgr.update_annotations(&ocr_id, annotations);
+                        tracing::info!(id = %ocr_id, "OCR processing complete");
+                    }
+                });
+            }
             state.notify_and_cleanup(&id).await;
             if let Some((url, body)) = webhook {
                 fire_webhook(url, body);

@@ -1,5 +1,6 @@
 package com.flakm.einkbridge
 
+import android.graphics.Color
 import android.view.MotionEvent
 import org.junit.Assert.*
 import org.junit.Test
@@ -668,6 +669,100 @@ class PenOverlayTest {
             )
             it.layout(0, height - height, width, height)
         }
+    }
+
+    // ── setStrokeColor ─────────────────────────────────────────────────────────
+
+    @Test
+    fun setStrokeColor_viaBufferDirectly() {
+        val buf = StrokeBuffer()
+        buf.setColor(Color.RED)
+        buf.begin(0f, 0f)
+        buf.end(10f, 10f)
+        assertEquals(Color.RED, buf.strokes[0].color)
+        buf.setColor(Color.BLUE)
+        buf.begin(0f, 0f)
+        buf.end(10f, 10f)
+        assertEquals(Color.RED, buf.strokes[0].color)
+        assertEquals(Color.BLUE, buf.strokes[1].color)
+    }
+
+    @Test
+    fun setStrokeColor_penOverlay_delegates_to_buffer() {
+        val buf = StrokeBuffer()
+        val mock = MockPenController(buf)
+        val overlay = PenOverlay(
+            webView = buildFakeWebView(), buf = buf,
+            controllerOverride = mock,
+            transformOverride = { ViewTransform() },
+        )
+        overlay.setStrokeColor(Color.RED)
+        mock.simulateStroke(listOf(0f to 0f, 50f to 50f))
+        assertEquals(Color.RED, buf.strokes[0].color)
+    }
+
+    // ── bindDrawingActive ──────────────────────────────────────────────────────
+
+    @Test
+    fun bindMode_actionDown_sets_bindDrawingActive() {
+        val buf = StrokeBuffer()
+        val mock = MockPenController(buf)
+        val ctx = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.app.Application>()
+        val strokeView = StrokeView(ctx)
+        val webView = buildFakeWebView()
+        val overlay = PenOverlay(
+            webView = webView, buf = buf, strokeView = strokeView,
+            controllerOverride = mock,
+            limitRectOverride = android.graphics.Rect(0, 0, 400, 600),
+            transformOverride = { ViewTransform() },
+        )
+        overlay.init()
+        overlay.enterBindMode()
+
+        assertFalse(strokeView.bindDrawingActive)
+        webView.dispatchTouchEvent(buildFingerEvent(MotionEvent.ACTION_DOWN))
+        assertTrue("bindDrawingActive must be set on finger down in bind mode", strokeView.bindDrawingActive)
+    }
+
+    @Test
+    fun bindMode_actionUp_clears_bindDrawingActive() {
+        val buf = StrokeBuffer()
+        val mock = MockPenController(buf)
+        val ctx = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.app.Application>()
+        val strokeView = StrokeView(ctx)
+        val webView = buildFakeWebView()
+        val overlay = PenOverlay(
+            webView = webView, buf = buf, strokeView = strokeView,
+            controllerOverride = mock,
+            limitRectOverride = android.graphics.Rect(0, 0, 400, 600),
+            transformOverride = { ViewTransform() },
+        )
+        overlay.init()
+        overlay.enterBindMode()
+
+        webView.dispatchTouchEvent(buildFingerEvent(MotionEvent.ACTION_DOWN))
+        assertTrue(strokeView.bindDrawingActive)
+        webView.dispatchTouchEvent(buildFingerEvent(MotionEvent.ACTION_UP))
+        assertFalse("bindDrawingActive must be cleared on finger up", strokeView.bindDrawingActive)
+    }
+
+    @Test
+    fun bindDrawingActive_false_outside_bind_mode() {
+        val buf = StrokeBuffer()
+        val mock = MockPenController(buf)
+        val ctx = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.app.Application>()
+        val strokeView = StrokeView(ctx)
+        val webView = buildFakeWebView()
+        val overlay = PenOverlay(
+            webView = webView, buf = buf, strokeView = strokeView,
+            controllerOverride = mock,
+            limitRectOverride = android.graphics.Rect(0, 0, 400, 600),
+            transformOverride = { ViewTransform() },
+        )
+        overlay.init()
+
+        webView.dispatchTouchEvent(buildFingerEvent(MotionEvent.ACTION_DOWN))
+        assertFalse("bindDrawingActive must stay false outside bind mode", strokeView.bindDrawingActive)
     }
 
     // ── ghost closing line (Bug 3 reproducer) ──────────────────────────────────

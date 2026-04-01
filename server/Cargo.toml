@@ -41,6 +41,8 @@ urlencoding = "2"
 syntect = "5"
 multer = "3"
 futures-util = "0.3"
+leptess = "0.14"
+image = "0.25"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

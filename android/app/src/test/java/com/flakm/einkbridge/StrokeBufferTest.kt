@@ -1,5 +1,6 @@
 package com.flakm.einkbridge
 
+import android.graphics.Color
 import org.junit.Assert.*
 import org.junit.Before
 import org.junit.Test
@@ -261,6 +262,62 @@ class StrokeBufferTest {
         b.begin(0f, 0f)
         b.addPoint(5f, 5f)
         b.end(10f, 10f)
+    }
+
+    // --- Color tests ---
+
+    @Test fun strokeColorDefaultsToBlack() {
+        buf.begin(0f, 0f); buf.end(10f, 10f)
+        assertEquals(Color.BLACK, buf.strokes[0].color)
+    }
+
+    @Test fun setColorAppliedToNextStroke() {
+        val red = Color.RED
+        buf.setColor(red)
+        buf.begin(0f, 0f); buf.end(10f, 10f)
+        assertEquals(red, buf.strokes[0].color)
+    }
+
+    @Test fun colorIsIndependentPerStroke() {
+        buf.setColor(Color.RED)
+        buf.begin(0f, 0f); buf.end(10f, 10f)
+        buf.setColor(Color.BLUE)
+        buf.begin(0f, 0f); buf.end(10f, 10f)
+        assertEquals(Color.RED, buf.strokes[0].color)
+        assertEquals(Color.BLUE, buf.strokes[1].color)
+    }
+
+    @Test fun colorRoundTripJson() {
+        buf.setColor(Color.RED)
+        buf.begin(10f, 20f, 3f); buf.end(30f, 40f)
+        buf.setColor(Color.BLACK)
+        buf.begin(50f, 60f, 3f); buf.end(70f, 80f)
+
+        val json = buf.toJson()
+        val restored = StrokeBuffer()
+        restored.loadJson(json)
+
+        assertEquals(Color.RED, restored.strokes[0].color)
+        assertEquals(Color.BLACK, restored.strokes[1].color)
+    }
+
+    @Test fun blackColorOmittedFromJson() {
+        buf.begin(0f, 0f); buf.end(10f, 10f)
+        val json = buf.toJson()
+        assertFalse("Black color should not be serialized", json.contains("\"c\""))
+    }
+
+    @Test fun nonBlackColorIncludedInJson() {
+        buf.setColor(Color.RED)
+        buf.begin(0f, 0f); buf.end(10f, 10f)
+        val json = buf.toJson()
+        assertTrue("Non-black color must be serialized", json.contains("\"c\""))
+    }
+
+    @Test fun loadJsonWithoutColorFieldDefaultsToBlack() {
+        val json = """[{"w":3.0,"pts":[[0.0,0.0],[10.0,10.0]]}]"""
+        buf.loadJson(json)
+        assertEquals(Color.BLACK, buf.strokes[0].color)
     }
 
     // --- Proximity grouping tests ---

@@ -180,11 +180,15 @@ internal class PenOverlay(
 ) {
     private val controller: PenInputController by lazy {
         val c = controllerOverride ?: OnyxPenController(buf, ::currentTransform, onEraseApplied = {
+            undoStack.clear()
             notifyStrokeView()
             controller.resetRenderBuffer()
             onStrokesChanged?.invoke()
+            webView.post { refreshStrokeLinks() }
         }, onStrokeProgress = { notifyStrokeViewLive() }, onStrokeCommitted = {
+            undoStack.add(UndoAction.StrokeAdded(buf.size - 1))
             onStrokesChanged?.invoke()
+            webView.post { refreshStrokeLinks() }
         })
         if (c is OnyxPenController && c.onStrokeProgress == null) {
             c.onStrokeProgress = { notifyStrokeViewLive() }
@@ -218,14 +222,16 @@ internal class PenOverlay(
     private val touchRouter = View.OnTouchListener { _, event ->
         val action = rawDrawingAction(event.pointerCount, event::getToolType, event.actionMasked)
         if (action != null) {
-            if (!action) {
-                notifyStrokeView()
-                controller.setEnabled(false)
-            } else {
-                controller.resetRenderBuffer()
-                notifyStrokeView()
+            if (!isBindMode) {
+                if (!action) {
+                    notifyStrokeView()
+                    controller.setEnabled(false)
+                } else {
+                    controller.resetRenderBuffer()
+                    notifyStrokeView()
+                }
             }
-            false
+            isBindMode  // consume finger events during bind to prevent WebView scroll
         } else {
             // Stylus/eraser event — consume it so the WebView doesn't scroll.
             val hasPen = (0 until event.pointerCount).any {
@@ -253,17 +259,50 @@ internal class PenOverlay(
         if (!buf.isEmpty) notifyStrokeView()
     }
 
-    /**
-     * The WebView doesn't fire onScrollChange for scale changes (pinch-zoom).
-     * We piggyback on ACTION_MOVE during finger gestures to update the transform.
-     */
     private fun setupScaleTracker() {
         val origListener = touchRouter
+
         @SuppressLint("ClickableViewAccessibility")
         val wrappedListener = View.OnTouchListener { v, event ->
             val result = origListener.onTouch(v, event)
-            if (event.actionMasked == MotionEvent.ACTION_MOVE && event.pointerCount >= 2) {
-                strokeView?.updateTransform(currentTransform())
+
+            when {
+                isBindMode && event.pointerCount == 1 -> when (event.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        val pts = mutableListOf(PointF(event.x, event.y))
+                        bindPoints = pts
+                        strokeView?.setBindPath(pts)
+                        strokeView?.bindDrawingActive = true
+                        strokeView?.invalidate()
+                        webView.evaluateJavascript("window.__einkHighlightAll && window.__einkHighlightAll()", null)
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        bindPoints?.add(PointF(event.x, event.y))
+                        strokeView?.setBindPath(bindPoints)
+                    }
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                        val pts = bindPoints ?: emptyList<PointF>()
+                        bindPoints = null
+                        strokeView?.setBindPath(null)
+                        strokeView?.bindDrawingActive = false
+                        strokeView?.invalidate()
+                        webView.evaluateJavascript("window.__einkUnhighlightAll && window.__einkUnhighlightAll()", null)
+                        val moved = pts.size > 1 && run {
+                            val dx = pts.last().x - pts.first().x
+                            val dy = pts.last().y - pts.first().y
+                            dx * dx + dy * dy > TAP_THRESHOLD_PX2
+                        }
+                        if (moved && event.actionMasked == MotionEvent.ACTION_UP) {
+                            completeBindGesture(pts)
+                        } else {
+                            flashMarkerNear(event.x, event.y)
+                        }
+                    }
+                }
+                !isBindMode && event.actionMasked == MotionEvent.ACTION_UP ->
+                    flashMarkerNear(event.x, event.y)
+                event.actionMasked == MotionEvent.ACTION_MOVE && event.pointerCount >= 2 ->
+                    strokeView?.updateTransform(currentTransform())
             }
             result
         }
@@ -315,34 +354,210 @@ internal class PenOverlay(
     fun disableDrawing() { controller.setEnabled(false) }
 
     fun setStrokeWidth(width: Float) { controller.setStrokeWidth(width) }
+    fun setStrokeColor(color: Int) { buf.setColor(color) }
     fun setStylePencil() { controller.setStylePencil() }
     fun setStyleBrush() { controller.setStyleBrush() }
     fun setStyleEraser() { controller.setStyleEraser() }
 
     fun undoLastStroke() {
-        buf.undo()
+        if (undoStack.isNotEmpty()) {
+            when (val action = undoStack.removeAt(undoStack.lastIndex)) {
+                is UndoAction.StrokeAdded -> {
+                    buf.undo()
+                    // Fix up bind groups that reference removed stroke
+                    val removedIdx = action.strokeIndex
+                    _bindGroups.removeAll { it.strokeIndices.contains(removedIdx) && it.strokeIndices.size == 1 }
+                    _bindGroups.replaceAll { g ->
+                        if (removedIdx in g.strokeIndices) {
+                            g.copy(strokeIndices = g.strokeIndices - removedIdx)
+                        } else g
+                    }
+                }
+                is UndoAction.BindGroupAdded -> {
+                    _bindGroups.removeAll { it.id == action.groupId }
+                    onBindGroupsChanged?.invoke()
+                    syncBindGroupsToWebView()
+                }
+            }
+        } else {
+            buf.undo()
+        }
         notifyStrokeView()
         controller.resetRenderBuffer()
         onStrokesChanged?.invoke()
+        refreshStrokeLinks()
     }
 
     fun clearStrokes() {
         buf.clear()
+        undoStack.clear()
         notifyStrokeView()
         controller.resetRenderBuffer()
         onStrokesChanged?.invoke()
+        webView.post {
+            webView.evaluateJavascript("window.__einkComputeStrokeLinks && window.__einkComputeStrokeLinks([],[])", null)
+        }
     }
 
     private fun notifyStrokeView() {
-        strokeView?.update(buf.strokes, currentTransform())
+        strokeView?.update(buf.strokes, currentTransform(), _bindGroups, bindPoints?.toList())
     }
 
     private fun notifyStrokeViewLive() {
         strokeView?.update(buf.allStrokes(), currentTransform())
     }
 
-    private val _explicitBindings = mutableMapOf<Int, MutableList<ElementEntry>>()
-    val explicitBindings: Map<Int, List<ElementEntry>> get() = _explicitBindings
+    fun enterBindMode() {
+        isBindMode = true
+        controller.setEnabled(false)
+    }
+
+    fun exitBindMode() {
+        isBindMode = false
+        bindPoints = null
+        strokeView?.setBindPath(null)
+        controller.resetRenderBuffer()
+    }
+
+    private fun completeBindGesture(pts: List<PointF>) {
+        val t = currentTransform()
+        val docPolygon = pts.map { t.screenToDocX(it.x) to t.screenToDocY(it.y) }
+        val docXs = docPolygon.map { it.first }
+        val docYs = docPolygon.map { it.second }
+        val left = docXs.min()
+        val top = docYs.min()
+        val right = docXs.max()
+        val bottom = docYs.max()
+
+        val strokeIndices = mutableSetOf<Int>()
+        buf.strokes.forEachIndexed { idx, stroke ->
+            val (cx, cy) = strokeCentroid(stroke)
+            val captured = pointInPolygon(cx, cy, docPolygon)
+                || stroke.points.any { (px, py) -> pointInPolygon(px, py, docPolygon) }
+            if (captured) strokeIndices.add(idx)
+        }
+
+        webView.evaluateJavascript("window.__einkFindElements($left, $top, $right, $bottom)") { raw ->
+            val elements = parseFoundElements(raw)
+            val markerX = docXs.average().toFloat()
+            val markerY = docYs.average().toFloat()
+            if (strokeIndices.isNotEmpty() || elements.isNotEmpty()) {
+                val color = nextGroupColor()
+                val centers = strokeIndices.mapNotNull { idx ->
+                    buf.strokes.getOrNull(idx)?.let { strokeCentroid(it) }
+                }
+                val elementCenters = elements.map { it.cx to it.cy }
+                val allCenters = centers + elementCenters
+                val midX = if (allCenters.isNotEmpty()) allCenters.map { it.first }.average().toFloat() else markerX
+                val midY = if (allCenters.isNotEmpty()) allCenters.map { it.second }.average().toFloat() else markerY
+                val groupId = nextGroupId++
+                _bindGroups.add(BindGroup(
+                    id = groupId,
+                    color = color,
+                    strokeIndices = strokeIndices,
+                    elementIndices = elements.map { it.i },
+                    elementRefs = elements.map { ElementRef(it.id, it.tag, it.text) },
+                    markerDocX = midX,
+                    markerDocY = midY,
+                    strokeDocCenters = centers,
+                    elementDocCenters = elementCenters,
+                ))
+                @Suppress("DEPRECATION")
+                (webView.context.getSystemService(android.content.Context.VIBRATOR_SERVICE) as? android.os.Vibrator)?.vibrate(50)
+                undoStack.add(UndoAction.BindGroupAdded(groupId))
+                notifyStrokeView()
+                syncBindGroupsToWebView()
+                expandGroup(_bindGroups.last())
+            } else {
+                notifyStrokeView()
+            }
+            onBindGroupsChanged?.invoke()
+            onBindComplete?.invoke()
+        }
+    }
+
+    private fun parseFoundElements(raw: String?): List<FoundElement> {
+        val cleaned = raw?.trim()?.removeSurrounding("\"")
+            ?.replace("\\\"", "\"")?.replace("\\\\", "\\") ?: "[]"
+        return try {
+            val arr = org.json.JSONArray(cleaned)
+            (0 until arr.length()).map {
+                val obj = arr.getJSONObject(it)
+                FoundElement(
+                    i = obj.getInt("i"),
+                    tag = obj.getString("tag"),
+                    id = obj.optString("id", null),
+                    text = obj.optString("text", ""),
+                    cx = obj.optDouble("cx", 0.0).toFloat(),
+                    cy = obj.optDouble("cy", 0.0).toFloat(),
+                )
+            }
+        } catch (_: Exception) { emptyList<FoundElement>() }
+    }
+
+    var onDeleteBindGroup: ((BindGroup) -> Unit)? = null
+
+    private fun flashMarkerNear(screenX: Float, screenY: Float) {
+        if (_bindGroups.isEmpty()) return
+        val t = currentTransform()
+        val docX = t.screenToDocX(screenX)
+        val docY = t.screenToDocY(screenY)
+        val thresholdDoc = StrokeView.MARKER_RADIUS_PX * 3f / t.scale
+        val group = _bindGroups.minByOrNull { g ->
+            val dx = g.markerDocX - docX; val dy = g.markerDocY - docY; dx * dx + dy * dy
+        } ?: return
+        val dx = group.markerDocX - docX; val dy = group.markerDocY - docY
+        if (dx * dx + dy * dy > thresholdDoc * thresholdDoc) return
+
+        val alreadyExpanded = strokeView?.isGroupExpanded(group.id) == true
+        if (alreadyExpanded) {
+            onDeleteBindGroup?.invoke(group)
+        } else {
+            expandGroup(group)
+        }
+    }
+
+    private fun expandGroup(group: BindGroup) {
+        strokeView?.showGroup(group.id)
+        val colorHex = "#%06X".format(group.color and 0xFFFFFF)
+        val indicesJson = org.json.JSONArray(group.elementIndices).toString()
+        webView.evaluateJavascript("window.__einkFlashGroup($indicesJson, '$colorHex')", null)
+    }
+
+    fun removeBindGroup(groupId: Int) {
+        _bindGroups.removeAll { it.id == groupId }
+        undoStack.removeAll { it is UndoAction.BindGroupAdded && it.groupId == groupId }
+        notifyStrokeView()
+        syncBindGroupsToWebView()
+        onBindGroupsChanged?.invoke()
+    }
+
+    private fun nextGroupColor(): Int {
+        val used = _bindGroups.map { it.color }.toSet()
+        return GROUP_PALETTE.firstOrNull { it !in used } ?: GROUP_PALETTE[_bindGroups.size % GROUP_PALETTE.size]
+    }
+
+    internal sealed class UndoAction {
+        data class StrokeAdded(val strokeIndex: Int) : UndoAction()
+        data class BindGroupAdded(val groupId: Int) : UndoAction()
+    }
+
+    private val _bindGroups = mutableListOf<BindGroup>()
+    val bindGroups: List<BindGroup> get() = _bindGroups
+    private val undoStack = mutableListOf<UndoAction>()
+    private var isBindMode = false
+    private var bindPoints: MutableList<PointF>? = null
+    private var nextGroupId = 0
+    var onBindComplete: (() -> Unit)? = null
+    var onBindGroupsChanged: (() -> Unit)? = null
+
+    fun loadBindGroups(groups: List<BindGroup>) {
+        _bindGroups.clear()
+        _bindGroups.addAll(groups)
+        nextGroupId = (groups.maxOfOrNull { it.id } ?: -1) + 1
+        notifyStrokeView()
+        syncBindGroupsToWebView()
+    }
 
     fun queryElementMap(callback: (List<ElementEntry>) -> Unit) {
         webView.evaluateJavascript("JSON.stringify(window.__einkElementMap || [])") { json ->
@@ -357,42 +572,38 @@ internal class PenOverlay(
         }
     }
 
-    fun tapToBindElement(screenX: Float, screenY: Float, callback: (ElementEntry?, Boolean) -> Unit) {
-        val t = currentTransform()
-        val docX = t.screenToDocX(screenX)
-        val docY = t.screenToDocY(screenY)
-        webView.evaluateJavascript("window.__einkTapElement($docX, $docY)") { raw ->
-            val cleaned = raw?.trim()?.removeSurrounding("\"")
-                ?.replace("\\\"", "\"")
-                ?.replace("\\\\", "\\") ?: "null"
-            try {
-                val obj = JSONObject(cleaned)
-                val entry = ElementEntry(
-                    i = obj.getInt("i"),
-                    tag = obj.getString("tag"),
-                    id = obj.optString("id", null),
-                    t = 0f, b = 0f, l = 0f, r = 0f,
-                    text = obj.optString("text", ""),
-                )
-                val anchored = obj.getBoolean("anchored")
-                if (anchored) {
-                    val lastStrokeIdx = buf.size - 1
-                    if (lastStrokeIdx >= 0) {
-                        _explicitBindings.getOrPut(lastStrokeIdx) { mutableListOf() }.add(entry)
-                    }
-                } else {
-                    _explicitBindings.values.forEach { list -> list.removeAll { it.i == entry.i } }
-                    _explicitBindings.entries.removeAll { it.value.isEmpty() }
-                }
-                callback(entry, anchored)
-            } catch (_: Exception) {
-                callback(null, false)
-            }
+    fun clearBindGroups() {
+        _bindGroups.clear()
+        undoStack.removeAll { it is UndoAction.BindGroupAdded }
+        onBindGroupsChanged?.invoke()
+        notifyStrokeView()
+        syncBindGroupsToWebView()
+    }
+
+    fun refreshStrokeLinks() {
+        webView.post {
+            webView.evaluateJavascript("window.__einkComputeStrokeLinks && window.__einkComputeStrokeLinks([],[])", null)
         }
     }
 
-    fun clearExplicitBindings() {
-        _explicitBindings.clear()
+    private fun syncBindGroupsToWebView() {
+        if (_bindGroups.isEmpty()) {
+            webView.post {
+                webView.evaluateJavascript("window.__einkApplyBindGroups && window.__einkApplyBindGroups([])", null)
+            }
+            return
+        }
+        val groupsJson = org.json.JSONArray().apply {
+            for (g in _bindGroups) {
+                put(org.json.JSONObject().apply {
+                    put("color", "#%06X".format(g.color and 0xFFFFFF))
+                    put("indices", org.json.JSONArray(g.elementIndices))
+                })
+            }
+        }
+        webView.post {
+            webView.evaluateJavascript("window.__einkApplyBindGroups && window.__einkApplyBindGroups($groupsJson)", null)
+        }
     }
 
     fun exportToPng(): ByteArray? {
@@ -435,6 +646,14 @@ internal class PenOverlay(
         webView.setOnScrollChangeListener(null as View.OnScrollChangeListener?)
         controller.close()
         initialized = false
+    }
+
+    companion object {
+        private const val TAP_THRESHOLD_PX2 = 30f * 30f
+        private val GROUP_PALETTE = intArrayOf(
+            0xFFe74c3c.toInt(), 0xFF2196f3.toInt(), 0xFF4caf50.toInt(),
+            0xFFff9800.toInt(), 0xFF9c27b0.toInt(), 0xFF009688.toInt(),
+        )
     }
 }
 

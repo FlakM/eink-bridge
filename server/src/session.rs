@@ -223,6 +223,13 @@ impl SessionManager {
         }
     }
 
+    pub fn update_annotations(&mut self, id: &str, annotations: Vec<AnnotationGroup>) {
+        if let Some(s) = self.sessions.get_mut(id) {
+            s.annotations = annotations;
+            s.persist();
+        }
+    }
+
     pub fn expire_stale(&mut self, timeout: Duration) {
         let now = Utc::now();
         for session in self.sessions.values_mut() {

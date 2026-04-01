@@ -119,4 +119,64 @@ class MainActivityTest {
             assertNotNull(activity.strokeSlider)
         }
     }
+
+    // ── Bind mode interactions ─────────────────────────────────────────────────
+
+    @Test
+    fun enterBindMode_setsBindModeActive() {
+        scenario.onActivity { activity ->
+            assertFalse(activity.bindModeActive)
+            activity.enterBindMode()
+            assertTrue(activity.bindModeActive)
+        }
+    }
+
+    @Test
+    fun exitBindMode_clearsBindModeActive() {
+        scenario.onActivity { activity ->
+            activity.enterBindMode()
+            assertTrue(activity.bindModeActive)
+            activity.exitBindMode()
+            assertFalse(activity.bindModeActive)
+        }
+    }
+
+    @Test
+    fun pencilButtonClick_exitsBind_whenBindModeActive() {
+        scenario.onActivity { activity ->
+            activity.enterBindMode()
+            assertTrue(activity.bindModeActive)
+            activity.findViewById<android.widget.Button>(R.id.btnPencil).performClick()
+            assertFalse("Bind mode must exit when pencil is tapped", activity.bindModeActive)
+        }
+    }
+
+    @Test
+    fun brushButtonClick_exitsBind_whenBindModeActive() {
+        scenario.onActivity { activity ->
+            activity.enterBindMode()
+            activity.findViewById<android.widget.Button>(R.id.btnBrush).performClick()
+            assertFalse("Bind mode must exit when brush is tapped", activity.bindModeActive)
+        }
+    }
+
+    @Test
+    fun eraserButtonClick_exitsBind_whenBindModeActive() {
+        scenario.onActivity { activity ->
+            activity.enterBindMode()
+            activity.findViewById<android.widget.Button>(R.id.btnEraser).performClick()
+            assertFalse("Bind mode must exit when eraser is tapped", activity.bindModeActive)
+        }
+    }
+
+    // ── Clear confirmation ─────────────────────────────────────────────────────
+
+    @Test
+    fun clearButtonClick_showsAlertDialog() {
+        scenario.onActivity { activity ->
+            activity.findViewById<android.widget.Button>(R.id.btnClear).performClick()
+            val dialog = org.robolectric.shadows.ShadowAlertDialog.getLatestAlertDialog()
+            assertNotNull("Clear must show a confirmation dialog", dialog)
+        }
+    }
 }
