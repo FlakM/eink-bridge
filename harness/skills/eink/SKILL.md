@@ -5,7 +5,7 @@ description: Push content to Boox e-ink tablet for iterative review. Supports mu
 
 # E-Ink Review
 
-Push content to the Boox for reading and annotation. Supports iterative rounds: the user can annotate and request an update, the agent rewrites the document, and the tablet reloads.
+Push content to the Boox for reading and annotation. Supports iterative rounds: the user annotates and taps "Request Update", the agent rewrites the document, and the tablet reloads automatically.
 
 ## Usage
 
@@ -22,66 +22,50 @@ Push content to the Boox for reading and annotation. Supports iterative rounds: 
    - If the user provided a file path, use it directly.
    - Otherwise, write a context summary to `/tmp/eink-review-XXXXX.md`.
 
-2. **Start the interactive push in the background**, capturing stdout to a temp log:
+2. **Start the interactive push in the background:**
 ```bash
 LOGFILE=$(mktemp /tmp/eink-events-XXXXX.log)
-ERRFILE=$(mktemp /tmp/eink-err-XXXXX.log)
-eink-review push --interactive --timeout 60 <file> >"$LOGFILE" 2>"$ERRFILE" &
+eink-review push --interactive --timeout 60 <file> >"$LOGFILE" 2>&1 &
 echo "PID:$! LOG:$LOGFILE"
 ```
 
-3. **Get the session ID** (emitted first to stdout):
+3. **Get the session ID** (first line emitted to stdout):
 ```bash
-sleep 1
-grep -m1 "^SESSION_ID:" "$LOGFILE"
+sleep 2 && grep -m1 "^SESSION_ID:" "$LOGFILE"
 ```
 Parse the session ID from `SESSION_ID:<id>`.
 
-4. **Event loop** — repeat until `EVENT:SUBMITTED` appears:
+4. **Event loop** — poll until `EVENT:SUBMITTED` appears. Track consumed lines with a counter (start at 1):
 ```bash
-cat "$LOGFILE"
+tail -n +<NEXT_LINE> "$LOGFILE"
 ```
+After reading, advance `NEXT_LINE` by the number of lines just read.
 
-   **On `EVENT:ANNOTATION_RESULT <json>`** (user tapped "Request Update"):
-   - Parse the JSON: `annotations[]`, `version`
+   **On `EVENT:ANNOTATION_RESULT <json>`:**
+   - Parse the embedded JSON: `annotations[]`, `version`
    - For each annotation:
      - `recognized_text` — OCR'd handwriting (may have errors; use judgement)
      - `anchor.elements[]` — `section_id`, `tag`, `text` of nearby document elements
-   - Read any annotation image paths from the result (use **Read** tool to view PNGs)
-   - Decide what to update based on the feedback
-   - Write the updated markdown to `/tmp/eink-update-XXXXX.md`
-     - **Preserve heading structure** so anchors survive across versions
-   - Push the update:
+   - Decide what to update. Rewrite the markdown:
+     - Keep sections that received no feedback unchanged
+     - Apply feedback to anchored sections (correct, expand, simplify, etc.)
+     - Preserve heading text and hierarchy — section anchoring depends on stable headings
+   - Write updated content to `/tmp/eink-update-XXXXX.md`
+   - Push the update (this unblocks the tablet):
    ```bash
    eink-review update <session-id> /tmp/eink-update-XXXXX.md
    ```
-   - Check the log again for the next event
+   - Poll again for the next event
 
-   **On `EVENT:SUBMITTED <json>`** (user tapped "Done"):
-   - Parse the result JSON
-   - Read annotation image paths from `result.annotation_images[]` using the **Read** tool
+   **On `EVENT:SUBMITTED <json>`:**
+   - Parse `result.annotation_images[]` — use the **Read** tool to view each PNG
    - Break out of the event loop
 
-5. **Summarize all feedback rounds** and continue the conversation informed by the annotations.
+5. **Summarize all feedback rounds** and continue the conversation.
 
 6. **On failure** (exit 1, timeout, server unreachable):
-   - Report the error
+   - Report the error to the user
    - If connection refused: `systemctl --user start eink-serve`
-
-## Processing annotation feedback
-
-When an `EVENT:ANNOTATION_RESULT` arrives:
-
-- `recognized_text` is OCR output — trust it but it may misread letters.
-- `anchor.elements[].section_id` maps the annotation to a specific document section. Use this to target the rewrite precisely.
-- `anchor.elements[].text` gives a snippet of the anchored element's text for context.
-- Annotations without `anchor` are global comments.
-
-When rewriting:
-- Keep sections that received no feedback unchanged.
-- For annotated sections: apply the feedback (correct, expand, simplify, etc.).
-- Preserve heading text and hierarchy — section anchoring depends on it.
-- Prefer targeted edits over wholesale rewrites.
 
 ## Authoring Rich Review Documents
 
