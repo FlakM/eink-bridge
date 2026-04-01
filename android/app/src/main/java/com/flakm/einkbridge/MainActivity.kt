@@ -41,12 +41,6 @@ class MainActivity : AppCompatActivity() {
     private var penOverlay: PenOverlay? = null
     private lateinit var docCache: DocumentCache
     private var wsClient: WebSocketClient? = null
-    private var isProcessing = false
-        set(value) {
-            Log.i(TAG, "isProcessing $field -> $value", Throwable("stack"))
-            field = value
-        }
-
     private val client = OkHttpClient.Builder()
         .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(10, TimeUnit.SECONDS)
@@ -248,7 +242,6 @@ class MainActivity : AppCompatActivity() {
         }
         btnLink.setOnClickListener { enterBindMode() }
         btnColor.setOnClickListener { showColorPicker() }
-        findViewById<Button>(R.id.btnRequestUpdate).setOnClickListener { sendRequestUpdate() }
         findViewById<Button>(R.id.btnSubmit).setOnClickListener { submitAndGoBack() }
 
         selectStyle(0)
@@ -305,7 +298,6 @@ class MainActivity : AppCompatActivity() {
     private fun openSession(sessionId: String) {
         Log.i(TAG, "openSession id=$sessionId serverUrl=$serverUrl")
         currentSessionId = sessionId
-        isProcessing = false
         pollJob?.cancel()
         penOverlay?.destroy()
         penOverlay = null
@@ -314,17 +306,7 @@ class MainActivity : AppCompatActivity() {
             serverUrl = serverUrl,
             sessionId = sessionId,
             onMessage = { type, json -> handleWsMessage(type, json) },
-            onClosed = {
-                Log.w(TAG, "ws onClosed session=$sessionId isProcessing=$isProcessing")
-                runOnUiThread {
-                    if (isProcessing) {
-                        Log.w(TAG, "ws closed while processing — unlocking UI session=$sessionId")
-                        isProcessing = false
-                        updateProcessingUi()
-                        Toast.makeText(this, "Agent disconnected — you can still submit", Toast.LENGTH_LONG).show()
-                    }
-                }
-            },
+            onClosed = { Log.w(TAG, "ws onClosed session=$sessionId") },
         ).also { it.connect() }
         sessionListContainer.visibility = View.GONE
         webView.visibility = View.VISIBLE
@@ -339,7 +321,10 @@ class MainActivity : AppCompatActivity() {
         val buf = StrokeBuffer()
         loadStrokes(sessionId, buf)
         val overlay = PenOverlay(webView, penToolbar, strokeView, buf = buf,
-            onStrokesChanged = { saveStrokes(sessionId, buf) })
+            onStrokesChanged = { saveStrokes(sessionId, buf) },
+            ocrClient = OcrClient { serverUrl },
+            ocrScope = scope,
+        )
         overlay.init()
         overlay.setStrokeColor(currentStrokeColor)
         overlay.onBindGroupsChanged = { saveBindGroups(sessionId, overlay.bindGroups) }
@@ -390,18 +375,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showSessionList() {
-        Log.i(TAG, "showSessionList: leaving session=$currentSessionId isProcessing=$isProcessing")
+        Log.i(TAG, "showSessionList: leaving session=$currentSessionId")
         penOverlay?.disableDrawing()
         penOverlay?.destroy()
         penOverlay = null
         wsClient?.disconnect()
         wsClient = null
-        isProcessing = false
         currentSessionId = null
         webView.visibility = View.GONE
         strokeView.visibility = View.GONE
         penToolbar.visibility = View.GONE
-        findViewById<View>(R.id.processingOverlay).visibility = View.GONE
         sessionListContainer.visibility = View.VISIBLE
     }
 
@@ -414,7 +397,7 @@ class MainActivity : AppCompatActivity() {
             Log.w(TAG, "submitAndGoBack: no penOverlay session=$sessionId, ignoring")
             return
         }
-        Log.i(TAG, "submitAndGoBack: starting session=$sessionId isProcessing=$isProcessing strokes=${overlay.buf.strokes.size}")
+        Log.i(TAG, "submitAndGoBack: starting session=$sessionId strokes=${overlay.buf.strokes.size}")
         overlay.queryElementMap { elements ->
             Log.d(TAG, "submitAndGoBack: queryElementMap callback elements=${elements.size}")
             scope.launch {
@@ -602,115 +585,31 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun handleWsMessage(type: String, json: JSONObject) {
-        Log.d(TAG, "handleWsMessage type=$type session=$currentSessionId isProcessing=$isProcessing json=${json.toString().take(200)}")
+        Log.d(TAG, "handleWsMessage type=$type session=$currentSessionId json=${json.toString().take(200)}")
         runOnUiThread {
             when (type) {
-                "processing_status" -> {
-                    val msg = json.optString("message", "Processing...")
-                    Log.i(TAG, "processing_status: $msg")
-                    isProcessing = true
-                    updateProcessingUi(msg)
-                }
-                "annotation_result" -> {
-                    val annCount = json.optJSONArray("annotations")?.length() ?: 0
-                    Log.i(TAG, "annotation_result: version=${json.optInt("version")} annotations=$annCount")
-                    updateProcessingUi("Agent updating document...")
-                }
                 "version_updated" -> {
                     val version = json.optInt("version")
-                    Log.i(TAG, "version_updated: version=$version — clearing isProcessing, reloading webview")
-                    isProcessing = false
-                    updateProcessingUi()
+                    Log.i(TAG, "version_updated: version=$version — reloading webview")
                     webView.reload()
                     Toast.makeText(this, "Document updated ✓", Toast.LENGTH_SHORT).show()
                 }
                 "session_submitted" -> {
                     Log.i(TAG, "session_submitted: going back to session list")
-                    isProcessing = false
                     Toast.makeText(this, "Session submitted", Toast.LENGTH_SHORT).show()
                     showSessionList()
                     startPolling()
                 }
                 "error" -> {
                     val errMsg = json.optString("message", "Unknown error")
-                    Log.w(TAG, "server error: $errMsg — clearing isProcessing")
-                    isProcessing = false
-                    updateProcessingUi()
+                    Log.w(TAG, "server error: $errMsg")
                     Toast.makeText(this, errMsg, Toast.LENGTH_LONG).show()
                 }
-                else -> {
-                    Log.w(TAG, "unhandled ws message type=$type")
-                }
+                else -> Log.w(TAG, "unhandled ws message type=$type")
             }
         }
     }
 
-    private fun sendRequestUpdate() {
-        val sessionId = currentSessionId ?: run {
-            Log.w(TAG, "sendRequestUpdate: no currentSessionId, ignoring")
-            return
-        }
-        val overlay = penOverlay ?: run {
-            Log.w(TAG, "sendRequestUpdate: no penOverlay session=$sessionId, ignoring")
-            return
-        }
-        if (isProcessing) {
-            Log.w(TAG, "sendRequestUpdate: already processing session=$sessionId, ignoring tap")
-            return
-        }
-        Log.i(TAG, "sendRequestUpdate: starting session=$sessionId strokes=${overlay.buf.strokes.size}")
-        overlay.queryElementMap { elements ->
-            Log.d(TAG, "sendRequestUpdate: queryElementMap callback elements=${elements.size}")
-            scope.launch {
-                val (explicitGroups, unanchoredStrokes) = bindGroupsToAnnotations(
-                    overlay.buf.strokes, overlay.bindGroups
-                )
-                val (proximityGroups, trulyUnanchored) = groupStrokesWithProximity(
-                    unanchoredStrokes, elements
-                )
-                val allGroups = explicitGroups + proximityGroups
-                Log.i(TAG, "sendRequestUpdate: explicit=${explicitGroups.size} proximity=${proximityGroups.size} unanchored=${trulyUnanchored.size}")
-                val annotationsJson = annotationsToJson(allGroups, trulyUnanchored)
-                val msg = JSONObject()
-                msg.put("type", "request_update")
-                msg.put("annotations", JSONArray(annotationsJson))
-                msg.put("typed_notes", "")
-                val ws = wsClient
-                if (ws == null) {
-                    Log.e(TAG, "sendRequestUpdate: wsClient is null! cannot send session=$sessionId")
-                } else {
-                    Log.i(TAG, "sendRequestUpdate: sending ws message session=$sessionId")
-                    ws.send(msg)
-                }
-                isProcessing = true
-                updateProcessingUi()
-            }
-        }
-    }
-
-    internal fun updateProcessingUi(statusText: String? = null) {
-        Log.d(TAG, "updateProcessingUi isProcessing=$isProcessing statusText=$statusText")
-        val overlay = findViewById<View>(R.id.processingOverlay)
-        val statusView = findViewById<TextView>(R.id.processingStatus)
-        val btnRequestUpdate = findViewById<Button>(R.id.btnRequestUpdate)
-        val btnSubmit = findViewById<Button>(R.id.btnSubmit)
-        if (isProcessing) {
-            overlay.visibility = View.VISIBLE
-            statusView.text = statusText ?: "Processing..."
-            btnRequestUpdate.isEnabled = false
-            btnRequestUpdate.alpha = 0.4f
-            btnSubmit.isEnabled = false
-            btnSubmit.alpha = 0.6f
-            Log.d(TAG, "updateProcessingUi: buttons DISABLED")
-        } else {
-            overlay.visibility = View.GONE
-            btnRequestUpdate.isEnabled = true
-            btnRequestUpdate.alpha = 1.0f
-            btnSubmit.isEnabled = true
-            btnSubmit.alpha = 1.0f
-            Log.d(TAG, "updateProcessingUi: buttons ENABLED")
-        }
-    }
 }
 
 data class SessionInfo(

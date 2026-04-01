@@ -35,6 +35,7 @@ internal sealed class Anchor {
 internal data class StrokeGroup(
     val anchor: Anchor?,
     val strokes: List<Stroke>,
+    val recognizedText: String? = null,
 )
 
 internal data class FoundElement(val i: Int, val tag: String, val id: String?, val section: String?, val text: String, val cx: Float = 0f, val cy: Float = 0f)
@@ -49,6 +50,7 @@ internal data class BindGroup(
     val markerDocY: Float,
     val strokeDocCenters: List<Pair<Float, Float>> = emptyList(),
     val elementDocCenters: List<Pair<Float, Float>> = emptyList(),
+    val recognizedText: String? = null,
 )
 
 /**
@@ -297,6 +299,7 @@ internal fun annotationsToJson(groups: List<StrokeGroup>, unanchored: List<Strok
             obj.put("anchor", anchorObj)
         }
         obj.put("strokes", strokesToPointArrays(group.strokes))
+        group.recognizedText?.let { obj.put("recognized_text", it) }
         arr.put(obj)
     }
     if (unanchored.isNotEmpty()) {
@@ -315,7 +318,11 @@ internal fun bindGroupsToAnnotations(
     val groups = bindGroups.mapNotNull { bg ->
         val groupStrokes = bg.strokeIndices.mapNotNull { strokes.getOrNull(it) }
         if (groupStrokes.isEmpty() && bg.elementRefs.isEmpty()) return@mapNotNull null
-        StrokeGroup(anchor = Anchor.Explicit(bg.elementRefs), strokes = groupStrokes)
+        StrokeGroup(
+            anchor = Anchor.Explicit(bg.elementRefs),
+            strokes = groupStrokes,
+            recognizedText = bg.recognizedText,
+        )
     }
     val unanchored = strokes.filterIndexed { idx, _ -> idx !in usedIndices }
     return groups to unanchored

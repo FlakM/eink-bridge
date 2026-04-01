@@ -127,6 +127,7 @@ pub fn build_app(state: AppState) -> Router {
     Router::new()
         .route("/api/health", get(health))
         .route("/api/openapi.json", get(openapi_json))
+        .route("/api/ocr", post(ocr_strokes))
         .route(
             "/api/sessions",
             get(list_sessions)
@@ -154,6 +155,27 @@ async fn health() -> &'static str {
 
 async fn openapi_json() -> Json<serde_json::Value> {
     Json(openapi_spec())
+}
+
+#[derive(Deserialize)]
+struct OcrRequest {
+    strokes: Vec<Vec<[f64; 2]>>,
+}
+
+async fn ocr_strokes(
+    State(state): State<AppState>,
+    Json(body): Json<OcrRequest>,
+) -> Response {
+    let Some(engine) = &state.ocr_engine else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "OCR engine not available").into_response();
+    };
+    match engine.recognize_strokes(&body.strokes).await {
+        Ok(text) => Json(serde_json::json!({ "text": text })).into_response(),
+        Err(e) => {
+            tracing::warn!(error = %e, "OCR request failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, e).into_response()
+        }
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -312,7 +334,7 @@ async fn update_content(
     };
     let version = {
         let mut mgr = state.sessions.write().await;
-        mgr.apply_update(&id, content)
+        mgr.update_content(&id, content)
     };
     match version {
         Some(v) => {
@@ -437,22 +459,9 @@ async fn submit_review(
                 .get(&id)
                 .and_then(|s| s.verdict.as_ref().map(|v| v.as_str().to_string()));
             let image_count = mgr.get(&id).map(|s| s.annotation_images.len()).unwrap_or(0);
-            let ocr_annotations = mgr.get(&id).map(|s| s.annotations.clone());
             let ws_result = mgr.get(&id).map(SessionResultResponse::from_session);
             drop(mgr);
             tracing::info!(id = %id, ?verdict, images = image_count, "review submitted");
-            if let (Some(engine), Some(mut annotations)) =
-                (state.ocr_engine.clone(), ocr_annotations)
-            {
-                let ocr_state = state.clone();
-                let ocr_id = id.clone();
-                tokio::spawn(async move {
-                    crate::ocr::ocr_annotation_groups(&engine, &mut annotations).await;
-                    let mut mgr = ocr_state.sessions.write().await;
-                    mgr.update_annotations(&ocr_id, annotations);
-                    tracing::info!(id = %ocr_id, "OCR processing complete");
-                });
-            }
             state.notify_and_cleanup(&id).await;
             if let Some(result) = ws_result {
                 state

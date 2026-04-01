@@ -107,7 +107,7 @@ async fn ws_cancelled_session_receives_error() {
 }
 
 #[tokio::test]
-async fn ws_request_update_returns_annotation_result() {
+async fn ws_content_update_via_http_notifies_version() {
     let (url, _handle) = start_server().await;
     let id = create_session(&url).await;
 
@@ -115,52 +115,13 @@ async fn ws_request_update_returns_annotation_result() {
         .await
         .unwrap();
 
-    ws.send(Message::Text(
-        json!({"type": "request_update", "annotations": [], "typed_notes": ""}).to_string(),
-    ))
-    .await
-    .unwrap();
-
-    // Skip any processing_status messages (OCR engine may or may not be available)
-    let msg = loop {
-        let m = next_text(&mut ws).await;
-        if m["type"].as_str() != Some("processing_status") {
-            break m;
-        }
-    };
-    assert_eq!(msg["type"].as_str().unwrap(), "annotation_result");
-    assert_eq!(msg["version"].as_u64().unwrap(), 1);
-}
-
-#[tokio::test]
-async fn ws_update_content_increments_version() {
-    let (url, _handle) = start_server().await;
-    let id = create_session(&url).await;
-
-    let (mut ws, _) = connect_async(ws_url(&url, &format!("/ws/{id}")))
+    reqwest::Client::new()
+        .put(format!("{url}/api/sessions/{id}/content"))
+        .header("Content-Type", "text/plain")
+        .body("# Updated\n\nv2")
+        .send()
         .await
         .unwrap();
-
-    // Transition to Processing first
-    ws.send(Message::Text(
-        json!({"type": "request_update", "annotations": [], "typed_notes": ""}).to_string(),
-    ))
-    .await
-    .unwrap();
-    // Consume processing_status (if OCR present) and annotation_result
-    loop {
-        let m = next_text(&mut ws).await;
-        if m["type"].as_str() != Some("processing_status") {
-            break; // annotation_result consumed
-        }
-    }
-
-    // Now update content
-    ws.send(Message::Text(
-        json!({"type": "update_content", "content": "# Updated\n\nv2"}).to_string(),
-    ))
-    .await
-    .unwrap();
 
     let msg = next_text(&mut ws).await;
     assert_eq!(msg["type"].as_str().unwrap(), "version_updated");

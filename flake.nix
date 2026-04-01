@@ -60,13 +60,6 @@
 
         einkBridge = craneLib.buildPackage (commonArgs // {
           inherit cargoArtifacts;
-          nativeBuildInputs = commonArgs.nativeBuildInputs ++ [ pkgs.makeWrapper ];
-          postInstall = ''
-            for bin in $out/bin/*; do
-              wrapProgram "$bin" \
-                --set TESSDATA_PREFIX "${pkgs.tesseract}/share/tessdata"
-            done
-          '';
           postFixup = ''
             mkdir -p $out/share/eink-bridge
             cp -r $src/assets $out/share/eink-bridge/assets

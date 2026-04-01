@@ -74,6 +74,8 @@ dependencies {
     implementation("com.onyx.android.sdk:onyxsdk-pen:1.4.11") {
         exclude(group = "com.android.support")
     }
+    implementation("com.google.mlkit:digital-ink-recognition:18.1.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.9.0")
 
     // Unit testing
     testImplementation("junit:junit:4.13.2")

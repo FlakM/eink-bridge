@@ -11,6 +11,10 @@ import com.onyx.android.sdk.data.note.TouchPoint
 import com.onyx.android.sdk.pen.RawInputCallback
 import com.onyx.android.sdk.pen.TouchHelper
 import com.onyx.android.sdk.pen.data.TouchPointList
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
@@ -177,6 +181,8 @@ internal class PenOverlay(
     internal val transformOverride: (() -> ViewTransform)? = null,
     /** Called whenever committed strokes change (draw, undo, clear, erase). */
     private val onStrokesChanged: (() -> Unit)? = null,
+    internal var ocrClient: OcrClient? = null,
+    internal var ocrScope: CoroutineScope? = null,
 ) {
     private val controller: PenInputController by lazy {
         val c = controllerOverride ?: OnyxPenController(buf, ::currentTransform, onEraseApplied = {
@@ -189,6 +195,7 @@ internal class PenOverlay(
             undoStack.add(UndoAction.StrokeAdded(buf.size - 1))
             onStrokesChanged?.invoke()
             webView.post { refreshStrokeLinks() }
+            scheduleOcr()
         })
         if (c is OnyxPenController && c.onStrokeProgress == null) {
             c.onStrokeProgress = { notifyStrokeViewLive() }
@@ -196,6 +203,27 @@ internal class PenOverlay(
         c
     }
     private var initialized = false
+    private var ocrJob: Job? = null
+
+    private fun scheduleOcr() {
+        val scope = ocrScope ?: return
+        val client = ocrClient ?: return
+        ocrJob?.cancel()
+        ocrJob = scope.launch {
+            delay(2000)
+            runOcr(client)
+        }
+    }
+
+    private suspend fun runOcr(client: OcrClient) {
+        val groups = _bindGroups.toList()
+        for ((i, group) in groups.withIndex()) {
+            val strokes = group.strokeIndices.mapNotNull { buf.strokes.getOrNull(it) }
+            if (strokes.isEmpty()) continue
+            val text = client.recognize(strokes) ?: continue
+            _bindGroups[i] = group.copy(recognizedText = text)
+        }
+    }
 
     @Suppress("DEPRECATION")
     internal fun currentTransform(): ViewTransform {
