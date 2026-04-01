@@ -6,8 +6,8 @@
 /// execution is handled by Ollama's OLLAMA_NUM_PARALLEL setting (set to 4 in
 /// the NixOS service config).
 ///
-/// Run with:
-///   cargo test --test ocr_handwriting_test
+/// Run with (requires Ollama running locally):
+///   cargo test --test ocr_handwriting_test -- --ignored
 use eink_bridge::ocr::OcrEngine;
 use std::sync::LazyLock;
 use tokio::sync::Mutex;
@@ -40,6 +40,7 @@ fn skip_if_no_engine() -> Option<OcrEngine> {
 
 /// Sample 1 — large block-capital single word in pink ink: "TEST"
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Ollama running locally"]
 async fn recognizes_large_block_caps_single_word() {
     let _lock = OLLAMA.lock().await;
     let Some(engine) = skip_if_no_engine() else {
@@ -55,6 +56,7 @@ async fn recognizes_large_block_caps_single_word() {
 
 /// Sample 2 — block-caps word with heavily crossed T and F strokes: "WTF"
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Ollama running locally"]
 async fn recognizes_block_caps_with_crossed_strokes() {
     let _lock = OLLAMA.lock().await;
     let Some(engine) = skip_if_no_engine() else {
@@ -72,6 +74,7 @@ async fn recognizes_block_caps_with_crossed_strokes() {
 /// Note: cursive 'n' and 'm' are visually similar; the model may read "mow".
 /// Both are accepted as the core word shape is recognisable.
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Ollama running locally"]
 async fn recognizes_cursive_short_word() {
     let _lock = OLLAMA.lock().await;
     let Some(engine) = skip_if_no_engine() else {
@@ -90,6 +93,7 @@ async fn recognizes_cursive_short_word() {
 
 /// Sample 4 — two-line block caps with an acronym: "WRITE / A TLDR."
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Ollama running locally"]
 async fn recognizes_multiline_block_caps_with_acronym() {
     let _lock = OLLAMA.lock().await;
     let Some(engine) = skip_if_no_engine() else {
@@ -109,6 +113,7 @@ async fn recognizes_multiline_block_caps_with_acronym() {
 
 /// Sample 5 — cursive two-line sentence: "How would you / do it?"
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Ollama running locally"]
 async fn recognizes_cursive_multiline_sentence() {
     let _lock = OLLAMA.lock().await;
     let Some(engine) = skip_if_no_engine() else {

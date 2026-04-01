@@ -77,7 +77,7 @@ Typical latency on CPU with `qwen2.5vl:7b`: 1–4 s per annotation group.
 ### OCR handwriting tests
 
 ```bash
-cargo test --test ocr_handwriting_test
+cargo test --test ocr_handwriting_test -- --ignored
 ```
 
 Tests use PNG fixtures cropped from a real Boox tablet screenshot (`tests/fixtures/ocr/`).
