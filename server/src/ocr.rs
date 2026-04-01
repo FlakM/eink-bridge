@@ -11,8 +11,11 @@ pub struct OcrEngine {
 
 impl OcrEngine {
     pub fn new() -> Result<Self, String> {
-        let tess = leptess::LepTess::new(None, "eng")
+        let mut tess = leptess::LepTess::new(None, "eng")
             .map_err(|e| format!("failed to init tesseract: {e}"))?;
+        // PSM 7: treat image as a single text line — best for handwritten annotations
+        tess.set_variable(leptess::Variable::TesseditPagesegMode, "7")
+            .map_err(|_| "failed to set PSM".to_string())?;
         Ok(Self {
             tess: Mutex::new(tess),
         })
@@ -25,6 +28,7 @@ impl OcrEngine {
             .map_err(|e| format!("lock poisoned: {e}"))?;
         tess.set_image_from_mem(png_data)
             .map_err(|e| format!("failed to set image: {e}"))?;
+        tess.set_source_resolution(300);
         let text = tess
             .get_utf8_text()
             .map_err(|e| format!("OCR failed: {e}"))?;
@@ -40,9 +44,10 @@ impl OcrEngine {
     }
 }
 
-const STROKE_WIDTH: f64 = 3.0;
+const SCALE: f64 = 3.0;
+const STROKE_WIDTH: f64 = 3.0 * SCALE;
 const PADDING: u32 = 20;
-const MIN_DIM: u32 = 40;
+const MIN_DIM: u32 = 120;
 
 fn render_strokes_to_png(strokes: &[Vec<[f64; 2]>]) -> Result<Vec<u8>, String> {
     let (mut min_x, mut min_y) = (f64::MAX, f64::MAX);
@@ -61,10 +66,10 @@ fn render_strokes_to_png(strokes: &[Vec<[f64; 2]>]) -> Result<Vec<u8>, String> {
         return Err("no stroke points".into());
     }
 
-    let w = ((max_x - min_x) as u32 + 2 * PADDING).max(MIN_DIM);
-    let h = ((max_y - min_y) as u32 + 2 * PADDING).max(MIN_DIM);
-    let w = w.min(4000);
-    let h = h.min(4000);
+    let w = (((max_x - min_x) * SCALE) as u32 + 2 * PADDING).max(MIN_DIM);
+    let h = (((max_y - min_y) * SCALE) as u32 + 2 * PADDING).max(MIN_DIM);
+    let w = w.min(8000);
+    let h = h.min(8000);
 
     let mut img: RgbImage = ImageBuffer::from_pixel(w, h, Rgb([255, 255, 255]));
 
@@ -74,8 +79,14 @@ fn render_strokes_to_png(strokes: &[Vec<[f64; 2]>]) -> Result<Vec<u8>, String> {
             let [x1, y1] = window[1];
             draw_thick_line(
                 &mut img,
-                (x0 - min_x + PADDING as f64, y0 - min_y + PADDING as f64),
-                (x1 - min_x + PADDING as f64, y1 - min_y + PADDING as f64),
+                (
+                    (x0 - min_x) * SCALE + PADDING as f64,
+                    (y0 - min_y) * SCALE + PADDING as f64,
+                ),
+                (
+                    (x1 - min_x) * SCALE + PADDING as f64,
+                    (y1 - min_y) * SCALE + PADDING as f64,
+                ),
                 STROKE_WIDTH,
             );
         }

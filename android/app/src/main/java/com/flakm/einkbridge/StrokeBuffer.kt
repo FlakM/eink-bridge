@@ -302,7 +302,7 @@ private fun elementsToJson(refs: List<ElementRef>): JSONArray {
     val arr = JSONArray()
     for (ref in refs) {
         arr.put(JSONObject().apply {
-            put("section_id", ref.sectionId)
+            putOpt("section_id", ref.sectionId)
             put("tag", ref.tag)
             put("text", ref.text)
         })

@@ -34,6 +34,7 @@ pub struct SubmitReviewRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnnotationGroup {
     pub anchor: Option<AnnotationAnchor>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub strokes: Vec<Vec<[f64; 2]>>,
     #[serde(default)]
     pub recognized_text: Option<String>,
