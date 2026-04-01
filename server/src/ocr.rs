@@ -19,7 +19,7 @@ impl OcrEngine {
         let ollama_url = std::env::var("EINK_OLLAMA_URL")
             .unwrap_or_else(|_| "http://localhost:11434".to_string());
         let ollama_model =
-            std::env::var("EINK_OLLAMA_MODEL").unwrap_or_else(|_| "qwen2.5vl:7b".to_string());
+            std::env::var("EINK_OLLAMA_MODEL").unwrap_or_else(|_| "glm-ocr".to_string());
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .build()

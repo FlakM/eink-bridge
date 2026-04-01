@@ -23,6 +23,10 @@ path = "src/mock_device.rs"
 name = "eink-ocr-bench"
 path = "src/ocr_bench.rs"
 
+[[bin]]
+name = "eink-ocrs-bench"
+path = "src/ocrs_bench.rs"
+
 [dependencies]
 axum = { version = "0.8", features = ["ws", "multipart"] }
 tokio = { version = "1", features = ["full"] }
@@ -47,6 +51,8 @@ multer = "3"
 futures-util = "0.3"
 base64 = "0.22"
 image = "0.25"
+ocrs = "0.12"
+rten = "0.24"
 tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 
 [dev-dependencies]
