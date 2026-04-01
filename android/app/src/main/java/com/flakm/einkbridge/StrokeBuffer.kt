@@ -218,38 +218,64 @@ internal fun groupStrokesWithProximity(
     strokes: List<Stroke>,
     elements: List<ElementEntry>,
     explicitBindings: Map<Int, List<ElementEntry>> = emptyMap(),
-    threshold: Float = 60f,
+    clusterThreshold: Float = 120f,
 ): Pair<List<StrokeGroup>, List<Stroke>> {
-    val grouped = mutableMapOf<Int, MutableList<Stroke>>()
-    val unanchored = mutableListOf<Stroke>()
+    if (elements.isEmpty()) return emptyList<StrokeGroup>() to strokes
 
+    // Separate explicitly bound strokes from free ones
+    val explicitGrouped = mutableMapOf<Int, MutableList<Stroke>>()
+    val free = mutableListOf<Stroke>()
     for ((idx, stroke) in strokes.withIndex()) {
-        val explicitEls = explicitBindings[idx]
-        if (explicitEls != null) {
-            for (el in explicitEls) {
-                grouped.getOrPut(el.i) { mutableListOf() }.add(stroke)
-            }
-            continue
+        val els = explicitBindings[idx]
+        if (els != null) {
+            for (el in els) explicitGrouped.getOrPut(el.i) { mutableListOf() }.add(stroke)
+        } else {
+            free.add(stroke)
         }
-        if (elements.isEmpty()) {
-            unanchored.add(stroke)
-            continue
-        }
-        val (cx, cy) = strokeCentroid(stroke)
-        val nearest = elements.minByOrNull { distToElement(cx, cy, it) }!!
-        grouped.getOrPut(nearest.i) { mutableListOf() }.add(stroke)
     }
 
-    val explicitElementIndices = explicitBindings.values.flatten().map { it.i }.toSet()
-    val groups = grouped.map { (elIdx, strks) ->
-        val el = elements.first { it.i == elIdx }
-        val anchor = if (elIdx in explicitElementIndices)
-            Anchor.Explicit(listOf(elementToRef(el)))
-        else
-            Anchor.Proximity(listOf(elementToRef(el)))
-        StrokeGroup(anchor = anchor, strokes = strks)
+    // Cluster free strokes by centroid proximity (union-find)
+    val n = free.size
+    val centroids = free.map { strokeCentroid(it) }
+    val parent = IntArray(n) { it }
+
+    fun find(x: Int): Int {
+        if (parent[x] != x) parent[x] = find(parent[x])
+        return parent[x]
     }
-    return groups to unanchored
+
+    for (i in 0 until n) {
+        for (j in i + 1 until n) {
+            val dx = centroids[i].first - centroids[j].first
+            val dy = centroids[i].second - centroids[j].second
+            if (dx * dx + dy * dy <= clusterThreshold * clusterThreshold) {
+                val pi = find(i); val pj = find(j)
+                if (pi != pj) parent[pi] = pj
+            }
+        }
+    }
+
+    val clusterMap = mutableMapOf<Int, MutableList<Int>>()
+    for (i in 0 until n) clusterMap.getOrPut(find(i)) { mutableListOf() }.add(i)
+
+    val proxGrouped = mutableMapOf<Int, MutableList<Stroke>>()
+    for ((_, indices) in clusterMap) {
+        val clusterStrokes = indices.map { free[it] }
+        val pts = clusterStrokes.flatMap { it.points }
+        val cx = pts.map { it.first }.average().toFloat()
+        val cy = pts.map { it.second }.average().toFloat()
+        val nearest = elements.minByOrNull { distToElement(cx, cy, it) }!!
+        proxGrouped.getOrPut(nearest.i) { mutableListOf() }.addAll(clusterStrokes)
+    }
+
+    val result = mutableListOf<StrokeGroup>()
+    for ((elIdx, strks) in explicitGrouped) {
+        result.add(StrokeGroup(Anchor.Explicit(listOf(elementToRef(elements.first { it.i == elIdx }))), strks))
+    }
+    for ((elIdx, strks) in proxGrouped) {
+        result.add(StrokeGroup(Anchor.Proximity(listOf(elementToRef(elements.first { it.i == elIdx }))), strks))
+    }
+    return result to emptyList()
 }
 
 internal fun annotationsToJson(groups: List<StrokeGroup>, unanchored: List<Stroke>): String {

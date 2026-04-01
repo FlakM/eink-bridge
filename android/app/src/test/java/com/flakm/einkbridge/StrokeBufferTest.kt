@@ -384,11 +384,13 @@ class StrokeBufferTest {
     }
 
     @Test fun parseElementMapRoundTrip() {
-        val json = """[{"i":0,"tag":"H2","id":"sec-1","t":10,"b":50,"l":0,"r":100,"text":"Hello"}]"""
+        val json = """[{"i":0,"tag":"H2","id":"s-hello","section":"s-hello","t":10,"b":50,"l":0,"r":100,"text":"Hello"}]"""
         val entries = parseElementMap(json)
         assertEquals(1, entries.size)
         assertEquals("H2", entries[0].tag)
-        assertEquals("sec-1", entries[0].id)
+        assertEquals("s-hello", entries[0].id)
+        assertEquals("s-hello", entries[0].section)
+        assertEquals("s-hello", entries[0].section?.let { it } ?: entries[0].id)
         assertEquals("Hello", entries[0].text)
     }
 
