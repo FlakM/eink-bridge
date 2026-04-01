@@ -35,12 +35,11 @@ impl OcrEngine {
 
     pub async fn recognize_image(&self, png: &[u8]) -> Result<String, String> {
         if self.debug_save {
-            if let Ok(path) = save_debug_png(png) {
-                info!(path = %path, "OCR debug PNG saved");
-            }
+            let _ = save_debug_png(png).map(|path| info!(path = %path, "OCR debug PNG saved"));
         }
         let t = Instant::now();
-        let b64 = base64::engine::general_purpose::STANDARD.encode(png);
+        let png = preprocess_for_qwen(png)?;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
         let body = serde_json::json!({
             "model": self.ollama_model,
             "prompt": "Transcribe the handwritten text in this image exactly as written. Output only the transcribed text, nothing else.",
@@ -125,6 +124,61 @@ fn save_debug_png(png: &[u8]) -> Result<String, std::io::Error> {
     let mut f = std::fs::File::create(&path)?;
     f.write_all(png)?;
     Ok(path)
+}
+
+/// qwen2.5vl vision encoder parameters:
+/// - patch_size = 14px, spatial_merge_size = 2 → effective token = 28×28 px
+/// - fullatt_block_indexes = [7,15,23,31] (4 of 32 blocks use full attention)
+/// - window_size = 112 (8×8 patches for local attention)
+///
+/// Preprocessing rules (from qwen2.5vl smart_resize spec):
+///   1. Round each dimension to nearest multiple of PATCH_TOKENS (28)
+///   2. If total pixels > MAX_PIXELS, scale down (floor to multiple of 28)
+///   3. Both dimensions must be ≥ MIN_PIXELS^0.5 = 56px
+///
+/// MAX_PIXELS = 1344×1344 = 1,806,336 → max 2,304 visual tokens
+/// (stays well under the 4,840 that caused 6.9GB Vulkan allocation failures)
+const PATCH_TOKENS: u32 = 28;
+const MAX_PIXELS: u64 = 1344 * 1344;
+const MIN_DIM_QWEN: u32 = 56;
+
+fn preprocess_for_qwen(png: &[u8]) -> Result<Vec<u8>, String> {
+    let img = image::load_from_memory(png)
+        .map_err(|e| format!("PNG decode failed: {e}"))?
+        .into_rgb8();
+    let (w, h) = img.dimensions();
+
+    // Round to nearest multiple of PATCH_TOKENS
+    let snap = |v: u32| -> u32 {
+        let r = (v + PATCH_TOKENS / 2) / PATCH_TOKENS * PATCH_TOKENS;
+        r.max(MIN_DIM_QWEN)
+    };
+    let mut tw = snap(w);
+    let mut th = snap(h);
+
+    // Scale down if pixel budget exceeded
+    if (tw as u64) * (th as u64) > MAX_PIXELS {
+        let scale = (MAX_PIXELS as f64 / (w as f64 * h as f64)).sqrt();
+        tw = ((w as f64 * scale / PATCH_TOKENS as f64).floor() as u32 * PATCH_TOKENS)
+            .max(MIN_DIM_QWEN);
+        th = ((h as f64 * scale / PATCH_TOKENS as f64).floor() as u32 * PATCH_TOKENS)
+            .max(MIN_DIM_QWEN);
+    }
+
+    let tokens = (tw / PATCH_TOKENS) * (th / PATCH_TOKENS);
+    let img = if tw != w || th != h {
+        debug!(src_w = w, src_h = h, dst_w = tw, dst_h = th, tokens, "OCR: smart-resize");
+        image::imageops::resize(&img, tw, th, image::imageops::FilterType::Lanczos3)
+    } else {
+        debug!(w, h, tokens, "OCR: image already optimal");
+        img
+    };
+
+    let mut buf = Vec::new();
+    let encoder = image::codecs::png::PngEncoder::new(std::io::Cursor::new(&mut buf));
+    image::ImageEncoder::write_image(encoder, img.as_raw(), tw, th, image::ExtendedColorType::Rgb8)
+        .map_err(|e| format!("PNG encode failed: {e}"))?;
+    Ok(buf)
 }
 
 const SCALE: f64 = 3.0;
