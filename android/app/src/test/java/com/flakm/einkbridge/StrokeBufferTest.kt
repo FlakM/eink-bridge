@@ -323,7 +323,7 @@ class StrokeBufferTest {
     // --- Proximity grouping tests ---
 
     private fun element(i: Int, tag: String, l: Float, t: Float, r: Float, b: Float, text: String = "el$i") =
-        ElementEntry(i = i, tag = tag, id = "section-$i", t = t, b = b, l = l, r = r, text = text)
+        ElementEntry(i = i, tag = tag, id = "section-$i", section = "s-section-$i", t = t, b = b, l = l, r = r, text = text)
 
     @Test fun proximityGroupsStrokeNearElement() {
         val stroke = Stroke(listOf(100f to 100f, 110f to 110f), 3f)
@@ -335,12 +335,13 @@ class StrokeBufferTest {
         assertEquals("H2", (groups[0].anchor as Anchor.Proximity).elements[0].tag)
     }
 
-    @Test fun strokeFarFromAllElementsIsUnanchored() {
+    @Test fun strokeFarFromElementsStillAnchorsToNearest() {
         val stroke = Stroke(listOf(500f to 500f, 510f to 510f), 3f)
         val el = element(0, "P", 10f, 10f, 50f, 30f)
         val (groups, unanchored) = groupStrokesWithProximity(listOf(stroke), listOf(el))
-        assertTrue(groups.isEmpty())
-        assertEquals(1, unanchored.size)
+        assertEquals(1, groups.size)
+        assertTrue(unanchored.isEmpty())
+        assertTrue(groups[0].anchor is Anchor.Proximity)
     }
 
     @Test fun multipleStrokesNearSameElementGrouped() {

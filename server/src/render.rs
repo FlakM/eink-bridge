@@ -1184,16 +1184,27 @@ const ELEMENT_MAP_JS: &str = r#"
 
   var QUERY = 'h1, h2, h3, p, pre, blockquote, table, ul, ol, .diagram-block, img';
 
+  function slugify(s) {
+    return 's-' + s.trim().toLowerCase().replace(/[^\w\s-]/g, '').replace(/\s+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+  }
+
   function buildMap() {
     window.__einkElementMap = [];
     var content = document.getElementById('content');
     if (!content) return;
+    // Assign stable IDs to headings that don't already have one
+    content.querySelectorAll('h1, h2, h3, h4, h5, h6').forEach(function(el) {
+      if (!el.id) el.id = slugify(el.textContent);
+    });
+    var currentSection = null;
     content.querySelectorAll(QUERY).forEach(function(el, i) {
       var r = el.getBoundingClientRect();
       var sy = window.pageYOffset || 0;
       var sx = window.pageXOffset || 0;
+      var tag = el.tagName;
+      if (tag === 'H1' || tag === 'H2' || tag === 'H3') currentSection = el.id || null;
       window.__einkElementMap.push({
-        i: i, tag: el.tagName, id: el.id || null,
+        i: i, tag: tag, id: el.id || null, section: currentSection,
         t: r.top + sy, b: r.bottom + sy, l: r.left + sx, r: r.right + sx,
         text: el.textContent.substring(0, 150).replace(/\s+/g, ' ').trim()
       });
@@ -1530,7 +1541,7 @@ const ELEMENT_MAP_JS: &str = r#"
     for (var i = 0; i < map.length; i++) {
       var e = map[i];
       if (e.r >= left && e.l <= right && e.b >= top && e.t <= bottom)
-        result.push({i: e.i, tag: e.tag, id: e.id || null, text: e.text.substring(0, 80), cx: (e.l + e.r) / 2, cy: (e.t + e.b) / 2});
+        result.push({i: e.i, tag: e.tag, id: e.id || null, section: e.section || null, text: e.text.substring(0, 80), cx: (e.l + e.r) / 2, cy: (e.t + e.b) / 2});
     }
     return JSON.stringify(result);
   };

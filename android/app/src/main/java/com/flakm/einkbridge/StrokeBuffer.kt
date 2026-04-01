@@ -13,6 +13,7 @@ internal data class ElementEntry(
     val i: Int,
     val tag: String,
     val id: String?,
+    val section: String?,
     val t: Float,
     val b: Float,
     val l: Float,
@@ -36,7 +37,7 @@ internal data class StrokeGroup(
     val strokes: List<Stroke>,
 )
 
-internal data class FoundElement(val i: Int, val tag: String, val id: String?, val text: String, val cx: Float = 0f, val cy: Float = 0f)
+internal data class FoundElement(val i: Int, val tag: String, val id: String?, val section: String?, val text: String, val cx: Float = 0f, val cy: Float = 0f)
 
 internal data class BindGroup(
     val id: Int,
@@ -188,6 +189,7 @@ internal fun parseElementMap(json: String): List<ElementEntry> {
             i = o.getInt("i"),
             tag = o.getString("tag"),
             id = o.optString("id", null),
+            section = o.optString("section", null),
             t = o.getDouble("t").toFloat(),
             b = o.getDouble("b").toFloat(),
             l = o.getDouble("l").toFloat(),
@@ -210,7 +212,7 @@ internal fun distToElement(px: Float, py: Float, el: ElementEntry): Float {
 }
 
 internal fun elementToRef(el: ElementEntry): ElementRef =
-    ElementRef(sectionId = el.id, tag = el.tag, text = el.text)
+    ElementRef(sectionId = el.section ?: el.id, tag = el.tag, text = el.text)
 
 internal fun groupStrokesWithProximity(
     strokes: List<Stroke>,
@@ -235,12 +237,7 @@ internal fun groupStrokesWithProximity(
         }
         val (cx, cy) = strokeCentroid(stroke)
         val nearest = elements.minByOrNull { distToElement(cx, cy, it) }!!
-        val dist = distToElement(cx, cy, nearest)
-        if (dist <= threshold) {
-            grouped.getOrPut(nearest.i) { mutableListOf() }.add(stroke)
-        } else {
-            unanchored.add(stroke)
-        }
+        grouped.getOrPut(nearest.i) { mutableListOf() }.add(stroke)
     }
 
     val explicitElementIndices = explicitBindings.values.flatten().map { it.i }.toSet()
