@@ -576,10 +576,10 @@ class MainActivity : AppCompatActivity() {
                 val (explicitGroups, unanchoredStrokes) = bindGroupsToAnnotations(
                     overlay.buf.strokes, overlay.bindGroups
                 )
-                val (proximityGroups, _) = groupStrokesWithProximity(
+                val (proximityGroups, trulyUnanchored) = groupStrokesWithProximity(
                     unanchoredStrokes, elements
                 )
-                val annotationsJson = annotationsToJson(explicitGroups + proximityGroups, emptyList())
+                val annotationsJson = annotationsToJson(explicitGroups + proximityGroups, trulyUnanchored)
                 val msg = JSONObject()
                 msg.put("type", "request_update")
                 msg.put("annotations", JSONArray(annotationsJson))
