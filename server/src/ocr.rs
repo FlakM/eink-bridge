@@ -21,7 +21,7 @@ impl OcrEngine {
         let ollama_model =
             std::env::var("EINK_OLLAMA_MODEL").unwrap_or_else(|_| "qwen2.5vl:7b".to_string());
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
+            .timeout(std::time::Duration::from_secs(120))
             .build()
             .map_err(|e| format!("failed to build HTTP client: {e}"))?;
         info!(ollama_url = %ollama_url, ollama_model = %ollama_model, "OCR engine initialized");
