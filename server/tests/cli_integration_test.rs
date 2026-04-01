@@ -906,3 +906,132 @@ async fn cli_push_explicit_title_overrides_h1() {
         "H1 must not appear: {stdout}"
     );
 }
+
+// ── interactive update (HTTP PUT) ─────────────────────────────────────────────
+
+/// Full interactive round-trip:
+///   push --interactive → device sends request_update via WS → session enters
+///   Processing → `eink-review update` sends HTTP PUT → server broadcasts
+///   version_updated → WS subscriber sees it → session returns to Active.
+#[tokio::test]
+async fn cli_update_http_put_increments_version() {
+    use futures_util::{SinkExt as _, StreamExt as _};
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    let (server_url, _handle) = start_server().await;
+    let client = reqwest::Client::new();
+
+    // Create session via HTTP
+    let resp = client
+        .post(format!("{server_url}/api/sessions"))
+        .json(&serde_json::json!({
+            "schema_version": 1,
+            "title": "Interactive Update Test",
+            "content": "# Interactive Update Test\n\nOriginal content",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let session_id = body["id"].as_str().unwrap().to_string();
+
+    // Connect via WS (simulates the tablet) and subscribe
+    let ws_url = server_url.replacen("http://", "ws://", 1) + "/ws/" + &session_id;
+    let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+    ws.send(WsMessage::Text(
+        serde_json::json!({"type": "subscribe"}).to_string().into(),
+    ))
+    .await
+    .unwrap();
+
+    // Send request_update from the "device" — transitions Active → Processing
+    ws.send(WsMessage::Text(
+        serde_json::json!({
+            "type": "request_update",
+            "annotations": [],
+            "typed_notes": ""
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+
+    // Drain WS messages until annotation_result (or timeout after 3s)
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let msg = tokio::time::timeout(remaining, ws.next()).await;
+        match msg {
+            Ok(Some(Ok(WsMessage::Text(text)))) => {
+                let v: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+                if v["type"] == "annotation_result" {
+                    break;
+                }
+            }
+            _ => break, // timeout or close — proceed anyway
+        }
+    }
+
+    // Now call `eink-review update` which must use HTTP PUT
+    let update_file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        update_file.path(),
+        "# Interactive Update Test\n\nUpdated content v2",
+    )
+    .unwrap();
+
+    let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_eink-review"))
+        .args([
+            "--server",
+            &server_url,
+            "update",
+            &session_id,
+            update_file.path().to_str().unwrap(),
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap()
+        .wait_with_output()
+        .await
+        .unwrap();
+
+    assert!(
+        out.status.success(),
+        "eink-review update failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("version updated to 2"),
+        "expected version 2 in stderr, got: {stderr}"
+    );
+
+    // Session must be back in Active state
+    let detail: serde_json::Value = client
+        .get(format!("{server_url}/api/sessions/{session_id}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(detail["status"], "Active");
+
+    // Verify the updated content is served
+    let html = client
+        .get(format!("{server_url}/session/{session_id}"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        html.contains("Updated content v2"),
+        "expected updated content in HTML, got: {html}"
+    );
+}

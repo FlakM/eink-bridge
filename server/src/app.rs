@@ -4,7 +4,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode, header},
     response::{Html, IntoResponse, Json, Response},
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use futures_util::stream;
 use multer::{Multipart as MulterMultipart, parse_boundary};
@@ -127,12 +127,18 @@ pub fn build_app(state: AppState) -> Router {
     Router::new()
         .route("/api/health", get(health))
         .route("/api/openapi.json", get(openapi_json))
-        .route("/api/sessions", get(list_sessions).post(create_session))
+        .route(
+            "/api/sessions",
+            get(list_sessions)
+                .post(create_session)
+                .delete(purge_sessions),
+        )
         .route(
             "/api/sessions/{id}",
             get(get_session).delete(cancel_session),
         )
         .route("/api/sessions/{id}/result", get(get_result))
+        .route("/api/sessions/{id}/content", put(update_content))
         .route("/api/sessions/{id}/submit", post(submit_review))
         .route("/ws/{id}", get(crate::ws::ws_handler))
         .route("/session/{id}", get(render_session))
@@ -286,6 +292,47 @@ async fn cancel_session(
     }
 }
 
+async fn purge_sessions(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let count = {
+        let mut mgr = state.sessions.write().await;
+        mgr.purge_finished()
+    };
+    tracing::info!(count, "sessions purged");
+    Json(serde_json::json!({ "purged": count }))
+}
+
+async fn update_content(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Response {
+    let content = match String::from_utf8(body.to_vec()) {
+        Ok(s) => s,
+        Err(_) => return bad_request("request body must be valid UTF-8".into()),
+    };
+    let version = {
+        let mut mgr = state.sessions.write().await;
+        mgr.apply_update(&id, content)
+    };
+    match version {
+        Some(v) => {
+            tracing::info!(id = %id, version = v, "content updated via HTTP PUT");
+            state
+                .ws_send(&id, crate::ws::ServerMessage::VersionUpdated { version: v })
+                .await;
+            Json(serde_json::json!({ "version": v })).into_response()
+        }
+        None => {
+            let mgr = state.sessions.read().await;
+            if mgr.get(&id).is_none() {
+                StatusCode::NOT_FOUND.into_response()
+            } else {
+                StatusCode::CONFLICT.into_response()
+            }
+        }
+    }
+}
+
 fn webhook_payload(session: &Session) -> Option<(String, SessionResultResponse)> {
     session
         .callback_url
@@ -400,16 +447,10 @@ async fn submit_review(
                 let ocr_state = state.clone();
                 let ocr_id = id.clone();
                 tokio::spawn(async move {
-                    let annotations = tokio::task::spawn_blocking(move || {
-                        crate::ocr::ocr_annotation_groups(&engine, &mut annotations);
-                        annotations
-                    })
-                    .await;
-                    if let Ok(annotations) = annotations {
-                        let mut mgr = ocr_state.sessions.write().await;
-                        mgr.update_annotations(&ocr_id, annotations);
-                        tracing::info!(id = %ocr_id, "OCR processing complete");
-                    }
+                    crate::ocr::ocr_annotation_groups(&engine, &mut annotations).await;
+                    let mut mgr = ocr_state.sessions.write().await;
+                    mgr.update_annotations(&ocr_id, annotations);
+                    tracing::info!(id = %ocr_id, "OCR processing complete");
                 });
             }
             state.notify_and_cleanup(&id).await;

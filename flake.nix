@@ -46,8 +46,6 @@
           strictDeps = true;
           buildInputs = with pkgs; [
             openssl
-            tesseract
-            leptonica
           ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
             pkgs.libiconv
             pkgs.darwin.apple_sdk.frameworks.Security
@@ -56,12 +54,6 @@
           nativeBuildInputs = with pkgs; [
             pkg-config
           ];
-          LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
-          BINDGEN_EXTRA_CLANG_ARGS = builtins.concatStringsSep " " [
-            "-isystem ${pkgs.llvmPackages.libclang.lib}/lib/clang/${pkgs.lib.getVersion pkgs.llvmPackages.libclang}/include"
-            "-isystem ${pkgs.glibc.dev}/include"
-          ];
-          TESSDATA_PREFIX = "${pkgs.tesseract}/share/tessdata";
         };
 
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;
@@ -102,12 +94,6 @@
           checks = { inherit cargoArtifacts; };
           ANDROID_HOME = "${androidSdk}/libexec/android-sdk";
           ANDROID_SDK_ROOT = "${androidSdk}/libexec/android-sdk";
-          TESSDATA_PREFIX = "${pkgs.tesseract}/share/tessdata";
-          LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
-          BINDGEN_EXTRA_CLANG_ARGS = builtins.concatStringsSep " " [
-            "-isystem ${pkgs.llvmPackages.libclang.lib}/lib/clang/${pkgs.lib.getVersion pkgs.llvmPackages.libclang}/include"
-            "-isystem ${pkgs.glibc.dev}/include"
-          ];
           packages = with pkgs; [
             rust-analyzer
             just
@@ -115,10 +101,7 @@
             cargo-llvm-cov
             androidSdk
             jdk17
-          ];
-          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
-            pkgs.tesseract
-            pkgs.leptonica
+            einkBridge
           ];
           shellHook = let
             sdkPath = "${androidSdk}/libexec/android-sdk";

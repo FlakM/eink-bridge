@@ -1,7 +1,9 @@
 use clap::Parser;
+use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;
 use std::path::PathBuf;
 use std::time::Duration;
+use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 #[derive(Parser)]
 #[command(
@@ -35,6 +37,11 @@ struct Cli {
     /// Delay before submitting (simulates human think time)
     #[arg(long, default_value = "0")]
     delay: u64,
+
+    /// Simulate interactive mode: send request_update via WS before submitting.
+    /// Waits for annotation_result then version_updated before submitting.
+    #[arg(long)]
+    interactive: bool,
 }
 
 #[tokio::main]
@@ -87,6 +94,10 @@ async fn main() -> anyhow::Result<()> {
                 tokio::time::sleep(Duration::from_secs(cli.delay)).await;
             }
 
+            if cli.interactive {
+                simulate_request_update(&cli.server, id).await;
+            }
+
             // Submit review
             let mut form = reqwest::multipart::Form::new().text("typed_notes", cli.notes.clone());
             if let Some(img_path) = &cli.image {
@@ -127,4 +138,70 @@ async fn poll_active(client: &Client, server: &str) -> anyhow::Result<Vec<serde_
         return Ok(vec![]);
     }
     Ok(resp.json().await?)
+}
+
+/// Simulate a tablet tapping "Request Update":
+///   1. Connect WS, send request_update with empty annotations
+///   2. Wait for annotation_result (server processed the annotations)
+///   3. Wait for version_updated (agent pushed new content via HTTP PUT)
+async fn simulate_request_update(server: &str, session_id: &str) {
+    let ws_url = server
+        .replacen("http://", "ws://", 1)
+        .replacen("https://", "wss://", 1)
+        + "/ws/"
+        + session_id;
+
+    let Ok(Ok((mut ws, _))) = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio_tungstenite::connect_async(&ws_url),
+    )
+    .await
+    else {
+        eprintln!("mock-device: WS connect failed for interactive update");
+        return;
+    };
+
+    eprintln!("mock-device: connected WS for session {session_id}");
+
+    let msg = serde_json::json!({
+        "type": "request_update",
+        "annotations": [],
+        "typed_notes": "mock annotation"
+    });
+    if ws
+        .send(WsMessage::Text(msg.to_string().into()))
+        .await
+        .is_err()
+    {
+        eprintln!("mock-device: failed to send request_update");
+        return;
+    }
+    eprintln!("mock-device: sent request_update — waiting for annotation_result...");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline - tokio::time::Instant::now();
+        let msg = tokio::time::timeout(remaining, ws.next()).await;
+        match msg {
+            Ok(Some(Ok(WsMessage::Text(text)))) => {
+                let v: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+                let t = v["type"].as_str().unwrap_or("?");
+                eprintln!("mock-device: ws ← {t}");
+                match t {
+                    "annotation_result" => {
+                        eprintln!(
+                            "mock-device: annotation_result received — waiting for version_updated (agent should call `eink-review update`)..."
+                        );
+                    }
+                    "version_updated" => {
+                        let version = v["version"].as_u64().unwrap_or(0);
+                        eprintln!("mock-device: version_updated v{version} — document reloaded");
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            _ => break,
+        }
+    }
 }

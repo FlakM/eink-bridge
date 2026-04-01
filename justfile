@@ -102,6 +102,25 @@ deploy: nix-build
     @echo "restarted eink-serve"
     @systemctl --user is-active eink-serve
 
+# build and deploy all components in parallel (server, CLI, APK)
+deploy-all:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "=== building server (nix) and APK in parallel ==="
+    nix build &
+    NIX_PID=$!
+    (cd android && ./gradlew assembleDebug) &
+    GRADLE_PID=$!
+    wait $NIX_PID
+    echo "--- server built, restarting service ---"
+    systemctl --user restart eink-serve
+    direnv reload
+    echo "service restarted, direnv reloaded"
+    wait $GRADLE_PID
+    echo "--- APK built, installing via adb ---"
+    adb install -r android/app/build/outputs/apk/debug/app-debug.apk
+    echo "=== deploy-all done ==="
+
 # show service status
 status:
     systemctl --user status eink-serve

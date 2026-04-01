@@ -29,6 +29,68 @@ The CLI (`eink-review push`) polls `GET /api/sessions/{id}/result` in a loop:
 - On timeout, the server responds with 204 (no change); the CLI retries.
 - The CLI has its own `--timeout` (default 30 minutes) bounding total wait time.
 
+## OCR setup
+
+Handwriting recognition uses **Ollama** with `qwen2.5vl:7b` (vision model). Tesseract is not used.
+
+### Prerequisites
+
+1. Install Ollama — on NixOS add to `configuration.nix`:
+   ```nix
+   services.ollama = {
+     enable = true;
+     package = pkgs-unstable.ollama;
+     environmentVariables = {
+       OLLAMA_NUM_PARALLEL = "4";  # allow concurrent annotation OCR
+     };
+   };
+   ```
+   Then `sudo nixos-rebuild switch`.
+
+2. Pull the model (one-time):
+   ```bash
+   ollama pull qwen2.5vl:7b
+   ```
+
+3. Verify it's running:
+   ```bash
+   curl http://localhost:11434/api/ps
+   ```
+
+### Configuration
+
+| Env var | Default | Description |
+|---|---|---|
+| `EINK_OLLAMA_URL` | `http://localhost:11434` | Ollama base URL |
+| `EINK_OLLAMA_MODEL` | `qwen2.5vl:7b` | Model name |
+| `EINK_OCR_DEBUG` | unset | If set, saves PNG to `/tmp/eink-ocr-*.png` |
+
+### Timing
+
+Each OCR call logs wall time, prompt-eval time, and token-eval time at `INFO` level:
+```
+INFO OCR complete text="WRITE A TLDR" wall_ms=1823 prompt_eval_ms=312 token_eval_ms=271
+```
+
+Typical latency on CPU with `qwen2.5vl:7b`: 1–4 s per annotation group.
+
+### OCR handwriting tests
+
+```bash
+cargo test --test ocr_handwriting_test
+```
+
+Tests use PNG fixtures cropped from a real Boox tablet screenshot (`tests/fixtures/ocr/`).
+They require Ollama to be running with the vision model loaded.
+A `tokio::sync::Mutex` serialises the calls so concurrent tests don't saturate the model.
+Once `OLLAMA_NUM_PARALLEL=4` is active in the NixOS service, parallelism is handled by Ollama itself.
+
+### Gotcha: coloured ink
+
+The OCR engine renders strokes as **black on white** before sending to Ollama. The test
+fixtures were converted to greyscale for the same reason — Ollama's vision model returns
+empty output for brightly coloured (e.g. pink) handwriting.
+
 ## Security notes
 
 The server binds to `0.0.0.0:3333` by default with no authentication.

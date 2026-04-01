@@ -6,6 +6,7 @@ import android.content.SharedPreferences
 import android.graphics.Color
 import android.os.Bundle
 import android.os.Vibrator
+import android.util.Log
 import android.view.View
 import android.webkit.*
 import android.widget.*
@@ -24,6 +25,8 @@ import org.json.JSONObject
 import org.json.JSONTokener
 import java.util.concurrent.TimeUnit
 
+private const val TAG = "EinkMain"
+
 class MainActivity : AppCompatActivity() {
     internal lateinit var webView: WebView
     internal lateinit var sessionListContainer: View
@@ -39,6 +42,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var docCache: DocumentCache
     private var wsClient: WebSocketClient? = null
     private var isProcessing = false
+        set(value) {
+            Log.i(TAG, "isProcessing $field -> $value", Throwable("stack"))
+            field = value
+        }
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(5, TimeUnit.SECONDS)
@@ -118,6 +125,15 @@ class MainActivity : AppCompatActivity() {
         if (serverUrl.isNotEmpty()) {
             startPolling()
         }
+
+        findViewById<Button>(R.id.btnClearSessions).setOnClickListener {
+            AlertDialog.Builder(this)
+                .setTitle("Clear finished sessions?")
+                .setMessage("Remove all submitted, cancelled, and expired sessions from the server.")
+                .setPositiveButton("Clear") { _, _ -> clearFinishedSessions() }
+                .setNegativeButton("Cancel", null)
+                .show()
+        }
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -131,6 +147,7 @@ class MainActivity : AppCompatActivity() {
         webView.webViewClient = object : android.webkit.WebViewClient() {
             override fun onPageFinished(view: WebView, url: String) {
                 val sid = currentSessionId ?: return
+                Log.d(TAG, "webview onPageFinished url=$url session=$sid")
                 view.evaluateJavascript("document.documentElement.outerHTML") { html ->
                     if (html.isNullOrBlank() || html == "null") return@evaluateJavascript
                     val cleaned = try {
@@ -147,9 +164,12 @@ class MainActivity : AppCompatActivity() {
             ) {
                 if (request.isForMainFrame) {
                     val sid = currentSessionId ?: return
+                    Log.w(TAG, "webview onReceivedError url=${request.url} error=${error.description} session=$sid — loading cache")
                     val cached = docCache.loadHtml(sid)
                     if (cached != null) {
                         view.loadDataWithBaseURL(serverUrl, cached, "text/html", "utf-8", null)
+                    } else {
+                        Log.w(TAG, "webview onReceivedError: no cache available for session=$sid")
                     }
                 }
             }
@@ -283,6 +303,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun openSession(sessionId: String) {
+        Log.i(TAG, "openSession id=$sessionId serverUrl=$serverUrl")
         currentSessionId = sessionId
         isProcessing = false
         pollJob?.cancel()
@@ -293,7 +314,17 @@ class MainActivity : AppCompatActivity() {
             serverUrl = serverUrl,
             sessionId = sessionId,
             onMessage = { type, json -> handleWsMessage(type, json) },
-            onClosed = {},
+            onClosed = {
+                Log.w(TAG, "ws onClosed session=$sessionId isProcessing=$isProcessing")
+                runOnUiThread {
+                    if (isProcessing) {
+                        Log.w(TAG, "ws closed while processing — unlocking UI session=$sessionId")
+                        isProcessing = false
+                        updateProcessingUi()
+                        Toast.makeText(this, "Agent disconnected — you can still submit", Toast.LENGTH_LONG).show()
+                    }
+                }
+            },
         ).also { it.connect() }
         sessionListContainer.visibility = View.GONE
         webView.visibility = View.VISIBLE
@@ -359,6 +390,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showSessionList() {
+        Log.i(TAG, "showSessionList: leaving session=$currentSessionId isProcessing=$isProcessing")
         penOverlay?.disableDrawing()
         penOverlay?.destroy()
         penOverlay = null
@@ -374,12 +406,21 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun submitAndGoBack() {
-        val sessionId = currentSessionId ?: return
-        val overlay = penOverlay ?: return
+        val sessionId = currentSessionId ?: run {
+            Log.w(TAG, "submitAndGoBack: no currentSessionId, ignoring")
+            return
+        }
+        val overlay = penOverlay ?: run {
+            Log.w(TAG, "submitAndGoBack: no penOverlay session=$sessionId, ignoring")
+            return
+        }
+        Log.i(TAG, "submitAndGoBack: starting session=$sessionId isProcessing=$isProcessing strokes=${overlay.buf.strokes.size}")
         overlay.queryElementMap { elements ->
+            Log.d(TAG, "submitAndGoBack: queryElementMap callback elements=${elements.size}")
             scope.launch {
                 try {
                     val pngData = overlay.exportToPng()
+                    Log.d(TAG, "submitAndGoBack: png exported size=${pngData?.size ?: 0}")
                     val strokeJson = overlay.exportStrokeJson()
                     val (explicitGroups, unanchoredStrokes) = bindGroupsToAnnotations(
                         overlay.buf.strokes, overlay.bindGroups
@@ -387,7 +428,9 @@ class MainActivity : AppCompatActivity() {
                     val (proximityGroups, trulyUnanchored) = groupStrokesWithProximity(
                         unanchoredStrokes, elements
                     )
-                    val annotationsJson = annotationsToJson(explicitGroups + proximityGroups, trulyUnanchored)
+                    val allGroups = explicitGroups + proximityGroups
+                    Log.i(TAG, "submitAndGoBack: explicit=${explicitGroups.size} proximity=${proximityGroups.size} unanchored=${trulyUnanchored.size}")
+                    val annotationsJson = annotationsToJson(allGroups, trulyUnanchored)
 
                     withContext(Dispatchers.IO) {
                         val builder = MultipartBody.Builder()
@@ -405,34 +448,60 @@ class MainActivity : AppCompatActivity() {
                             builder.addFormDataPart("stroke_data", strokeJson)
                         }
 
-                        val request = Request.Builder()
-                            .url("$serverUrl/api/sessions/$sessionId/submit")
-                            .post(builder.build())
-                            .build()
+                        val url = "$serverUrl/api/sessions/$sessionId/submit"
+                        Log.i(TAG, "submitAndGoBack: POST $url")
+                        val request = Request.Builder().url(url).post(builder.build()).build()
 
                         val response = client.newCall(request).execute()
+                        Log.i(TAG, "submitAndGoBack: response code=${response.code} session=$sessionId")
                         withContext(Dispatchers.Main) {
                             when {
                                 response.isSuccessful -> {
+                                    Log.i(TAG, "submitAndGoBack: success, clearing strokes and going back")
                                     clearSavedStrokes(sessionId)
                                     Toast.makeText(this@MainActivity, "Submitted!", Toast.LENGTH_SHORT).show()
                                     showSessionList()
                                     startPolling()
                                 }
                                 response.code == 409 -> {
+                                    Log.w(TAG, "submitAndGoBack: 409 conflict session=$sessionId")
                                     Toast.makeText(this@MainActivity, "Session already submitted or expired", Toast.LENGTH_LONG).show()
                                     showSessionList()
                                     startPolling()
                                 }
                                 else -> {
+                                    val body = response.body?.string() ?: ""
+                                    Log.e(TAG, "submitAndGoBack: failed code=${response.code} body=$body")
                                     Toast.makeText(this@MainActivity, "Submit failed: ${response.code}", Toast.LENGTH_SHORT).show()
                                 }
                             }
                         }
                     }
                 } catch (e: Exception) {
-                    Toast.makeText(this@MainActivity, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+                    Log.e(TAG, "submitAndGoBack: exception session=$sessionId", e)
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(this@MainActivity, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+                    }
                 }
+            }
+        }
+    }
+
+    private fun clearFinishedSessions() {
+        scope.launch {
+            val ok = withContext(Dispatchers.IO) {
+                try {
+                    val request = Request.Builder()
+                        .url("$serverUrl/api/sessions")
+                        .delete()
+                        .build()
+                    client.newCall(request).execute().isSuccessful
+                } catch (_: Exception) { false }
+            }
+            if (ok) {
+                fetchSessions()
+            } else {
+                Toast.makeText(this@MainActivity, "Failed to clear sessions", Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -533,45 +602,65 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun handleWsMessage(type: String, json: JSONObject) {
+        Log.d(TAG, "handleWsMessage type=$type session=$currentSessionId isProcessing=$isProcessing json=${json.toString().take(200)}")
         runOnUiThread {
             when (type) {
                 "processing_status" -> {
+                    val msg = json.optString("message", "Processing...")
+                    Log.i(TAG, "processing_status: $msg")
                     isProcessing = true
-                    updateProcessingUi(json.optString("message", "Processing..."))
+                    updateProcessingUi(msg)
                 }
                 "annotation_result" -> {
+                    val annCount = json.optJSONArray("annotations")?.length() ?: 0
+                    Log.i(TAG, "annotation_result: version=${json.optInt("version")} annotations=$annCount")
                     updateProcessingUi("Agent updating document...")
                 }
                 "version_updated" -> {
+                    val version = json.optInt("version")
+                    Log.i(TAG, "version_updated: version=$version — clearing isProcessing, reloading webview")
                     isProcessing = false
                     updateProcessingUi()
                     webView.reload()
                     Toast.makeText(this, "Document updated ✓", Toast.LENGTH_SHORT).show()
                 }
                 "session_submitted" -> {
+                    Log.i(TAG, "session_submitted: going back to session list")
                     isProcessing = false
                     Toast.makeText(this, "Session submitted", Toast.LENGTH_SHORT).show()
                     showSessionList()
                     startPolling()
                 }
                 "error" -> {
+                    val errMsg = json.optString("message", "Unknown error")
+                    Log.w(TAG, "server error: $errMsg — clearing isProcessing")
                     isProcessing = false
                     updateProcessingUi()
-                    Toast.makeText(
-                        this,
-                        json.optString("message", "Unknown error"),
-                        Toast.LENGTH_LONG,
-                    ).show()
+                    Toast.makeText(this, errMsg, Toast.LENGTH_LONG).show()
+                }
+                else -> {
+                    Log.w(TAG, "unhandled ws message type=$type")
                 }
             }
         }
     }
 
     private fun sendRequestUpdate() {
-        val sessionId = currentSessionId ?: return
-        val overlay = penOverlay ?: return
-        if (isProcessing) return
+        val sessionId = currentSessionId ?: run {
+            Log.w(TAG, "sendRequestUpdate: no currentSessionId, ignoring")
+            return
+        }
+        val overlay = penOverlay ?: run {
+            Log.w(TAG, "sendRequestUpdate: no penOverlay session=$sessionId, ignoring")
+            return
+        }
+        if (isProcessing) {
+            Log.w(TAG, "sendRequestUpdate: already processing session=$sessionId, ignoring tap")
+            return
+        }
+        Log.i(TAG, "sendRequestUpdate: starting session=$sessionId strokes=${overlay.buf.strokes.size}")
         overlay.queryElementMap { elements ->
+            Log.d(TAG, "sendRequestUpdate: queryElementMap callback elements=${elements.size}")
             scope.launch {
                 val (explicitGroups, unanchoredStrokes) = bindGroupsToAnnotations(
                     overlay.buf.strokes, overlay.bindGroups
@@ -579,12 +668,20 @@ class MainActivity : AppCompatActivity() {
                 val (proximityGroups, trulyUnanchored) = groupStrokesWithProximity(
                     unanchoredStrokes, elements
                 )
-                val annotationsJson = annotationsToJson(explicitGroups + proximityGroups, trulyUnanchored)
+                val allGroups = explicitGroups + proximityGroups
+                Log.i(TAG, "sendRequestUpdate: explicit=${explicitGroups.size} proximity=${proximityGroups.size} unanchored=${trulyUnanchored.size}")
+                val annotationsJson = annotationsToJson(allGroups, trulyUnanchored)
                 val msg = JSONObject()
                 msg.put("type", "request_update")
                 msg.put("annotations", JSONArray(annotationsJson))
                 msg.put("typed_notes", "")
-                wsClient?.send(msg)
+                val ws = wsClient
+                if (ws == null) {
+                    Log.e(TAG, "sendRequestUpdate: wsClient is null! cannot send session=$sessionId")
+                } else {
+                    Log.i(TAG, "sendRequestUpdate: sending ws message session=$sessionId")
+                    ws.send(msg)
+                }
                 isProcessing = true
                 updateProcessingUi()
             }
@@ -592,6 +689,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     internal fun updateProcessingUi(statusText: String? = null) {
+        Log.d(TAG, "updateProcessingUi isProcessing=$isProcessing statusText=$statusText")
         val overlay = findViewById<View>(R.id.processingOverlay)
         val statusView = findViewById<TextView>(R.id.processingStatus)
         val btnRequestUpdate = findViewById<Button>(R.id.btnRequestUpdate)
@@ -603,12 +701,14 @@ class MainActivity : AppCompatActivity() {
             btnRequestUpdate.alpha = 0.4f
             btnSubmit.isEnabled = false
             btnSubmit.alpha = 0.6f
+            Log.d(TAG, "updateProcessingUi: buttons DISABLED")
         } else {
             overlay.visibility = View.GONE
             btnRequestUpdate.isEnabled = true
             btnRequestUpdate.alpha = 1.0f
             btnSubmit.isEnabled = true
             btnSubmit.alpha = 1.0f
+            Log.d(TAG, "updateProcessingUi: buttons ENABLED")
         }
     }
 }

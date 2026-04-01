@@ -278,6 +278,31 @@ impl SessionManager {
         Some(s.version)
     }
 
+    /// Remove all terminal-state sessions (Submitted, Cancelled, Expired) from memory and disk.
+    /// Returns the number of sessions purged.
+    pub fn purge_finished(&mut self) -> usize {
+        let finished: Vec<String> = self
+            .sessions
+            .values()
+            .filter(|s| {
+                matches!(
+                    s.status,
+                    SessionStatus::Submitted | SessionStatus::Cancelled | SessionStatus::Expired
+                )
+            })
+            .map(|s| s.id.clone())
+            .collect();
+        let count = finished.len();
+        for id in &finished {
+            if let Some(s) = self.sessions.remove(id) {
+                if let Err(e) = fs::remove_dir_all(&s.state_dir) {
+                    warn!(path = %s.state_dir.display(), error = %e, "failed to remove session dir");
+                }
+            }
+        }
+        count
+    }
+
     pub fn expire_stale(&mut self, timeout: Duration) {
         let now = Utc::now();
         for session in self.sessions.values_mut() {

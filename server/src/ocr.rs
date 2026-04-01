@@ -1,47 +1,130 @@
+use base64::Engine as _;
 use image::{ImageBuffer, Rgb, RgbImage};
 use std::io::Cursor;
-use std::sync::Mutex;
-use tracing::{debug, warn};
+use std::time::Instant;
+use tracing::{debug, info, warn};
 
 use crate::api::AnnotationGroup;
 
 pub struct OcrEngine {
-    tess: Mutex<leptess::LepTess>,
+    debug_save: bool,
+    client: reqwest::Client,
+    ollama_url: String,
+    ollama_model: String,
 }
 
 impl OcrEngine {
     pub fn new() -> Result<Self, String> {
-        let mut tess = leptess::LepTess::new(None, "eng")
-            .map_err(|e| format!("failed to init tesseract: {e}"))?;
-        // PSM 7: treat image as a single text line — best for handwritten annotations
-        tess.set_variable(leptess::Variable::TesseditPagesegMode, "7")
-            .map_err(|_| "failed to set PSM".to_string())?;
+        let debug_save = std::env::var("EINK_OCR_DEBUG").is_ok();
+        let ollama_url = std::env::var("EINK_OLLAMA_URL")
+            .unwrap_or_else(|_| "http://localhost:11434".to_string());
+        let ollama_model =
+            std::env::var("EINK_OLLAMA_MODEL").unwrap_or_else(|_| "qwen2.5vl:7b".to_string());
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(60))
+            .build()
+            .map_err(|e| format!("failed to build HTTP client: {e}"))?;
+        info!(ollama_url = %ollama_url, ollama_model = %ollama_model, "OCR engine initialized");
         Ok(Self {
-            tess: Mutex::new(tess),
+            debug_save,
+            client,
+            ollama_url,
+            ollama_model,
         })
     }
 
-    pub fn recognize_png(&self, png_data: &[u8]) -> Result<String, String> {
-        let mut tess = self
-            .tess
-            .lock()
-            .map_err(|e| format!("lock poisoned: {e}"))?;
-        tess.set_image_from_mem(png_data)
-            .map_err(|e| format!("failed to set image: {e}"))?;
-        tess.set_source_resolution(300);
-        let text = tess
-            .get_utf8_text()
-            .map_err(|e| format!("OCR failed: {e}"))?;
-        Ok(text.trim().to_string())
+    pub async fn recognize_image(&self, png: &[u8]) -> Result<String, String> {
+        if self.debug_save {
+            if let Ok(path) = save_debug_png(png) {
+                info!(path = %path, "OCR debug PNG saved");
+            }
+        }
+        let t = Instant::now();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(png);
+        let body = serde_json::json!({
+            "model": self.ollama_model,
+            "prompt": "Transcribe the handwritten text in this image exactly as written. Output only the transcribed text, nothing else.",
+            "images": [b64],
+            "stream": false,
+        });
+        let resp = self
+            .client
+            .post(format!("{}/api/generate", self.ollama_url))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("Ollama request: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!("Ollama returned {}", resp.status()));
+        }
+        let json: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("Ollama parse: {e}"))?;
+        let text = json["response"].as_str().unwrap_or("").trim().to_string();
+        let elapsed = t.elapsed();
+        let eval_ms = json["eval_duration"]
+            .as_u64()
+            .map(|ns| ns / 1_000_000)
+            .unwrap_or(0);
+        let prompt_ms = json["prompt_eval_duration"]
+            .as_u64()
+            .map(|ns| ns / 1_000_000)
+            .unwrap_or(0);
+        info!(
+            text = %text,
+            wall_ms = elapsed.as_millis(),
+            prompt_eval_ms = prompt_ms,
+            token_eval_ms = eval_ms,
+            "OCR complete"
+        );
+        Ok(text)
     }
 
-    pub fn recognize_strokes(&self, strokes: &[Vec<[f64; 2]>]) -> Result<String, String> {
+    pub async fn recognize_strokes(&self, strokes: &[Vec<[f64; 2]>]) -> Result<String, String> {
         if strokes.is_empty() {
             return Ok(String::new());
         }
+        let total_points: usize = strokes.iter().map(|s| s.len()).sum();
+        info!(
+            strokes = strokes.len(),
+            points = total_points,
+            "OCR: rendering strokes"
+        );
         let png = render_strokes_to_png(strokes)?;
-        self.recognize_png(&png)
+        info!(png_bytes = png.len(), "OCR: PNG rendered");
+        self.recognize_image(&png).await
     }
+}
+
+pub async fn ocr_annotation_groups(engine: &OcrEngine, groups: &mut [AnnotationGroup]) {
+    for (i, group) in groups.iter_mut().enumerate() {
+        if group.recognized_text.is_some() || group.strokes.is_empty() {
+            continue;
+        }
+        match engine.recognize_strokes(&group.strokes).await {
+            Ok(text) if !text.is_empty() => {
+                debug!(group = i, text = %text, "OCR recognized text");
+                group.recognized_text = Some(text);
+            }
+            Ok(_) => debug!(group = i, "OCR returned empty text"),
+            Err(e) => warn!(group = i, error = %e, "OCR failed for annotation group"),
+        }
+    }
+}
+
+fn save_debug_png(png: &[u8]) -> Result<String, std::io::Error> {
+    use std::io::Write as _;
+    let path = format!(
+        "/tmp/eink-ocr-{}.png",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+    );
+    let mut f = std::fs::File::create(&path)?;
+    f.write_all(png)?;
+    Ok(path)
 }
 
 const SCALE: f64 = 3.0;
@@ -130,29 +213,6 @@ fn draw_thick_line(img: &mut RgbImage, from: (f64, f64), to: (f64, f64), width: 
     }
 }
 
-pub fn ocr_annotation_groups(engine: &OcrEngine, groups: &mut [AnnotationGroup]) {
-    for (i, group) in groups.iter_mut().enumerate() {
-        if group.recognized_text.is_some() {
-            continue;
-        }
-        if group.strokes.is_empty() {
-            continue;
-        }
-        match engine.recognize_strokes(&group.strokes) {
-            Ok(text) if !text.is_empty() => {
-                debug!(group = i, text = %text, "OCR recognized text");
-                group.recognized_text = Some(text);
-            }
-            Ok(_) => {
-                debug!(group = i, "OCR returned empty text");
-            }
-            Err(e) => {
-                warn!(group = i, error = %e, "OCR failed for annotation group");
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,7 +222,7 @@ mod tests {
         let strokes = vec![vec![[10.0, 10.0], [50.0, 10.0], [50.0, 50.0]]];
         let png = render_strokes_to_png(&strokes).unwrap();
         assert!(!png.is_empty());
-        assert_eq!(&png[..4], &[0x89, 0x50, 0x4E, 0x47]); // PNG magic
+        assert_eq!(&png[..4], &[0x89, 0x50, 0x4E, 0x47]);
     }
 
     #[test]
@@ -178,29 +238,26 @@ mod tests {
         assert!(!png.is_empty());
     }
 
-    #[test]
-    fn ocr_engine_initializes() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ocr_engine_initializes() {
         match OcrEngine::new() {
             Ok(_) => {}
-            Err(e) => {
-                // Tesseract may not be available in all test environments
-                eprintln!("OCR engine init skipped: {e}");
-            }
+            Err(e) => eprintln!("OCR engine init skipped: {e}"),
         }
     }
 
-    #[test]
-    fn ocr_skips_groups_with_existing_text() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ocr_skips_groups_with_existing_text() {
         let engine = match OcrEngine::new() {
             Ok(e) => e,
-            Err(_) => return, // skip if tesseract unavailable
+            Err(_) => return,
         };
         let mut groups = vec![AnnotationGroup {
             anchor: None,
             strokes: vec![vec![[0.0, 0.0], [100.0, 0.0]]],
             recognized_text: Some("already set".into()),
         }];
-        ocr_annotation_groups(&engine, &mut groups);
+        ocr_annotation_groups(&engine, &mut groups).await;
         assert_eq!(groups[0].recognized_text.as_deref(), Some("already set"));
     }
 }

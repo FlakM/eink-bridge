@@ -7,6 +7,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
+use tracing::{info, warn};
 
 use crate::api::{AnnotationGroup, SessionResultResponse};
 use crate::app::AppState;
@@ -61,6 +62,7 @@ pub async fn ws_handler(
 }
 
 async fn handle_ws(mut socket: WebSocket, id: String, state: AppState) {
+    info!(session_id = %id, "ws connected");
     let mut rx = state.ws_subscribe(&id).await;
 
     loop {
@@ -70,25 +72,57 @@ async fn handle_ws(mut socket: WebSocket, id: String, state: AppState) {
                     Ok(msg) => {
                         let json = serde_json::to_string(&msg).unwrap_or_default();
                         if socket.send(Message::Text(json.into())).await.is_err() {
+                            warn!(session_id = %id, "ws send failed, closing");
                             break;
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        warn!(session_id = %id, skipped = n, "ws receiver lagged");
+                        continue;
+                    }
                 }
             }
             msg = socket.recv() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
+                        info!(session_id = %id, msg_type = extract_type(&text), "ws message received");
                         handle_client_message(&state, &id, &text).await;
                     }
-                    Some(Ok(Message::Close(_))) | None => break,
-                    Some(Err(_)) => break,
+                    Some(Ok(Message::Close(_))) => {
+                        info!(session_id = %id, "ws closed by client");
+                        break;
+                    }
+                    None => {
+                        info!(session_id = %id, "ws stream ended");
+                        break;
+                    }
+                    Some(Err(e)) => {
+                        warn!(session_id = %id, error = %e, "ws error");
+                        break;
+                    }
                     _ => {}
                 }
             }
         }
     }
+
+    info!(session_id = %id, "ws disconnected");
+}
+
+fn extract_type(text: &str) -> &str {
+    // fast path: find "type":"<value>" without full parse
+    let after = text
+        .find("\"type\"")
+        .and_then(|i| text[i + 6..].find('"').map(|j| i + 6 + j + 1));
+    if let Some(start) = after {
+        let end = text[start..]
+            .find('"')
+            .map(|k| start + k)
+            .unwrap_or(text.len());
+        return &text[start..end];
+    }
+    "unknown"
 }
 
 async fn handle_client_message(state: &AppState, id: &str, text: &str) {
@@ -162,27 +196,20 @@ async fn handle_request_update(
         let ocr_id = id.to_string();
         let mut anns = annotations;
         tokio::spawn(async move {
-            let result = tokio::task::spawn_blocking(move || {
-                crate::ocr::ocr_annotation_groups(&engine, &mut anns);
-                anns
-            })
-            .await;
-
-            if let Ok(annotations) = result {
-                {
-                    let mut mgr = ocr_state.sessions.write().await;
-                    mgr.update_annotations(&ocr_id, annotations.clone());
-                }
-                ocr_state
-                    .ws_send(
-                        &ocr_id,
-                        ServerMessage::AnnotationResult {
-                            annotations: strip_strokes(annotations),
-                            version,
-                        },
-                    )
-                    .await;
+            crate::ocr::ocr_annotation_groups(&engine, &mut anns).await;
+            {
+                let mut mgr = ocr_state.sessions.write().await;
+                mgr.update_annotations(&ocr_id, anns.clone());
             }
+            ocr_state
+                .ws_send(
+                    &ocr_id,
+                    ServerMessage::AnnotationResult {
+                        annotations: strip_strokes(anns),
+                        version,
+                    },
+                )
+                .await;
         });
     } else {
         state

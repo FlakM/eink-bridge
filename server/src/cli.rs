@@ -187,104 +187,134 @@ async fn cmd_push(
 }
 
 async fn cmd_push_interactive(server: &str, id: &str, timeout_minutes: u64) -> anyhow::Result<()> {
+    use std::io::Write as _;
     println!("SESSION_ID:{id}");
-    let url = ws_url(server, &format!("/ws/{id}"));
-    let (mut ws, _) = tokio::time::timeout(
-        Duration::from_secs(10),
-        tokio_tungstenite::connect_async(&url),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("WS connect timeout"))?
-    .map_err(|e| anyhow::anyhow!("WS connect failed: {e}"))?;
-
-    ws.send(WsMessage::Text(
-        serde_json::json!({"type": "subscribe"}).to_string(),
-    ))
-    .await?;
+    std::io::stdout().flush().ok();
 
     let deadline = Instant::now() + Duration::from_secs(timeout_minutes * 60);
-    loop {
+
+    'reconnect: loop {
         if Instant::now() > deadline {
             anyhow::bail!("timeout waiting for review");
         }
-        let msg = tokio::time::timeout(Duration::from_secs(60), ws.next())
-            .await
-            .ok()
-            .flatten();
 
-        match msg {
-            Some(Ok(WsMessage::Text(text))) => {
-                let v: serde_json::Value = serde_json::from_str(&text)?;
-                match v["type"].as_str() {
-                    Some("annotation_result") => {
-                        println!("EVENT:ANNOTATION_RESULT {text}");
-                    }
-                    Some("session_submitted") => {
-                        println!("EVENT:SUBMITTED {text}");
-                        let body = &v["result"];
-                        print_result(id, body);
-                        exit_for_verdict(body);
-                        return Ok(());
-                    }
-                    Some("error") => {
-                        anyhow::bail!(
-                            "server error: {}",
-                            v["message"].as_str().unwrap_or("unknown")
-                        );
-                    }
-                    _ => {}
+        let url = ws_url(server, &format!("/ws/{id}"));
+        let ws_result = tokio::time::timeout(
+            Duration::from_secs(10),
+            tokio_tungstenite::connect_async(&url),
+        )
+        .await;
+
+        let mut ws = match ws_result {
+            Err(_) => {
+                eprintln!("EVENT:RECONNECTING reason=connect_timeout");
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue 'reconnect;
+            }
+            Ok(Err(e)) => {
+                eprintln!("EVENT:RECONNECTING reason={e}");
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue 'reconnect;
+            }
+            Ok(Ok((ws, _))) => ws,
+        };
+
+        if ws
+            .send(WsMessage::Text(
+                serde_json::json!({"type": "subscribe"}).to_string(),
+            ))
+            .await
+            .is_err()
+        {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            continue 'reconnect;
+        }
+
+        let mut last_ping = Instant::now();
+        loop {
+            if Instant::now() > deadline {
+                anyhow::bail!("timeout waiting for review");
+            }
+
+            if last_ping.elapsed() >= Duration::from_secs(30) {
+                if ws.send(WsMessage::Ping(Default::default())).await.is_err() {
+                    eprintln!("EVENT:RECONNECTING reason=ping_failed");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue 'reconnect;
                 }
+                last_ping = Instant::now();
             }
-            Some(Ok(WsMessage::Close(_))) | None => {
-                anyhow::bail!("WebSocket closed unexpectedly");
+
+            let msg = tokio::time::timeout(Duration::from_secs(30), ws.next()).await;
+
+            match msg {
+                Err(_) => continue, // idle window, go ping
+                Ok(Some(Ok(WsMessage::Text(text)))) => {
+                    let v: serde_json::Value = serde_json::from_str(&text)?;
+                    match v["type"].as_str() {
+                        Some("annotation_result") => {
+                            println!("EVENT:ANNOTATION_RESULT {text}");
+                            std::io::stdout().flush().ok();
+                        }
+                        Some("session_submitted") => {
+                            println!("EVENT:SUBMITTED {text}");
+                            std::io::stdout().flush().ok();
+                            let body = &v["result"];
+                            print_result(id, body);
+                            exit_for_verdict(body);
+                            return Ok(());
+                        }
+                        Some("error") => {
+                            anyhow::bail!(
+                                "server error: {}",
+                                v["message"].as_str().unwrap_or("unknown")
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(Some(Ok(WsMessage::Ping(data)))) => {
+                    if ws.send(WsMessage::Pong(data)).await.is_err() {
+                        eprintln!("EVENT:RECONNECTING reason=pong_failed");
+                        continue 'reconnect;
+                    }
+                }
+                Ok(Some(Ok(WsMessage::Pong(_)))) => {}
+                Ok(Some(Ok(WsMessage::Close(_)))) | Ok(None) => {
+                    eprintln!("EVENT:RECONNECTING reason=ws_closed");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue 'reconnect;
+                }
+                Ok(Some(Err(e))) => {
+                    eprintln!("EVENT:RECONNECTING reason={e}");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue 'reconnect;
+                }
+                Ok(Some(Ok(_))) => {}
             }
-            Some(Err(e)) => anyhow::bail!("WebSocket error: {e}"),
-            _ => {}
         }
     }
 }
 
 async fn cmd_update(server: &str, id: &str, file: &str) -> anyhow::Result<()> {
     let content = std::fs::read_to_string(file)?;
-    let url = ws_url(server, &format!("/ws/{id}"));
-    let (mut ws, _) = tokio::time::timeout(
-        Duration::from_secs(10),
-        tokio_tungstenite::connect_async(&url),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("WS connect timeout"))?
-    .map_err(|e| anyhow::anyhow!("WS connect failed: {e}"))?;
-
-    ws.send(WsMessage::Text(
-        serde_json::json!({"type": "update_content", "content": content}).to_string(),
-    ))
-    .await?;
-
-    loop {
-        match ws.next().await {
-            Some(Ok(WsMessage::Text(text))) => {
-                let v: serde_json::Value = serde_json::from_str(&text)?;
-                match v["type"].as_str() {
-                    Some("version_updated") => {
-                        let version = v["version"].as_u64().unwrap_or(0);
-                        eprintln!("version updated to {version}");
-                        return Ok(());
-                    }
-                    Some("error") => {
-                        anyhow::bail!(
-                            "server error: {}",
-                            v["message"].as_str().unwrap_or("unknown")
-                        );
-                    }
-                    _ => {}
-                }
-            }
-            Some(Ok(WsMessage::Close(_))) | None => {
-                anyhow::bail!("WebSocket closed without version_updated");
-            }
-            Some(Err(e)) => anyhow::bail!("WebSocket error: {e}"),
-            _ => {}
+    let client = Client::new();
+    let resp = client
+        .put(format!("{server}/api/sessions/{id}/content"))
+        .header("content-type", "text/plain")
+        .body(content)
+        .send()
+        .await?;
+    match resp.status().as_u16() {
+        200 => {
+            let body: serde_json::Value = resp.json().await?;
+            let version = body["version"].as_u64().unwrap_or(0);
+            eprintln!("version updated to {version}");
+            Ok(())
         }
+        404 => anyhow::bail!("session not found"),
+        409 => anyhow::bail!("session not in processing state"),
+        s => anyhow::bail!("unexpected status: {s}"),
     }
 }
 
