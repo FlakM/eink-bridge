@@ -116,7 +116,6 @@ impl OcrEngine {
             "OCR: rendering strokes"
         );
         let png = render_strokes_to_png(strokes)?;
-        info!(png_bytes = png.len(), "OCR: PNG rendered");
         self.recognize_image(&png).await
     }
 }
@@ -135,8 +134,8 @@ fn save_debug_png(png: &[u8]) -> Result<String, std::io::Error> {
     Ok(path)
 }
 
-const SCALE: f64 = 3.0;
-const STROKE_WIDTH: f64 = 3.0 * SCALE;
+const BASE_SCALE: f64 = 3.0;
+const MAX_SIDE: u32 = 1024;
 const PADDING: u32 = 20;
 const MIN_DIM: u32 = 120;
 
@@ -157,10 +156,20 @@ fn render_strokes_to_png(strokes: &[Vec<[f64; 2]>]) -> Result<Vec<u8>, String> {
         return Err("no stroke points".into());
     }
 
-    let w = (((max_x - min_x) * SCALE) as u32 + 2 * PADDING).max(MIN_DIM);
-    let h = (((max_y - min_y) * SCALE) as u32 + 2 * PADDING).max(MIN_DIM);
-    let w = w.min(8000);
-    let h = h.min(8000);
+    // Cap scale so the longer side stays within MAX_SIDE
+    let natural_w = (max_x - min_x) * BASE_SCALE + 2.0 * PADDING as f64;
+    let natural_h = (max_y - min_y) * BASE_SCALE + 2.0 * PADDING as f64;
+    let scale = if natural_w.max(natural_h) > MAX_SIDE as f64 {
+        BASE_SCALE * MAX_SIDE as f64 / natural_w.max(natural_h)
+    } else {
+        BASE_SCALE
+    };
+    let stroke_width = 3.0 * scale;
+
+    let w = ((max_x - min_x) * scale) as u32 + 2 * PADDING;
+    let w = w.max(MIN_DIM).min(MAX_SIDE);
+    let h = ((max_y - min_y) * scale) as u32 + 2 * PADDING;
+    let h = h.max(MIN_DIM).min(MAX_SIDE);
 
     let mut img: RgbImage = ImageBuffer::from_pixel(w, h, Rgb([255, 255, 255]));
 
@@ -171,14 +180,14 @@ fn render_strokes_to_png(strokes: &[Vec<[f64; 2]>]) -> Result<Vec<u8>, String> {
             draw_thick_line(
                 &mut img,
                 (
-                    (x0 - min_x) * SCALE + PADDING as f64,
-                    (y0 - min_y) * SCALE + PADDING as f64,
+                    (x0 - min_x) * scale + PADDING as f64,
+                    (y0 - min_y) * scale + PADDING as f64,
                 ),
                 (
-                    (x1 - min_x) * SCALE + PADDING as f64,
-                    (y1 - min_y) * SCALE + PADDING as f64,
+                    (x1 - min_x) * scale + PADDING as f64,
+                    (y1 - min_y) * scale + PADDING as f64,
                 ),
-                STROKE_WIDTH,
+                stroke_width,
             );
         }
     }
@@ -187,6 +196,14 @@ fn render_strokes_to_png(strokes: &[Vec<[f64; 2]>]) -> Result<Vec<u8>, String> {
     let encoder = image::codecs::png::PngEncoder::new(Cursor::new(&mut buf));
     image::ImageEncoder::write_image(encoder, img.as_raw(), w, h, image::ExtendedColorType::Rgb8)
         .map_err(|e| format!("PNG encode failed: {e}"))?;
+    crate::metrics::OCR_IMAGE_PIXELS.observe((w * h) as f64);
+    info!(
+        w,
+        h,
+        png_bytes = buf.len(),
+        scale = scale,
+        "OCR: PNG rendered"
+    );
     Ok(buf)
 }
 

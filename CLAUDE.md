@@ -218,6 +218,38 @@ just apk           # build android debug APK
 just apk-install   # build + install on connected device
 ```
 
+## Debugging
+
+### Metrics
+
+The `/metrics` endpoint (port 3333) exposes all Prometheus metrics in text format — useful for checking live state without logs:
+
+```bash
+curl -s http://localhost:3333/metrics | grep eink_
+```
+
+Key metrics for debugging:
+
+| Symptom | Metric to check |
+|---|---|
+| Sessions not submitting | `eink_sessions_submitted_total`, `eink_sessions_active` |
+| OCR failures | `eink_ocr_requests_total{result="error"}` |
+| OCR slow | `eink_ocr_duration_seconds` buckets |
+| WebSocket drops | `eink_ws_connections_active` |
+| Long-poll timing out too fast | `eink_long_poll_total{result="timeout"}` |
+| Webhook not firing | `eink_webhook_total{result="error"}` |
+| Unexpected session expiry | `eink_sessions_expired_total` |
+
+Grafana dashboard on odroid:3002 visualizes all of these over time — often faster to spot trends than grepping logs.
+
+### Logs
+
+```bash
+just logs              # follow live server logs
+just status            # systemd service status
+EINK_OCR_DEBUG=1 ...   # saves OCR PNGs to /tmp/eink-ocr-*.png before sending to Ollama
+```
+
 ## Adding render tests
 
 When adding a new feature to `render.rs`:

@@ -74,6 +74,16 @@ pub static OCR_DURATION: LazyLock<Histogram> = LazyLock::new(|| {
 });
 pub static OCR_TOKENS: LazyLock<IntCounterVec> =
     LazyLock::new(|| reg!(counter_vec "eink_ocr_tokens_total", "Ollama token counts", &["kind"]));
+pub static OCR_IMAGE_PIXELS: LazyLock<Histogram> = LazyLock::new(|| {
+    reg!(
+        histogram "eink_ocr_image_pixels",
+        "OCR input image size in pixels (width * height)",
+        vec![
+            10_000.0, 40_000.0, 100_000.0, 250_000.0, 500_000.0,
+            750_000.0, 1_000_000.0, 1_500_000.0,
+        ]
+    )
+});
 
 // WebSocket
 pub static WS_CONNECTIONS_ACTIVE: LazyLock<IntGauge> =
@@ -117,6 +127,7 @@ pub fn init() {
     let _ = &*OCR_REQUESTS;
     let _ = &*OCR_DURATION;
     let _ = &*OCR_TOKENS;
+    let _ = &*OCR_IMAGE_PIXELS;
     let _ = &*WS_CONNECTIONS_ACTIVE;
     let _ = &*LONG_POLL_TOTAL;
     let _ = &*WEBHOOK_TOTAL;

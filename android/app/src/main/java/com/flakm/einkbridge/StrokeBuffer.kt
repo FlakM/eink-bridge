@@ -185,11 +185,30 @@ internal class StrokeBuffer {
 
 internal data class OcrResult(val docX: Float, val docY: Float, val text: String, val minDocY: Float = docY, val strokeIndices: Set<Int> = emptySet())
 
-/** Clusters strokes by centroid proximity (no element lookup needed). */
+private data class StrokeBBox(val l: Float, val t: Float, val r: Float, val b: Float)
+
+private fun strokeBBox(stroke: Stroke): StrokeBBox {
+    var l = Float.MAX_VALUE; var t = Float.MAX_VALUE
+    var r = Float.MIN_VALUE; var b = Float.MIN_VALUE
+    for ((x, y) in stroke.points) {
+        if (x < l) l = x; if (x > r) r = x
+        if (y < t) t = y; if (y > b) b = y
+    }
+    return StrokeBBox(l, t, r, b)
+}
+
+/** Minimum gap between two bounding boxes (0 if overlapping). */
+private fun bboxGap(a: StrokeBBox, b: StrokeBBox): Float {
+    val dx = maxOf(0f, b.l - a.r, a.l - b.r)
+    val dy = maxOf(0f, b.t - a.b, a.t - b.b)
+    return if (dx == 0f && dy == 0f) 0f else Math.sqrt((dx * dx + dy * dy).toDouble()).toFloat()
+}
+
+/** Clusters strokes by bounding-box proximity so large strokes group correctly. */
 internal fun clusterStrokes(strokes: List<Stroke>, threshold: Float = 120f): List<List<Stroke>> {
     val n = strokes.size
     if (n == 0) return emptyList()
-    val centroids = strokes.map { strokeCentroid(it) }
+    val bboxes = strokes.map { strokeBBox(it) }
     val parent = IntArray(n) { it }
     fun find(x: Int): Int {
         if (parent[x] != x) parent[x] = find(parent[x])
@@ -197,9 +216,7 @@ internal fun clusterStrokes(strokes: List<Stroke>, threshold: Float = 120f): Lis
     }
     for (i in 0 until n) {
         for (j in i + 1 until n) {
-            val dx = centroids[i].first - centroids[j].first
-            val dy = centroids[i].second - centroids[j].second
-            if (dx * dx + dy * dy <= threshold * threshold) {
+            if (bboxGap(bboxes[i], bboxes[j]) <= threshold) {
                 val pi = find(i); val pj = find(j)
                 if (pi != pj) parent[pi] = pj
             }
