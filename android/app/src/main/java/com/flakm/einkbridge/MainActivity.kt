@@ -207,7 +207,6 @@ class MainActivity : AppCompatActivity() {
         val btnUndo = findViewById<Button>(R.id.btnUndo)
         val btnClear = findViewById<Button>(R.id.btnClear)
         btnLink = findViewById(R.id.btnLink)
-        btnLink.text = "Bind"
         btnColor = findViewById(R.id.btnColor)
         btnAnnotations = findViewById(R.id.btnAnnotations)
 

@@ -171,6 +171,18 @@ internal class StrokeView @JvmOverloads constructor(
             }
         }
 
+        bindPathPoints?.let { pts ->
+            if (pts.size >= 2) {
+                val path = Path().apply {
+                    moveTo(pts[0].x, pts[0].y)
+                    for (i in 1 until pts.size) lineTo(pts[i].x, pts[i].y)
+                }
+                val fillPath = Path(path).apply { close() }
+                canvas.drawPath(fillPath, bindFillPaint)
+                canvas.drawPath(path, bindPathPaint)
+            }
+        }
+
         if (!annotationMode) return
 
         for (group in bindGroups) {
@@ -235,17 +247,6 @@ internal class StrokeView @JvmOverloads constructor(
             }
         }
 
-        bindPathPoints?.let { pts ->
-            if (pts.size >= 2) {
-                val path = Path().apply {
-                    moveTo(pts[0].x, pts[0].y)
-                    for (i in 1 until pts.size) lineTo(pts[i].x, pts[i].y)
-                }
-                val fillPath = Path(path).apply { close() }
-                canvas.drawPath(fillPath, bindFillPaint)
-                canvas.drawPath(path, bindPathPaint)
-            }
-        }
     }
 
     private fun drawAnnotationLabel(canvas: Canvas, text: String, cx: Float, boxBottomY: Float) {

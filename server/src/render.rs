@@ -1182,7 +1182,7 @@ const ELEMENT_MAP_JS: &str = r#"
   var _nextId = 0;
   var _popup = null;
 
-  var QUERY = 'h1, h2, h3, p, pre, blockquote, table, ul, ol, .diagram-block, img';
+  var QUERY = 'h1, h2, h3, p, li, pre, blockquote, td, th, table, ul, ol, .diagram-block, img';
 
   function slugify(s) {
     return 's-' + s.trim().toLowerCase().replace(/[^\w\s-]/g, '').replace(/\s+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
@@ -1537,13 +1537,26 @@ const ELEMENT_MAP_JS: &str = r#"
 
   window.__einkFindElements = function(left, top, right, bottom) {
     var map = window.__einkElementMap || [];
-    var result = [];
+    var matched = [];
     for (var i = 0; i < map.length; i++) {
       var e = map[i];
       if (e.r >= left && e.l <= right && e.b >= top && e.t <= bottom)
-        result.push({i: e.i, tag: e.tag, id: e.id || null, section: e.section || null, text: e.text.substring(0, 80), cx: (e.l + e.r) / 2, cy: (e.t + e.b) / 2});
+        matched.push(e);
     }
-    return JSON.stringify(result);
+    // Prefer inner elements: drop any element that contains another matched element
+    var result = matched.filter(function(e) {
+      var el = getEl(e.i);
+      if (!el) return true;
+      for (var j = 0; j < matched.length; j++) {
+        if (matched[j].i === e.i) continue;
+        var other = getEl(matched[j].i);
+        if (other && el.contains(other)) return false;
+      }
+      return true;
+    });
+    return JSON.stringify(result.map(function(e) {
+      return {i: e.i, tag: e.tag, id: e.id || null, section: e.section || null, text: e.text.substring(0, 80), cx: (e.l + e.r) / 2, cy: (e.t + e.b) / 2};
+    }));
   };
 
   window.__einkFlashGroup = function(elementIndices, colorHex) {
