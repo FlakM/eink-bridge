@@ -79,14 +79,14 @@ internal class StrokeView @JvmOverloads constructor(
     private val ocrBoxBorderPaint = Paint().apply {
         isAntiAlias = true
         style = Paint.Style.STROKE
-        strokeWidth = 2f
-        color = 0xFF888888.toInt()
+        strokeWidth = 3f
+        color = 0xFF555555.toInt()
     }
 
     private val ocrLabelPaint = Paint().apply {
         isAntiAlias = true
         color = Color.BLACK
-        textSize = 28f
+        textSize = 34f
         textAlign = Paint.Align.CENTER
     }
 
@@ -188,41 +188,40 @@ internal class StrokeView @JvmOverloads constructor(
         for (group in bindGroups) {
             val sx = t.docToScreenX(group.markerDocX)
             val sy = t.docToScreenY(group.markerDocY)
-            val lineColor = (group.color and 0x00FFFFFF) or (0xBB shl 24)
-
             // Dashed lines to stroke centers
-            dashPaint.color = lineColor
-            dashPaint.strokeWidth = 3f
+            dashPaint.color = group.color
+            dashPaint.strokeWidth = 4f
             for ((cx, cy) in group.strokeDocCenters) {
                 canvas.drawLine(sx, sy, t.docToScreenX(cx), t.docToScreenY(cy), dashPaint)
             }
 
             // Solid lines to element centers
-            linkLinePaint.color = lineColor
+            linkLinePaint.color = group.color
+            linkLinePaint.strokeWidth = 4f
             for ((cx, cy) in group.elementDocCenters) {
                 canvas.drawLine(sx, sy, t.docToScreenX(cx), t.docToScreenY(cy), linkLinePaint)
             }
 
-            // Pill shape — contains OCR text if available, plain pill otherwise
+            // Pill: white fill + thick colored border + black text — e-ink legible
             val pillText = group.recognizedText ?: ""
-            val pillPad = 12f
-            val textW = if (pillText.isNotEmpty()) ocrTextPaint.measureText(pillText) else 0f
+            val pillPad = 16f
+            val textW = if (pillText.isNotEmpty()) ocrLabelPaint.measureText(pillText) else 0f
             val pillW = maxOf(textW + pillPad * 2, MARKER_RADIUS_PX * 2)
-            val pillH = if (pillText.isNotEmpty()) ocrTextPaint.textSize + pillPad * 2 else MARKER_RADIUS_PX * 2
+            val pillH = if (pillText.isNotEmpty()) ocrLabelPaint.textSize + pillPad * 2 else MARKER_RADIUS_PX * 2
             val cornerR = pillH / 2
             val pillRect = RectF(sx - pillW / 2, sy - pillH / 2, sx + pillW / 2, sy + pillH / 2)
 
-            markerPaint.color = group.color
+            markerPaint.color = Color.WHITE
             markerPaint.style = Paint.Style.FILL
             canvas.drawRoundRect(pillRect, cornerR, cornerR, markerPaint)
-            markerPaint.color = Color.WHITE
+            markerPaint.color = group.color
             markerPaint.style = Paint.Style.STROKE
-            markerPaint.strokeWidth = 2f
+            markerPaint.strokeWidth = 5f
             canvas.drawRoundRect(pillRect, cornerR, cornerR, markerPaint)
             markerPaint.style = Paint.Style.FILL
 
             if (pillText.isNotEmpty()) {
-                canvas.drawText(pillText, sx, sy + ocrTextPaint.textSize * 0.35f, ocrTextPaint)
+                canvas.drawText(pillText, sx, sy + ocrLabelPaint.textSize * 0.35f, ocrLabelPaint)
             }
         }
 
