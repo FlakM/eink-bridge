@@ -183,6 +183,33 @@ internal class StrokeBuffer {
     }
 }
 
+internal data class OcrResult(val docX: Float, val docY: Float, val text: String, val minDocY: Float = docY)
+
+/** Clusters strokes by centroid proximity (no element lookup needed). */
+internal fun clusterStrokes(strokes: List<Stroke>, threshold: Float = 120f): List<List<Stroke>> {
+    val n = strokes.size
+    if (n == 0) return emptyList()
+    val centroids = strokes.map { strokeCentroid(it) }
+    val parent = IntArray(n) { it }
+    fun find(x: Int): Int {
+        if (parent[x] != x) parent[x] = find(parent[x])
+        return parent[x]
+    }
+    for (i in 0 until n) {
+        for (j in i + 1 until n) {
+            val dx = centroids[i].first - centroids[j].first
+            val dy = centroids[i].second - centroids[j].second
+            if (dx * dx + dy * dy <= threshold * threshold) {
+                val pi = find(i); val pj = find(j)
+                if (pi != pj) parent[pi] = pj
+            }
+        }
+    }
+    val clusterMap = mutableMapOf<Int, MutableList<Int>>()
+    for (i in 0 until n) clusterMap.getOrPut(find(i)) { mutableListOf() }.add(i)
+    return clusterMap.values.map { indices -> indices.map { strokes[it] } }
+}
+
 internal fun parseElementMap(json: String): List<ElementEntry> {
     val arr = JSONArray(json)
     return (0 until arr.length()).map { i ->
@@ -361,6 +388,7 @@ internal fun bindGroupsToJson(groups: List<BindGroup>): String {
         obj.put("markerDocY", g.markerDocY.toDouble())
         obj.put("strokeDocCenters", pairsToJson(g.strokeDocCenters))
         obj.put("elementDocCenters", pairsToJson(g.elementDocCenters))
+        g.recognizedText?.let { obj.put("recognizedText", it) }
         arr.put(obj)
     }
     return arr.toString()
@@ -392,6 +420,7 @@ internal fun bindGroupsFromJson(json: String): List<BindGroup> {
             markerDocY = obj.getDouble("markerDocY").toFloat(),
             strokeDocCenters = pairsFromJson(obj.optJSONArray("strokeDocCenters") ?: JSONArray()),
             elementDocCenters = pairsFromJson(obj.optJSONArray("elementDocCenters") ?: JSONArray()),
+            recognizedText = obj.optString("recognizedText", null).takeIf { !it.isNullOrEmpty() },
         )
     }
 }
@@ -420,6 +449,26 @@ internal fun pointInPolygon(px: Float, py: Float, polygon: List<Pair<Float, Floa
         j = i
     }
     return inside
+}
+
+internal fun ocrResultsToJson(results: List<OcrResult>): String {
+    val arr = JSONArray()
+    for (r in results) {
+        arr.put(JSONObject().apply {
+            put("docX", r.docX.toDouble())
+            put("docY", r.docY.toDouble())
+            put("text", r.text)
+        })
+    }
+    return arr.toString()
+}
+
+internal fun ocrResultsFromJson(json: String): List<OcrResult> {
+    val arr = JSONArray(json)
+    return (0 until arr.length()).map { i ->
+        val o = arr.getJSONObject(i)
+        OcrResult(o.getDouble("docX").toFloat(), o.getDouble("docY").toFloat(), o.getString("text"))
+    }
 }
 
 private fun strokesToPointArrays(strokes: List<Stroke>): JSONArray {

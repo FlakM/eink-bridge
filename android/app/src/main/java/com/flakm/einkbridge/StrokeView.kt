@@ -187,30 +187,42 @@ internal class StrokeView @JvmOverloads constructor(
 
         for (group in bindGroups) {
             val sx = t.docToScreenX(group.markerDocX)
-            val sy = t.docToScreenY(group.markerDocY)
-            // Dashed lines to stroke centers
-            dashPaint.color = group.color
-            dashPaint.strokeWidth = 4f
-            for ((cx, cy) in group.strokeDocCenters) {
-                canvas.drawLine(sx, sy, t.docToScreenX(cx), t.docToScreenY(cy), dashPaint)
-            }
 
-            // Solid lines to element centers
-            linkLinePaint.color = group.color
-            linkLinePaint.strokeWidth = 4f
-            for ((cx, cy) in group.elementDocCenters) {
-                canvas.drawLine(sx, sy, t.docToScreenX(cx), t.docToScreenY(cy), linkLinePaint)
-            }
-
-            // Pill: white fill + thick colored border + black text — e-ink legible
+            // Pill dimensions
             val pillText = group.recognizedText ?: ""
             val pillPad = 16f
             val textW = if (pillText.isNotEmpty()) ocrLabelPaint.measureText(pillText) else 0f
             val pillW = maxOf(textW + pillPad * 2, MARKER_RADIUS_PX * 2)
             val pillH = if (pillText.isNotEmpty()) ocrLabelPaint.textSize + pillPad * 2 else MARKER_RADIUS_PX * 2
             val cornerR = pillH / 2
-            val pillRect = RectF(sx - pillW / 2, sy - pillH / 2, sx + pillW / 2, sy + pillH / 2)
 
+            // Position pill above the topmost stroke point
+            var minDocY = Float.MAX_VALUE
+            for (idx in group.strokeIndices) {
+                val stroke = strokes.getOrNull(idx) ?: continue
+                for ((_, y) in stroke.points) if (y < minDocY) minDocY = y
+            }
+            val anchorScreenY = if (minDocY < Float.MAX_VALUE)
+                t.docToScreenY(minDocY)
+            else
+                t.docToScreenY(group.markerDocY)
+            val pillTopY = anchorScreenY - LABEL_GAP - pillH
+            val pillCenterY = pillTopY + pillH / 2
+            val pillRect = RectF(sx - pillW / 2, pillTopY, sx + pillW / 2, pillTopY + pillH)
+
+            // Lines from pill center downward into stroke/element centers
+            dashPaint.color = group.color
+            dashPaint.strokeWidth = 4f
+            for ((cx, cy) in group.strokeDocCenters) {
+                canvas.drawLine(sx, pillCenterY, t.docToScreenX(cx), t.docToScreenY(cy), dashPaint)
+            }
+            linkLinePaint.color = group.color
+            linkLinePaint.strokeWidth = 4f
+            for ((cx, cy) in group.elementDocCenters) {
+                canvas.drawLine(sx, pillCenterY, t.docToScreenX(cx), t.docToScreenY(cy), linkLinePaint)
+            }
+
+            // Pill: white fill + thick colored border + black text
             markerPaint.color = Color.WHITE
             markerPaint.style = Paint.Style.FILL
             canvas.drawRoundRect(pillRect, cornerR, cornerR, markerPaint)
@@ -219,31 +231,15 @@ internal class StrokeView @JvmOverloads constructor(
             markerPaint.strokeWidth = 5f
             canvas.drawRoundRect(pillRect, cornerR, cornerR, markerPaint)
             markerPaint.style = Paint.Style.FILL
-
             if (pillText.isNotEmpty()) {
-                canvas.drawText(pillText, sx, sy + ocrLabelPaint.textSize * 0.35f, ocrLabelPaint)
+                canvas.drawText(pillText, sx, pillCenterY + ocrLabelPaint.textSize * 0.35f, ocrLabelPaint)
             }
         }
 
         for (result in ocrResults) {
             val sx = t.docToScreenX(result.docX)
-            val sy = t.docToScreenY(result.docY)
-            markerPaint.color = UNBOUND_MARKER_COLOR
-            markerPaint.style = Paint.Style.FILL
-            canvas.drawCircle(sx, sy, MARKER_RADIUS_PX, markerPaint)
-            markerPaint.color = Color.WHITE
-            markerPaint.style = Paint.Style.STROKE
-            markerPaint.strokeWidth = 3f
-            canvas.drawCircle(sx, sy, MARKER_RADIUS_PX, markerPaint)
-            markerPaint.style = Paint.Style.FILL
-            if (annotationMode) {
-                drawAnnotationLabel(canvas, result.text, sx, sy - MARKER_RADIUS_PX - 4f)
-            } else {
-                val bx = sx
-                val by = sy - MARKER_RADIUS_PX - BADGE_RADIUS_PX - 6f
-                canvas.drawCircle(bx, by, BADGE_RADIUS_PX, ocrBadgePaint)
-                canvas.drawText("ℹ", bx, by + ocrTextPaint.textSize * 0.35f, ocrTextPaint)
-            }
+            val labelBottomY = t.docToScreenY(result.minDocY) - LABEL_GAP
+            drawAnnotationLabel(canvas, result.text, sx, labelBottomY)
         }
 
     }
@@ -262,6 +258,7 @@ internal class StrokeView @JvmOverloads constructor(
     companion object {
         const val UNBOUND_MARKER_COLOR = 0xFF888888.toInt()
         const val MARKER_RADIUS_PX = 28f
+        const val LABEL_GAP = 12f
         const val BADGE_RADIUS_PX = 18f
         const val SHOW_DURATION_MS = 3000L
         const val MIN_OCR_DIAGONAL_PX = 80f

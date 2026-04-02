@@ -77,15 +77,16 @@ internal class OcrManager(
             val pts = cluster.flatMap { it.points }
             val cx = pts.map { it.first }.average().toFloat()
             val cy = pts.map { it.second }.average().toFloat()
+            val minY = pts.minOf { it.second }
             val cacheKey = cluster.toSet()
             val cached = clusterCache[cacheKey]
             if (cached != null) {
                 Log.d(TAG, "cached: cluster#$ci -> \"$cached\"")
-                clusterResults[ci] = OcrResult(cx, cy, cached)
+                clusterResults[ci] = OcrResult(cx, cy, cached, minY)
             } else {
                 tasks += Task("cluster#$ci", cluster) { text ->
                     clusterCache[cacheKey] = text
-                    clusterResults[ci] = OcrResult(cx, cy, text)
+                    clusterResults[ci] = OcrResult(cx, cy, text, minY)
                 }
             }
         }
