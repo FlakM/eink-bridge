@@ -324,17 +324,28 @@ internal class StrokeView @JvmOverloads constructor(
 
         // --- Pass 3: draw lines first, then labels on top ---
         for (label in labels) {
-            if (label !is AnnotLabel.Group) continue
-            val strokeOff = groupStrokeOffsets[label.group.id] ?: (0f to 0f)
             val centerY = label.topY + label.h / 2
-            val dimColor = (label.group.color and 0x00FFFFFF) or 0x66000000
-            dashPaint.color = dimColor; dashPaint.strokeWidth = 2f
-            for ((cx, cy) in label.group.strokeDocCenters)
-                canvas.drawLine(label.sx, centerY,
-                    t.docToScreenX(cx + strokeOff.first), t.docToScreenY(cy + strokeOff.second), dashPaint)
-            linkLinePaint.color = dimColor; linkLinePaint.strokeWidth = 2f
-            for ((cx, cy) in label.group.elementDocCenters)
-                canvas.drawLine(label.sx, centerY, t.docToScreenX(cx), t.docToScreenY(cy), linkLinePaint)
+            when (label) {
+                is AnnotLabel.Group -> {
+                    val strokeOff = groupStrokeOffsets[label.group.id] ?: (0f to 0f)
+                    val dimColor = (label.group.color and 0x00FFFFFF) or 0x66000000
+                    dashPaint.color = dimColor; dashPaint.strokeWidth = 2f
+                    for ((cx, cy) in label.group.strokeDocCenters)
+                        canvas.drawLine(label.sx, centerY,
+                            t.docToScreenX(cx + strokeOff.first), t.docToScreenY(cy + strokeOff.second), dashPaint)
+                    linkLinePaint.color = dimColor; linkLinePaint.strokeWidth = 2f
+                    for ((cx, cy) in label.group.elementDocCenters)
+                        canvas.drawLine(label.sx, centerY, t.docToScreenX(cx), t.docToScreenY(cy), linkLinePaint)
+                }
+                is AnnotLabel.Cluster -> {
+                    val result = ocrResults.getOrNull(label.clusterIdx) ?: continue
+                    val strokeOff = clusterStrokeOffsets[label.clusterIdx] ?: (0f to 0f)
+                    dashPaint.color = 0x66555555.toInt(); dashPaint.strokeWidth = 2f
+                    canvas.drawLine(label.sx, centerY,
+                        t.docToScreenX(result.docX + strokeOff.first),
+                        t.docToScreenY(result.docY + strokeOff.second), dashPaint)
+                }
+            }
         }
 
         for (label in labels) {
