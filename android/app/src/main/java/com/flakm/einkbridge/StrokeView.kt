@@ -26,6 +26,7 @@ internal class StrokeView @JvmOverloads constructor(
     private var annotationMode = false
     var bindDrawingActive = false
     private var groupLabelOffsets: Map<Int, Pair<Float, Float>> = emptyMap()
+    private var groupStrokeOffsets: Map<Int, Pair<Float, Float>> = emptyMap()
     private var clusterLabelOffsets: Map<Int, Pair<Float, Float>> = emptyMap()
     private var selectedLabel: LabelId? = null
 
@@ -62,20 +63,6 @@ internal class StrokeView @JvmOverloads constructor(
     private val markerPaint = Paint().apply {
         isAntiAlias = true
         style = Paint.Style.FILL
-    }
-
-    private val ocrBadgePaint = Paint().apply {
-        isAntiAlias = true
-        style = Paint.Style.FILL
-        color = 0xFF444444.toInt()
-    }
-
-    private val ocrTextPaint = Paint().apply {
-        isAntiAlias = true
-        color = Color.WHITE
-        textSize = 26f
-        textAlign = Paint.Align.CENTER
-        typeface = Typeface.DEFAULT_BOLD
     }
 
     private val ocrBoxBgPaint = Paint().apply {
@@ -125,6 +112,7 @@ internal class StrokeView @JvmOverloads constructor(
         groupLabelOffsets: Map<Int, Pair<Float, Float>> = emptyMap(),
         clusterLabelOffsets: Map<Int, Pair<Float, Float>> = emptyMap(),
         selectedLabel: LabelId? = null,
+        groupStrokeOffsets: Map<Int, Pair<Float, Float>> = emptyMap(),
     ) {
         this.strokes = strokes
         this.transform = transform
@@ -135,6 +123,7 @@ internal class StrokeView @JvmOverloads constructor(
         this.groupLabelOffsets = groupLabelOffsets
         this.clusterLabelOffsets = clusterLabelOffsets
         this.selectedLabel = selectedLabel
+        this.groupStrokeOffsets = groupStrokeOffsets
         invalidate()
     }
 
@@ -166,16 +155,43 @@ internal class StrokeView @JvmOverloads constructor(
     fun hitTestLabel(screenX: Float, screenY: Float): LabelId? =
         cachedLabelRects.firstOrNull { (_, rect) -> rect.contains(screenX, screenY) }?.first
 
+    /** Returns groupId of the first bind group whose stroke bounding box contains the tap. */
+    fun hitTestGroup(screenX: Float, screenY: Float): Int? {
+        val t = transform
+        val docX = t.screenToDocX(screenX)
+        val docY = t.screenToDocY(screenY)
+        val threshold = 40f / t.scale
+        for (group in bindGroups) {
+            val off = groupStrokeOffsets[group.id] ?: (0f to 0f)
+            var minX = Float.MAX_VALUE; var maxX = -Float.MAX_VALUE
+            var minY = Float.MAX_VALUE; var maxY = -Float.MAX_VALUE
+            for (idx in group.strokeIndices) {
+                val stroke = strokes.getOrNull(idx) ?: continue
+                for ((px, py) in stroke.points) {
+                    val ox = px + off.first; val oy = py + off.second
+                    if (ox < minX) minX = ox; if (ox > maxX) maxX = ox
+                    if (oy < minY) minY = oy; if (oy > maxY) maxY = oy
+                }
+            }
+            if (minX > maxX) continue
+            if (docX >= minX - threshold && docX <= maxX + threshold &&
+                docY >= minY - threshold && docY <= maxY + threshold) return group.id
+        }
+        return null
+    }
+
     override fun onDraw(canvas: Canvas) {
         val t = transform
         val expanded = expandedGroupIds
 
+        // Build stroke → group highlight and stroke offset lookups
         val highlightedStrokes = mutableMapOf<Int, Int>()
+        val strokeOffsetMap = mutableMapOf<Int, Pair<Float, Float>>()
         for (group in bindGroups) {
-            if (group.id in expanded) {
-                for (si in group.strokeIndices) {
-                    highlightedStrokes[si] = group.color
-                }
+            val off = groupStrokeOffsets[group.id]
+            for (si in group.strokeIndices) {
+                if (group.id in expanded) highlightedStrokes[si] = group.color
+                if (off != null) strokeOffsetMap[si] = off
             }
         }
 
@@ -184,14 +200,15 @@ internal class StrokeView @JvmOverloads constructor(
         for ((idx, stroke) in strokes.withIndex()) {
             if (stroke.points.size < 2) continue
             val hlColor = highlightedStrokes[idx]
+            val off = strokeOffsetMap[idx] ?: (0f to 0f)
             strokePaint.color = hlColor ?: stroke.color
             val baseWidth = t.docToScreenWidth(stroke.width) * widthScale
             strokePaint.strokeWidth = if (hlColor != null) baseWidth * 1.5f else baseWidth
-            var prevX = t.docToScreenX(stroke.points[0].first)
-            var prevY = t.docToScreenY(stroke.points[0].second)
+            var prevX = t.docToScreenX(stroke.points[0].first + off.first)
+            var prevY = t.docToScreenY(stroke.points[0].second + off.second)
             for (i in 1 until stroke.points.size) {
-                val curX = t.docToScreenX(stroke.points[i].first)
-                val curY = t.docToScreenY(stroke.points[i].second)
+                val curX = t.docToScreenX(stroke.points[i].first + off.first)
+                val curY = t.docToScreenY(stroke.points[i].second + off.second)
                 canvas.drawLine(prevX, prevY, curX, curY, strokePaint)
                 prevX = curX
                 prevY = curY
@@ -216,8 +233,9 @@ internal class StrokeView @JvmOverloads constructor(
         val labels = mutableListOf<AnnotLabel>()
 
         for (group in bindGroups) {
-            val offset = groupLabelOffsets[group.id] ?: (0f to 0f)
-            val sx = t.docToScreenX(group.markerDocX) + offset.first * t.scale
+            val strokeOff = groupStrokeOffsets[group.id] ?: (0f to 0f)
+            val labelOff = groupLabelOffsets[group.id] ?: (0f to 0f)
+            val sx = t.docToScreenX(group.markerDocX + strokeOff.first) + labelOff.first * t.scale
             val pillText = group.recognizedText ?: ""
             val pillPad = 16f
             val w = maxOf((if (pillText.isNotEmpty()) ocrLabelPaint.measureText(pillText) else 0f) + pillPad * 2, MARKER_RADIUS_PX * 2)
@@ -227,8 +245,8 @@ internal class StrokeView @JvmOverloads constructor(
                 val stroke = strokes.getOrNull(idx) ?: continue
                 for ((_, y) in stroke.points) if (y < minDocY) minDocY = y
             }
-            val anchorY = (if (minDocY < Float.MAX_VALUE) t.docToScreenY(minDocY) else t.docToScreenY(group.markerDocY)) +
-                offset.second * t.scale
+            val minDocYAdj = if (minDocY < Float.MAX_VALUE) minDocY + strokeOff.second else group.markerDocY + strokeOff.second
+            val anchorY = t.docToScreenY(minDocYAdj) + labelOff.second * t.scale
             labels.add(AnnotLabel.Group(sx, anchorY - LABEL_GAP - h, w, h, group))
         }
 
@@ -261,7 +279,6 @@ internal class StrokeView @JvmOverloads constructor(
             placed.add(RectF(label.sx - label.w / 2, topY, label.sx + label.w / 2, topY + label.h))
         }
 
-        // Cache rects for hit-testing after positions are finalised
         cachedLabelRects = labels.map { label ->
             val rect = RectF(label.sx - label.w / 2, label.topY, label.sx + label.w / 2, label.topY + label.h)
             val id: LabelId = when (label) {
@@ -274,11 +291,13 @@ internal class StrokeView @JvmOverloads constructor(
         // --- Pass 3: draw lines first, then labels on top ---
         for (label in labels) {
             if (label !is AnnotLabel.Group) continue
+            val strokeOff = groupStrokeOffsets[label.group.id] ?: (0f to 0f)
             val centerY = label.topY + label.h / 2
             val dimColor = (label.group.color and 0x00FFFFFF) or 0x66000000
             dashPaint.color = dimColor; dashPaint.strokeWidth = 2f
             for ((cx, cy) in label.group.strokeDocCenters)
-                canvas.drawLine(label.sx, centerY, t.docToScreenX(cx), t.docToScreenY(cy), dashPaint)
+                canvas.drawLine(label.sx, centerY,
+                    t.docToScreenX(cx + strokeOff.first), t.docToScreenY(cy + strokeOff.second), dashPaint)
             linkLinePaint.color = dimColor; linkLinePaint.strokeWidth = 2f
             for ((cx, cy) in label.group.elementDocCenters)
                 canvas.drawLine(label.sx, centerY, t.docToScreenX(cx), t.docToScreenY(cy), linkLinePaint)

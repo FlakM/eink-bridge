@@ -300,41 +300,64 @@ internal class PenOverlay(
             when {
                 isSelectMode && event.pointerCount == 1 -> when (event.actionMasked) {
                     MotionEvent.ACTION_DOWN -> {
-                        val hit = strokeView?.hitTestLabel(event.x, event.y)
-                        if (hit != null) {
-                            selectedLabel = hit
-                            dragLabel = hit
+                        val labelHit = strokeView?.hitTestLabel(event.x, event.y)
+                        if (labelHit != null) {
+                            // Tapped on a label — move label only
+                            selectedLabel = labelHit
+                            dragLabel = labelHit
+                            dragGroupId = null
                             dragStartX = event.x
                             dragStartY = event.y
-                            dragBaseDocX = when (hit) {
-                                is LabelId.Group -> groupLabelOffsets[hit.groupId]?.first ?: 0f
-                                is LabelId.Cluster -> clusterLabelOffsets[hit.clusterIdx]?.first ?: 0f
+                            dragBaseDocX = when (labelHit) {
+                                is LabelId.Group -> groupLabelOffsets[labelHit.groupId]?.first ?: 0f
+                                is LabelId.Cluster -> clusterLabelOffsets[labelHit.clusterIdx]?.first ?: 0f
                             }
-                            dragBaseDocY = when (hit) {
-                                is LabelId.Group -> groupLabelOffsets[hit.groupId]?.second ?: 0f
-                                is LabelId.Cluster -> clusterLabelOffsets[hit.clusterIdx]?.second ?: 0f
+                            dragBaseDocY = when (labelHit) {
+                                is LabelId.Group -> groupLabelOffsets[labelHit.groupId]?.second ?: 0f
+                                is LabelId.Cluster -> clusterLabelOffsets[labelHit.clusterIdx]?.second ?: 0f
                             }
                         } else {
-                            selectedLabel = null
-                            dragLabel = null
+                            val groupHit = strokeView?.hitTestGroup(event.x, event.y)
+                            if (groupHit != null) {
+                                // Tapped on strokes — move whole group (strokes + label)
+                                selectedLabel = LabelId.Group(groupHit)
+                                dragGroupId = groupHit
+                                dragLabel = null
+                                dragStartX = event.x
+                                dragStartY = event.y
+                                dragBaseDocX = groupStrokeOffsets[groupHit]?.first ?: 0f
+                                dragBaseDocY = groupStrokeOffsets[groupHit]?.second ?: 0f
+                            } else {
+                                selectedLabel = null
+                                dragLabel = null
+                                dragGroupId = null
+                            }
                         }
                         notifyStrokeView()
                     }
                     MotionEvent.ACTION_MOVE -> {
+                        val t = currentTransform()
+                        val docDX = (event.x - dragStartX) / t.scale
+                        val docDY = (event.y - dragStartY) / t.scale
                         val dragging = dragLabel
-                        if (dragging != null) {
-                            val t = currentTransform()
-                            val docDX = (event.x - dragStartX) / t.scale + dragBaseDocX
-                            val docDY = (event.y - dragStartY) / t.scale + dragBaseDocY
-                            when (dragging) {
-                                is LabelId.Group -> groupLabelOffsets[dragging.groupId] = docDX to docDY
-                                is LabelId.Cluster -> clusterLabelOffsets[dragging.clusterIdx] = docDX to docDY
+                        val draggingGroup = dragGroupId
+                        when {
+                            dragging != null -> {
+                                when (dragging) {
+                                    is LabelId.Group -> groupLabelOffsets[dragging.groupId] = dragBaseDocX + docDX to dragBaseDocY + docDY
+                                    is LabelId.Cluster -> clusterLabelOffsets[dragging.clusterIdx] = dragBaseDocX + docDX to dragBaseDocY + docDY
+                                }
+                                notifyStrokeView()
                             }
-                            notifyStrokeView()
+                            draggingGroup != null -> {
+                                groupStrokeOffsets[draggingGroup] = dragBaseDocX + docDX to dragBaseDocY + docDY
+                                notifyStrokeView()
+                            }
                         }
                     }
                     MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                         dragLabel = null
+                        dragGroupId = null
                     }
                 }
                 isBindMode && event.pointerCount == 1 -> when (event.actionMasked) {
@@ -479,6 +502,7 @@ internal class PenOverlay(
             ocrResults.toList(), annotationMode,
             groupLabelOffsets.toMap(), clusterLabelOffsets.toMap(),
             selectedLabel,
+            groupStrokeOffsets.toMap(),
         )
     }
 
@@ -506,6 +530,7 @@ internal class PenOverlay(
     fun exitSelectMode() {
         isSelectMode = false
         dragLabel = null
+        dragGroupId = null
         selectedLabel = null
         controller.resetRenderBuffer()
         notifyStrokeView()
@@ -650,6 +675,8 @@ internal class PenOverlay(
     fun removeBindGroup(groupId: Int) {
         _bindGroups.removeAll { it.id == groupId }
         undoStack.removeAll { it is UndoAction.BindGroupAdded && it.groupId == groupId }
+        groupLabelOffsets.remove(groupId)
+        groupStrokeOffsets.remove(groupId)
         notifyStrokeView()
         syncBindGroupsToWebView()
         onBindGroupsChanged?.invoke()
@@ -678,9 +705,11 @@ internal class PenOverlay(
     // Select / move mode
     private var isSelectMode = false
     private val groupLabelOffsets = mutableMapOf<Int, Pair<Float, Float>>()
+    private val groupStrokeOffsets = mutableMapOf<Int, Pair<Float, Float>>()
     private val clusterLabelOffsets = mutableMapOf<Int, Pair<Float, Float>>()
     private var selectedLabel: LabelId? = null
     private var dragLabel: LabelId? = null
+    private var dragGroupId: Int? = null  // dragging whole group via strokes
     private var dragStartX = 0f
     private var dragStartY = 0f
     private var dragBaseDocX = 0f

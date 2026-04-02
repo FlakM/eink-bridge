@@ -169,10 +169,16 @@ async fn ocr_strokes(
     let Some(engine) = &state.ocr_engine else {
         return (StatusCode::SERVICE_UNAVAILABLE, "OCR engine not available").into_response();
     };
+    let strokes = body.strokes.len();
+    let points: usize = body.strokes.iter().map(|s| s.len()).sum();
+    tracing::info!(strokes, points, "OCR request");
     match engine.recognize_strokes(&body.strokes).await {
-        Ok(text) => Json(serde_json::json!({ "text": text })).into_response(),
+        Ok(text) => {
+            tracing::info!(strokes, text = %text, "OCR done");
+            Json(serde_json::json!({ "text": text })).into_response()
+        }
         Err(e) => {
-            tracing::warn!(error = %e, "OCR request failed");
+            tracing::warn!(strokes, error = %e, "OCR failed");
             (StatusCode::INTERNAL_SERVER_ERROR, e).into_response()
         }
     }

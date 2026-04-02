@@ -22,7 +22,7 @@ private const val TAG = "OcrClient"
 internal class OcrClient(private val getServerUrl: () -> String) {
     private val http = OkHttpClient.Builder()
         .connectTimeout(5, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(150, TimeUnit.SECONDS)
         .build()
 
     suspend fun recognize(strokes: List<Stroke>): String? {
@@ -57,7 +57,7 @@ internal class OcrClient(private val getServerUrl: () -> String) {
                     null
                 }
             } catch (e: Exception) {
-                Log.w(TAG, "server OCR failed: ${e.message}")
+                Log.w(TAG, "server OCR failed: ${e.javaClass.simpleName}: ${e.message}")
                 null
             }
         }
