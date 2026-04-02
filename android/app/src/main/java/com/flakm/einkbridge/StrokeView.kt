@@ -185,74 +185,95 @@ internal class StrokeView @JvmOverloads constructor(
 
         if (!annotationMode) return
 
+        // --- Pass 1: compute natural positions for all labels ---
+        val labels = mutableListOf<AnnotLabel>()
+
         for (group in bindGroups) {
             val sx = t.docToScreenX(group.markerDocX)
-
-            // Pill dimensions
             val pillText = group.recognizedText ?: ""
             val pillPad = 16f
-            val textW = if (pillText.isNotEmpty()) ocrLabelPaint.measureText(pillText) else 0f
-            val pillW = maxOf(textW + pillPad * 2, MARKER_RADIUS_PX * 2)
-            val pillH = if (pillText.isNotEmpty()) ocrLabelPaint.textSize + pillPad * 2 else MARKER_RADIUS_PX * 2
-            val cornerR = pillH / 2
-
-            // Position pill above the topmost stroke point
+            val w = maxOf((if (pillText.isNotEmpty()) ocrLabelPaint.measureText(pillText) else 0f) + pillPad * 2, MARKER_RADIUS_PX * 2)
+            val h = if (pillText.isNotEmpty()) ocrLabelPaint.textSize + pillPad * 2 else MARKER_RADIUS_PX * 2
             var minDocY = Float.MAX_VALUE
             for (idx in group.strokeIndices) {
                 val stroke = strokes.getOrNull(idx) ?: continue
                 for ((_, y) in stroke.points) if (y < minDocY) minDocY = y
             }
-            val anchorScreenY = if (minDocY < Float.MAX_VALUE)
-                t.docToScreenY(minDocY)
-            else
-                t.docToScreenY(group.markerDocY)
-            val pillTopY = anchorScreenY - LABEL_GAP - pillH
-            val pillCenterY = pillTopY + pillH / 2
-            val pillRect = RectF(sx - pillW / 2, pillTopY, sx + pillW / 2, pillTopY + pillH)
-
-            // Lines from pill center downward into stroke/element centers
-            dashPaint.color = group.color
-            dashPaint.strokeWidth = 4f
-            for ((cx, cy) in group.strokeDocCenters) {
-                canvas.drawLine(sx, pillCenterY, t.docToScreenX(cx), t.docToScreenY(cy), dashPaint)
-            }
-            linkLinePaint.color = group.color
-            linkLinePaint.strokeWidth = 4f
-            for ((cx, cy) in group.elementDocCenters) {
-                canvas.drawLine(sx, pillCenterY, t.docToScreenX(cx), t.docToScreenY(cy), linkLinePaint)
-            }
-
-            // Pill: white fill + thick colored border + black text
-            markerPaint.color = Color.WHITE
-            markerPaint.style = Paint.Style.FILL
-            canvas.drawRoundRect(pillRect, cornerR, cornerR, markerPaint)
-            markerPaint.color = group.color
-            markerPaint.style = Paint.Style.STROKE
-            markerPaint.strokeWidth = 5f
-            canvas.drawRoundRect(pillRect, cornerR, cornerR, markerPaint)
-            markerPaint.style = Paint.Style.FILL
-            if (pillText.isNotEmpty()) {
-                canvas.drawText(pillText, sx, pillCenterY + ocrLabelPaint.textSize * 0.35f, ocrLabelPaint)
-            }
+            val anchorY = if (minDocY < Float.MAX_VALUE) t.docToScreenY(minDocY) else t.docToScreenY(group.markerDocY)
+            labels.add(AnnotLabel.Group(sx, anchorY - LABEL_GAP - h, w, h, group))
         }
 
         for (result in ocrResults) {
             val sx = t.docToScreenX(result.docX)
-            val labelBottomY = t.docToScreenY(result.minDocY) - LABEL_GAP
-            drawAnnotationLabel(canvas, result.text, sx, labelBottomY)
+            val pad = 10f
+            val w = ocrLabelPaint.measureText(result.text) + pad * 2
+            val h = ocrLabelPaint.textSize + pad * 2
+            labels.add(AnnotLabel.Cluster(sx, t.docToScreenY(result.minDocY) - LABEL_GAP - h, w, h, result.text))
         }
 
+        // --- Pass 2: push overlapping labels upward ---
+        val placed = mutableListOf<RectF>()
+        for (label in labels.sortedByDescending { it.topY }) {
+            var topY = label.topY
+            var retry = true
+            while (retry) {
+                retry = false
+                for (p in placed) {
+                    val lx1 = label.sx - label.w / 2; val lx2 = label.sx + label.w / 2
+                    if (lx2 <= p.left || lx1 >= p.right) continue
+                    if (topY + label.h <= p.top || topY >= p.bottom) continue
+                    topY = p.top - label.h - LABEL_GAP
+                    retry = true; break
+                }
+            }
+            label.topY = topY
+            placed.add(RectF(label.sx - label.w / 2, topY, label.sx + label.w / 2, topY + label.h))
+        }
+
+        // --- Pass 3: draw lines first, then labels on top ---
+        for (label in labels) {
+            if (label !is AnnotLabel.Group) continue
+            val centerY = label.topY + label.h / 2
+            dashPaint.color = label.group.color; dashPaint.strokeWidth = 4f
+            for ((cx, cy) in label.group.strokeDocCenters)
+                canvas.drawLine(label.sx, centerY, t.docToScreenX(cx), t.docToScreenY(cy), dashPaint)
+            linkLinePaint.color = label.group.color; linkLinePaint.strokeWidth = 4f
+            for ((cx, cy) in label.group.elementDocCenters)
+                canvas.drawLine(label.sx, centerY, t.docToScreenX(cx), t.docToScreenY(cy), linkLinePaint)
+        }
+
+        for (label in labels) {
+            val rect = RectF(label.sx - label.w / 2, label.topY, label.sx + label.w / 2, label.topY + label.h)
+            val centerY = label.topY + label.h / 2
+            when (label) {
+                is AnnotLabel.Group -> {
+                    val cornerR = label.h / 2
+                    markerPaint.color = Color.WHITE; markerPaint.style = Paint.Style.FILL
+                    canvas.drawRoundRect(rect, cornerR, cornerR, markerPaint)
+                    markerPaint.color = label.group.color; markerPaint.style = Paint.Style.STROKE; markerPaint.strokeWidth = 5f
+                    canvas.drawRoundRect(rect, cornerR, cornerR, markerPaint)
+                    markerPaint.style = Paint.Style.FILL
+                    val text = label.group.recognizedText
+                    if (!text.isNullOrEmpty())
+                        canvas.drawText(text, label.sx, centerY + ocrLabelPaint.textSize * 0.35f, ocrLabelPaint)
+                }
+                is AnnotLabel.Cluster -> {
+                    canvas.drawRoundRect(rect, 6f, 6f, ocrBoxBgPaint)
+                    canvas.drawRoundRect(rect, 6f, 6f, ocrBoxBorderPaint)
+                    canvas.drawText(label.text, label.sx, label.topY + label.h - 10f, ocrLabelPaint)
+                }
+            }
+        }
     }
 
-    private fun drawAnnotationLabel(canvas: Canvas, text: String, cx: Float, boxBottomY: Float) {
-        val padding = 10f
-        val textWidth = ocrLabelPaint.measureText(text)
-        val halfW = textWidth / 2 + padding
-        val boxTop = boxBottomY - ocrLabelPaint.textSize - padding * 2
-        val rect = RectF(cx - halfW, boxTop, cx + halfW, boxBottomY)
-        canvas.drawRoundRect(rect, 6f, 6f, ocrBoxBgPaint)
-        canvas.drawRoundRect(rect, 6f, 6f, ocrBoxBorderPaint)
-        canvas.drawText(text, cx, boxBottomY - padding, ocrLabelPaint)
+    private sealed class AnnotLabel {
+        abstract val sx: Float
+        abstract var topY: Float
+        abstract val w: Float
+        abstract val h: Float
+
+        data class Group(override val sx: Float, override var topY: Float, override val w: Float, override val h: Float, val group: BindGroup) : AnnotLabel()
+        data class Cluster(override val sx: Float, override var topY: Float, override val w: Float, override val h: Float, val text: String) : AnnotLabel()
     }
 
     companion object {
