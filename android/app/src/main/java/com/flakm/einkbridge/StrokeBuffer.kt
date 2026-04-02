@@ -183,7 +183,7 @@ internal class StrokeBuffer {
     }
 }
 
-internal data class OcrResult(val docX: Float, val docY: Float, val text: String, val minDocY: Float = docY)
+internal data class OcrResult(val docX: Float, val docY: Float, val text: String, val minDocY: Float = docY, val strokeIndices: Set<Int> = emptySet())
 
 /** Clusters strokes by centroid proximity (no element lookup needed). */
 internal fun clusterStrokes(strokes: List<Stroke>, threshold: Float = 120f): List<List<Stroke>> {
@@ -459,6 +459,7 @@ internal fun ocrResultsToJson(results: List<OcrResult>): String {
             put("docY", r.docY.toDouble())
             put("minDocY", r.minDocY.toDouble())
             put("text", r.text)
+            put("strokeIndices", JSONArray(r.strokeIndices.toList()))
         })
     }
     return arr.toString()
@@ -469,11 +470,14 @@ internal fun ocrResultsFromJson(json: String): List<OcrResult> {
     return (0 until arr.length()).map { i ->
         val o = arr.getJSONObject(i)
         val docY = o.getDouble("docY").toFloat()
+        val siArr = o.optJSONArray("strokeIndices")
+        val strokeIndices = if (siArr != null) (0 until siArr.length()).mapTo(mutableSetOf()) { siArr.getInt(it) } else emptySet()
         OcrResult(
             o.getDouble("docX").toFloat(),
             docY,
             o.getString("text"),
             o.optDouble("minDocY", docY.toDouble()).toFloat(),
+            strokeIndices,
         )
     }
 }

@@ -318,19 +318,26 @@ internal class PenOverlay(
                             }
                         } else {
                             val groupHit = strokeView?.hitTestGroup(event.x, event.y)
-                            if (groupHit != null) {
-                                // Tapped on strokes — move whole group (strokes + label)
-                                selectedLabel = LabelId.Group(groupHit)
-                                dragGroupId = groupHit
-                                dragLabel = null
-                                dragStartX = event.x
-                                dragStartY = event.y
-                                dragBaseDocX = groupStrokeOffsets[groupHit]?.first ?: 0f
-                                dragBaseDocY = groupStrokeOffsets[groupHit]?.second ?: 0f
-                            } else {
-                                selectedLabel = null
-                                dragLabel = null
-                                dragGroupId = null
+                            val clusterHit = if (groupHit == null) strokeView?.hitTestCluster(event.x, event.y) else null
+                            when {
+                                groupHit != null -> {
+                                    selectedLabel = LabelId.Group(groupHit)
+                                    dragGroupId = groupHit; dragClusterIdx = null; dragLabel = null
+                                    dragStartX = event.x; dragStartY = event.y
+                                    dragBaseDocX = groupStrokeOffsets[groupHit]?.first ?: 0f
+                                    dragBaseDocY = groupStrokeOffsets[groupHit]?.second ?: 0f
+                                }
+                                clusterHit != null -> {
+                                    selectedLabel = LabelId.Cluster(clusterHit)
+                                    dragClusterIdx = clusterHit; dragGroupId = null; dragLabel = null
+                                    dragStartX = event.x; dragStartY = event.y
+                                    dragBaseDocX = clusterStrokeOffsets[clusterHit]?.first ?: 0f
+                                    dragBaseDocY = clusterStrokeOffsets[clusterHit]?.second ?: 0f
+                                }
+                                else -> {
+                                    selectedLabel = null; dragLabel = null
+                                    dragGroupId = null; dragClusterIdx = null
+                                }
                             }
                         }
                         notifyStrokeView()
@@ -339,25 +346,26 @@ internal class PenOverlay(
                         val t = currentTransform()
                         val docDX = (event.x - dragStartX) / t.scale
                         val docDY = (event.y - dragStartY) / t.scale
-                        val dragging = dragLabel
-                        val draggingGroup = dragGroupId
                         when {
-                            dragging != null -> {
-                                when (dragging) {
-                                    is LabelId.Group -> groupLabelOffsets[dragging.groupId] = dragBaseDocX + docDX to dragBaseDocY + docDY
-                                    is LabelId.Cluster -> clusterLabelOffsets[dragging.clusterIdx] = dragBaseDocX + docDX to dragBaseDocY + docDY
+                            dragLabel != null -> {
+                                when (val d = dragLabel!!) {
+                                    is LabelId.Group -> groupLabelOffsets[d.groupId] = dragBaseDocX + docDX to dragBaseDocY + docDY
+                                    is LabelId.Cluster -> clusterLabelOffsets[d.clusterIdx] = dragBaseDocX + docDX to dragBaseDocY + docDY
                                 }
                                 notifyStrokeView()
                             }
-                            draggingGroup != null -> {
-                                groupStrokeOffsets[draggingGroup] = dragBaseDocX + docDX to dragBaseDocY + docDY
+                            dragGroupId != null -> {
+                                groupStrokeOffsets[dragGroupId!!] = dragBaseDocX + docDX to dragBaseDocY + docDY
+                                notifyStrokeView()
+                            }
+                            dragClusterIdx != null -> {
+                                clusterStrokeOffsets[dragClusterIdx!!] = dragBaseDocX + docDX to dragBaseDocY + docDY
                                 notifyStrokeView()
                             }
                         }
                     }
                     MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                        dragLabel = null
-                        dragGroupId = null
+                        dragLabel = null; dragGroupId = null; dragClusterIdx = null
                     }
                 }
                 isBindMode && event.pointerCount == 1 -> when (event.actionMasked) {
@@ -503,6 +511,7 @@ internal class PenOverlay(
             groupLabelOffsets.toMap(), clusterLabelOffsets.toMap(),
             selectedLabel,
             groupStrokeOffsets.toMap(),
+            clusterStrokeOffsets.toMap(),
         )
     }
 
@@ -529,8 +538,7 @@ internal class PenOverlay(
 
     fun exitSelectMode() {
         isSelectMode = false
-        dragLabel = null
-        dragGroupId = null
+        dragLabel = null; dragGroupId = null; dragClusterIdx = null
         selectedLabel = null
         controller.resetRenderBuffer()
         notifyStrokeView()
@@ -707,9 +715,11 @@ internal class PenOverlay(
     private val groupLabelOffsets = mutableMapOf<Int, Pair<Float, Float>>()
     private val groupStrokeOffsets = mutableMapOf<Int, Pair<Float, Float>>()
     private val clusterLabelOffsets = mutableMapOf<Int, Pair<Float, Float>>()
+    private val clusterStrokeOffsets = mutableMapOf<Int, Pair<Float, Float>>()
     private var selectedLabel: LabelId? = null
     private var dragLabel: LabelId? = null
-    private var dragGroupId: Int? = null  // dragging whole group via strokes
+    private var dragGroupId: Int? = null
+    private var dragClusterIdx: Int? = null
     private var dragStartX = 0f
     private var dragStartY = 0f
     private var dragBaseDocX = 0f

@@ -69,24 +69,41 @@ internal class OcrManager(
         }
 
         val boundIndices = bindGroups.flatMapTo(mutableSetOf()) { it.strokeIndices }
-        val unbound = allStrokes.filterIndexed { i, _ -> i !in boundIndices }
-        val clusters = clusterStrokes(unbound)
+        // keep global indices alongside strokes
+        val unboundIndexed = allStrokes.mapIndexedNotNull { i, s -> if (i !in boundIndices) i to s else null }
+        val clusters = clusterStrokes(unboundIndexed.map { it.second })
         val clusterResults = arrayOfNulls<OcrResult>(clusters.size)
+
+        // build per-cluster global index sets using the same union-find ordering
+        val clusterGlobalIndices: List<Set<Int>> = run {
+            // clusterStrokes returns groups in the same relative order as the input list
+            // we need to match each cluster's strokes back to global indices
+            val remaining = unboundIndexed.toMutableList()
+            clusters.map { clusterStrokes ->
+                val indices = mutableSetOf<Int>()
+                for (stroke in clusterStrokes) {
+                    val pos = remaining.indexOfFirst { it.second === stroke }
+                    if (pos >= 0) { indices += remaining[pos].first; remaining.removeAt(pos) }
+                }
+                indices
+            }
+        }
 
         for ((ci, cluster) in clusters.withIndex()) {
             val pts = cluster.flatMap { it.points }
             val cx = pts.map { it.first }.average().toFloat()
             val cy = pts.map { it.second }.average().toFloat()
             val minY = pts.minOf { it.second }
+            val globalIdx = clusterGlobalIndices[ci]
             val cacheKey = cluster.toSet()
             val cached = clusterCache[cacheKey]
             if (cached != null) {
                 Log.d(TAG, "cached: cluster#$ci -> \"$cached\"")
-                clusterResults[ci] = OcrResult(cx, cy, cached, minY)
+                clusterResults[ci] = OcrResult(cx, cy, cached, minY, globalIdx)
             } else {
                 tasks += Task("cluster#$ci", cluster) { text ->
                     clusterCache[cacheKey] = text
-                    clusterResults[ci] = OcrResult(cx, cy, text, minY)
+                    clusterResults[ci] = OcrResult(cx, cy, text, minY, globalIdx)
                 }
             }
         }

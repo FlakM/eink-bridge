@@ -27,6 +27,7 @@ internal class StrokeView @JvmOverloads constructor(
     var bindDrawingActive = false
     private var groupLabelOffsets: Map<Int, Pair<Float, Float>> = emptyMap()
     private var groupStrokeOffsets: Map<Int, Pair<Float, Float>> = emptyMap()
+    private var clusterStrokeOffsets: Map<Int, Pair<Float, Float>> = emptyMap()
     private var clusterLabelOffsets: Map<Int, Pair<Float, Float>> = emptyMap()
     private var selectedLabel: LabelId? = null
 
@@ -113,6 +114,7 @@ internal class StrokeView @JvmOverloads constructor(
         clusterLabelOffsets: Map<Int, Pair<Float, Float>> = emptyMap(),
         selectedLabel: LabelId? = null,
         groupStrokeOffsets: Map<Int, Pair<Float, Float>> = emptyMap(),
+        clusterStrokeOffsets: Map<Int, Pair<Float, Float>> = emptyMap(),
     ) {
         this.strokes = strokes
         this.transform = transform
@@ -124,6 +126,7 @@ internal class StrokeView @JvmOverloads constructor(
         this.clusterLabelOffsets = clusterLabelOffsets
         this.selectedLabel = selectedLabel
         this.groupStrokeOffsets = groupStrokeOffsets
+        this.clusterStrokeOffsets = clusterStrokeOffsets
         invalidate()
     }
 
@@ -180,6 +183,32 @@ internal class StrokeView @JvmOverloads constructor(
         return null
     }
 
+    /** Returns cluster index of the first free cluster whose stroke bounding box contains the tap. */
+    fun hitTestCluster(screenX: Float, screenY: Float): Int? {
+        val t = transform
+        val docX = t.screenToDocX(screenX)
+        val docY = t.screenToDocY(screenY)
+        val threshold = 40f / t.scale
+        for ((ci, result) in ocrResults.withIndex()) {
+            if (result.strokeIndices.isEmpty()) continue
+            val off = clusterStrokeOffsets[ci] ?: (0f to 0f)
+            var minX = Float.MAX_VALUE; var maxX = -Float.MAX_VALUE
+            var minY = Float.MAX_VALUE; var maxY = -Float.MAX_VALUE
+            for (idx in result.strokeIndices) {
+                val stroke = strokes.getOrNull(idx) ?: continue
+                for ((px, py) in stroke.points) {
+                    val ox = px + off.first; val oy = py + off.second
+                    if (ox < minX) minX = ox; if (ox > maxX) maxX = ox
+                    if (oy < minY) minY = oy; if (oy > maxY) maxY = oy
+                }
+            }
+            if (minX > maxX) continue
+            if (docX >= minX - threshold && docX <= maxX + threshold &&
+                docY >= minY - threshold && docY <= maxY + threshold) return ci
+        }
+        return null
+    }
+
     override fun onDraw(canvas: Canvas) {
         val t = transform
         val expanded = expandedGroupIds
@@ -193,6 +222,10 @@ internal class StrokeView @JvmOverloads constructor(
                 if (group.id in expanded) highlightedStrokes[si] = group.color
                 if (off != null) strokeOffsetMap[si] = off
             }
+        }
+        for ((ci, off) in clusterStrokeOffsets) {
+            val result = ocrResults.getOrNull(ci) ?: continue
+            for (si in result.strokeIndices) strokeOffsetMap[si] = off
         }
 
         val widthScale = if (bindDrawingActive) 2.5f else 1f
@@ -251,12 +284,13 @@ internal class StrokeView @JvmOverloads constructor(
         }
 
         for ((idx, result) in ocrResults.withIndex()) {
-            val offset = clusterLabelOffsets[idx] ?: (0f to 0f)
-            val sx = t.docToScreenX(result.docX) + offset.first * t.scale
+            val strokeOff = clusterStrokeOffsets[idx] ?: (0f to 0f)
+            val labelOff = clusterLabelOffsets[idx] ?: (0f to 0f)
+            val sx = t.docToScreenX(result.docX + strokeOff.first) + labelOff.first * t.scale
             val pad = 10f
             val w = ocrLabelPaint.measureText(result.text) + pad * 2
             val h = ocrLabelPaint.textSize + pad * 2
-            val topY = t.docToScreenY(result.minDocY) - LABEL_GAP - h + offset.second * t.scale
+            val topY = t.docToScreenY(result.minDocY + strokeOff.second) - LABEL_GAP - h + labelOff.second * t.scale
             labels.add(AnnotLabel.Cluster(sx, topY, w, h, result.text, idx))
         }
 
