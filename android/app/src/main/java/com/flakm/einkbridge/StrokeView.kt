@@ -90,6 +90,13 @@ internal class StrokeView @JvmOverloads constructor(
         textAlign = Paint.Align.CENTER
     }
 
+    private val linkLinePaint = Paint().apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 3f
+        isAntiAlias = true
+        strokeCap = Paint.Cap.ROUND
+    }
+
     fun update(
         strokes: List<Stroke>,
         transform: ViewTransform = ViewTransform(),
@@ -167,41 +174,43 @@ internal class StrokeView @JvmOverloads constructor(
         if (!annotationMode) return
 
         for (group in bindGroups) {
-            val isExpanded = group.id in expanded
-            val showLines = isExpanded || annotationMode
             val sx = t.docToScreenX(group.markerDocX)
             val sy = t.docToScreenY(group.markerDocY)
+            val lineColor = (group.color and 0x00FFFFFF) or (0xBB shl 24)
 
-            if (showLines) {
-                val semiColor = (group.color and 0x00FFFFFF) or (0xCC shl 24)
-                dashPaint.color = semiColor
-                for ((cx, cy) in group.strokeDocCenters) {
-                    canvas.drawLine(sx, sy, t.docToScreenX(cx), t.docToScreenY(cy), dashPaint)
-                }
-                for ((cx, cy) in group.elementDocCenters) {
-                    canvas.drawLine(sx, sy, t.docToScreenX(cx), t.docToScreenY(cy), dashPaint)
-                }
+            // Dashed lines to stroke centers
+            dashPaint.color = lineColor
+            dashPaint.strokeWidth = 3f
+            for ((cx, cy) in group.strokeDocCenters) {
+                canvas.drawLine(sx, sy, t.docToScreenX(cx), t.docToScreenY(cy), dashPaint)
             }
 
-            val radius = if (isExpanded) MARKER_RADIUS_PX * 1.3f else MARKER_RADIUS_PX
+            // Solid lines to element centers
+            linkLinePaint.color = lineColor
+            for ((cx, cy) in group.elementDocCenters) {
+                canvas.drawLine(sx, sy, t.docToScreenX(cx), t.docToScreenY(cy), linkLinePaint)
+            }
+
+            // Pill shape — contains OCR text if available, plain pill otherwise
+            val pillText = group.recognizedText ?: ""
+            val pillPad = 12f
+            val textW = if (pillText.isNotEmpty()) ocrTextPaint.measureText(pillText) else 0f
+            val pillW = maxOf(textW + pillPad * 2, MARKER_RADIUS_PX * 2)
+            val pillH = if (pillText.isNotEmpty()) ocrTextPaint.textSize + pillPad * 2 else MARKER_RADIUS_PX * 2
+            val cornerR = pillH / 2
+            val pillRect = RectF(sx - pillW / 2, sy - pillH / 2, sx + pillW / 2, sy + pillH / 2)
+
             markerPaint.color = group.color
             markerPaint.style = Paint.Style.FILL
-            canvas.drawCircle(sx, sy, radius, markerPaint)
+            canvas.drawRoundRect(pillRect, cornerR, cornerR, markerPaint)
             markerPaint.color = Color.WHITE
             markerPaint.style = Paint.Style.STROKE
-            markerPaint.strokeWidth = 3f
-            canvas.drawCircle(sx, sy, radius, markerPaint)
+            markerPaint.strokeWidth = 2f
+            canvas.drawRoundRect(pillRect, cornerR, cornerR, markerPaint)
             markerPaint.style = Paint.Style.FILL
 
-            if (group.recognizedText != null && groupScreenDiagonal(group, strokes, t) >= MIN_OCR_DIAGONAL_PX) {
-                if (annotationMode) {
-                    drawAnnotationLabel(canvas, group.recognizedText, sx, sy - radius - 4f)
-                } else {
-                    val bx = sx
-                    val by = sy - MARKER_RADIUS_PX - BADGE_RADIUS_PX - 6f
-                    canvas.drawCircle(bx, by, BADGE_RADIUS_PX, ocrBadgePaint)
-                    canvas.drawText("ℹ", bx, by + ocrTextPaint.textSize * 0.35f, ocrTextPaint)
-                }
+            if (pillText.isNotEmpty()) {
+                canvas.drawText(pillText, sx, sy + ocrTextPaint.textSize * 0.35f, ocrTextPaint)
             }
         }
 

@@ -4,9 +4,11 @@ import android.annotation.SuppressLint
 import android.app.AlertDialog
 import android.content.SharedPreferences
 import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.os.Vibrator
 import android.util.Log
+import android.view.Gravity
 import android.view.View
 import android.webkit.*
 import android.widget.*
@@ -299,15 +301,49 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showColorPicker() {
-        val names = arrayOf("Black", "Red", "Blue", "Green", "Orange", "Purple", "Teal", "Grey")
-        AlertDialog.Builder(this)
-            .setTitle("Stroke color")
-            .setItems(names) { _, which ->
-                currentStrokeColor = colorPalette[which]
-                penOverlay?.setStrokeColor(currentStrokeColor)
-                btnColor.setTextColor(currentStrokeColor)
+        val dm = resources.displayMetrics
+        val dotPx = (44 * dm.density).toInt()
+        val marginPx = (8 * dm.density).toInt()
+        val paddingPx = (20 * dm.density).toInt()
+
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(paddingPx, paddingPx, paddingPx, paddingPx)
+        }
+        val dialog = AlertDialog.Builder(this).setView(container).create()
+
+        for (row in colorPalette.toList().chunked(4)) {
+            val rowLayout = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER
             }
-            .show()
+            for (color in row) {
+                val isSelected = color == currentStrokeColor
+                val dot = View(this).apply {
+                    background = GradientDrawable().apply {
+                        shape = GradientDrawable.OVAL
+                        setColor(color)
+                        setStroke(
+                            if (isSelected) (5 * dm.density).toInt() else (2 * dm.density).toInt(),
+                            if (isSelected) Color.BLACK else Color.argb(80, 0, 0, 0),
+                        )
+                    }
+                    layoutParams = LinearLayout.LayoutParams(dotPx, dotPx).apply {
+                        setMargins(marginPx, marginPx, marginPx, marginPx)
+                    }
+                    setOnClickListener {
+                        currentStrokeColor = color
+                        penOverlay?.setStrokeColor(color)
+                        btnColor.setTextColor(color)
+                        dialog.dismiss()
+                    }
+                }
+                rowLayout.addView(dot)
+            }
+            container.addView(rowLayout)
+        }
+
+        dialog.show()
     }
 
     private fun openSession(sessionId: String) {
