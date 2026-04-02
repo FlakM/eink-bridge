@@ -41,6 +41,8 @@ class MainActivity : AppCompatActivity() {
     private var penOverlay: PenOverlay? = null
     private lateinit var docCache: DocumentCache
     private var wsClient: WebSocketClient? = null
+    private lateinit var ocrOverlay: View
+    private lateinit var ocrStatus: TextView
     private val client = OkHttpClient.Builder()
         .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(10, TimeUnit.SECONDS)
@@ -67,6 +69,8 @@ class MainActivity : AppCompatActivity() {
         serverUrlText = findViewById(R.id.serverUrl)
         emptyState = findViewById(R.id.emptyState)
         strokeView = findViewById(R.id.strokeView)
+        ocrOverlay = findViewById(R.id.processingOverlay)
+        ocrStatus = findViewById(R.id.processingStatus)
 
         serverInput.setText(serverUrl)
         serverUrlText.text = if (serverUrl.isNotEmpty()) "Connected: $serverUrl" else "Not connected"
@@ -174,8 +178,10 @@ class MainActivity : AppCompatActivity() {
     internal lateinit var strokeSlider: SeekBar
     private lateinit var btnLink: Button
     private lateinit var btnColor: Button
+    private lateinit var btnAnnotations: Button
     private var selectedStyleIndex = 0
     internal var bindModeActive = false
+    private var annotationModeActive = false
     private var currentStrokeColor = Color.BLACK
 
     private val styleDotIds = listOf(R.id.dotPencil, R.id.dotBrush, R.id.dotEraser)
@@ -201,6 +207,7 @@ class MainActivity : AppCompatActivity() {
         btnLink = findViewById(R.id.btnLink)
         btnLink.text = "Bind"
         btnColor = findViewById(R.id.btnColor)
+        btnAnnotations = findViewById(R.id.btnAnnotations)
 
         val btnEraser = findViewById<Button>(R.id.btnEraser)
         styleButtons.addAll(listOf(btnPencil, btnBrush, btnEraser))
@@ -242,6 +249,14 @@ class MainActivity : AppCompatActivity() {
         }
         btnLink.setOnClickListener { enterBindMode() }
         btnColor.setOnClickListener { showColorPicker() }
+        btnAnnotations.setOnClickListener {
+            annotationModeActive = !annotationModeActive
+            btnAnnotations.alpha = if (annotationModeActive) 1.0f else 0.35f
+            btnAnnotations.textSize = if (annotationModeActive) 42f else 34f
+            findViewById<View>(R.id.dotAnnotations).visibility =
+                if (annotationModeActive) View.VISIBLE else View.GONE
+            penOverlay?.annotationMode = annotationModeActive
+        }
         findViewById<Button>(R.id.btnSubmit).setOnClickListener { submitAndGoBack() }
 
         selectStyle(0)
@@ -301,6 +316,10 @@ class MainActivity : AppCompatActivity() {
         pollJob?.cancel()
         penOverlay?.destroy()
         penOverlay = null
+        annotationModeActive = false
+        btnAnnotations.alpha = 0.35f
+        btnAnnotations.textSize = 34f
+        findViewById<View>(R.id.dotAnnotations).visibility = View.GONE
         wsClient?.disconnect()
         wsClient = WebSocketClient(
             serverUrl = serverUrl,
@@ -320,14 +339,21 @@ class MainActivity : AppCompatActivity() {
         }
         val buf = StrokeBuffer()
         loadStrokes(sessionId, buf)
+        val ocrClient = OcrClient { serverUrl }
         val overlay = PenOverlay(webView, penToolbar, strokeView, buf = buf,
             onStrokesChanged = { saveStrokes(sessionId, buf) },
-            ocrClient = OcrClient { serverUrl },
-            ocrScope = scope,
+        )
+        overlay.ocrManager = OcrManager(
+            recognize = ocrClient::recognize,
+            scope = scope,
+            onGroupRecognized = { groupId, text -> overlay.onGroupOcrResult(groupId, text) },
+            onUnboundResults = { results -> overlay.onUnboundOcrResults(results) },
+            onPendingChanged = { remaining, total -> updateOcrProgress(remaining, total) },
         )
         overlay.init()
         overlay.setStrokeColor(currentStrokeColor)
         overlay.onBindGroupsChanged = { saveBindGroups(sessionId, overlay.bindGroups) }
+        overlay.onOcrResultsChanged = { results -> saveOcrResults(sessionId, results) }
         overlay.onDeleteBindGroup = { group ->
             AlertDialog.Builder(this)
                 .setTitle("Remove link?")
@@ -341,6 +367,8 @@ class MainActivity : AppCompatActivity() {
         }
         val savedBindGroups = loadBindGroups(sessionId)
         if (savedBindGroups.isNotEmpty()) overlay.loadBindGroups(savedBindGroups)
+        val savedOcrResults = loadOcrResults(sessionId)
+        if (savedOcrResults.isNotEmpty()) overlay.loadOcrResults(savedOcrResults)
         penOverlay = overlay
     }
 
@@ -366,8 +394,28 @@ class MainActivity : AppCompatActivity() {
         return try { bindGroupsFromJson(json) } catch (_: Exception) { emptyList() }
     }
 
+    private fun saveOcrResults(sessionId: String, results: List<OcrResult>) {
+        val key = "ocr_$sessionId"
+        if (results.isEmpty()) prefs.edit().remove(key).apply()
+        else prefs.edit().putString(key, ocrResultsToJson(results)).apply()
+    }
+
+    private fun loadOcrResults(sessionId: String): List<OcrResult> {
+        val json = prefs.getString("ocr_$sessionId", null) ?: return emptyList()
+        return try { ocrResultsFromJson(json) } catch (_: Exception) { emptyList() }
+    }
+
+    private fun updateOcrProgress(remaining: Int, total: Int) {
+        if (remaining == 0) {
+            ocrOverlay.visibility = View.GONE
+        } else {
+            ocrStatus.text = "OCR $remaining / $total"
+            ocrOverlay.visibility = View.VISIBLE
+        }
+    }
+
     private fun clearSavedStrokes(sessionId: String) {
-        prefs.edit().remove("strokes_$sessionId").remove("binds_$sessionId").apply()
+        prefs.edit().remove("strokes_$sessionId").remove("binds_$sessionId").remove("ocr_$sessionId").apply()
     }
 
     private fun hasStrokes(sessionId: String): Boolean {

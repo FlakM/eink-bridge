@@ -222,6 +222,29 @@
                 android:visibility="gone" />
         </FrameLayout>
 
+        <!-- Annotations toggle with active dot -->
+        <FrameLayout
+            android:layout_width="64dp"
+            android:layout_height="64dp">
+            <Button
+                android:id="@+id/btnAnnotations"
+                style="?android:attr/buttonBarButtonStyle"
+                android:layout_width="64dp"
+                android:layout_height="64dp"
+                android:text="👁"
+                android:textSize="34sp"
+                android:textColor="#000000"
+                android:alpha="0.35" />
+            <View
+                android:id="@+id/dotAnnotations"
+                android:layout_width="10dp"
+                android:layout_height="10dp"
+                android:layout_gravity="bottom|center_horizontal"
+                android:layout_marginBottom="3dp"
+                android:background="@drawable/indicator_dot"
+                android:visibility="gone" />
+        </FrameLayout>
+
         <!-- Color picker swatch -->
         <Button
             android:id="@+id/btnColor"

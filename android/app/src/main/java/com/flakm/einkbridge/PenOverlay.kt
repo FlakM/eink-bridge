@@ -1,8 +1,10 @@
 package com.flakm.einkbridge
 
 import android.annotation.SuppressLint
+import android.app.AlertDialog
 import android.graphics.*
 import android.graphics.Rect
+import android.util.Log
 import android.view.MotionEvent
 import android.view.View
 import android.webkit.WebView
@@ -12,9 +14,6 @@ import com.onyx.android.sdk.pen.RawInputCallback
 import com.onyx.android.sdk.pen.TouchHelper
 import com.onyx.android.sdk.pen.data.TouchPointList
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
@@ -181,8 +180,7 @@ internal class PenOverlay(
     internal val transformOverride: (() -> ViewTransform)? = null,
     /** Called whenever committed strokes change (draw, undo, clear, erase). */
     private val onStrokesChanged: (() -> Unit)? = null,
-    internal var ocrClient: OcrClient? = null,
-    internal var ocrScope: CoroutineScope? = null,
+    internal var ocrManager: OcrManager? = null,
 ) {
     private val controller: PenInputController by lazy {
         val c = controllerOverride ?: OnyxPenController(buf, ::currentTransform, onEraseApplied = {
@@ -203,26 +201,31 @@ internal class PenOverlay(
         c
     }
     private var initialized = false
-    private var ocrJob: Job? = null
+    private val ocrResults = mutableListOf<OcrResult>()
+
+    var annotationMode = false
+        set(value) {
+            field = value
+            notifyStrokeView()
+        }
 
     private fun scheduleOcr() {
-        val scope = ocrScope ?: return
-        val client = ocrClient ?: return
-        ocrJob?.cancel()
-        ocrJob = scope.launch {
-            delay(2000)
-            runOcr(client)
-        }
+        ocrManager?.schedule(_bindGroups.toList(), buf.strokes)
     }
 
-    private suspend fun runOcr(client: OcrClient) {
-        val groups = _bindGroups.toList()
-        for ((i, group) in groups.withIndex()) {
-            val strokes = group.strokeIndices.mapNotNull { buf.strokes.getOrNull(it) }
-            if (strokes.isEmpty()) continue
-            val text = client.recognize(strokes) ?: continue
-            _bindGroups[i] = group.copy(recognizedText = text)
-        }
+    internal fun onGroupOcrResult(groupId: Int, text: String) {
+        val idx = _bindGroups.indexOfFirst { it.id == groupId }
+        if (idx < 0) return
+        _bindGroups[idx] = _bindGroups[idx].copy(recognizedText = text)
+        notifyStrokeView()
+        onBindGroupsChanged?.invoke()
+    }
+
+    internal fun onUnboundOcrResults(results: List<OcrResult>) {
+        ocrResults.clear()
+        ocrResults.addAll(results)
+        notifyStrokeView()
+        onOcrResultsChanged?.invoke(ocrResults.toList())
     }
 
     @Suppress("DEPRECATION")
@@ -327,8 +330,9 @@ internal class PenOverlay(
                         }
                     }
                 }
-                !isBindMode && event.actionMasked == MotionEvent.ACTION_UP ->
-                    flashMarkerNear(event.x, event.y)
+                !isBindMode && event.actionMasked == MotionEvent.ACTION_UP -> {
+                    if (!showOcrPopupNear(event.x, event.y)) flashMarkerNear(event.x, event.y)
+                }
                 event.actionMasked == MotionEvent.ACTION_MOVE && event.pointerCount >= 2 ->
                     strokeView?.updateTransform(currentTransform())
             }
@@ -419,6 +423,8 @@ internal class PenOverlay(
     fun clearStrokes() {
         buf.clear()
         undoStack.clear()
+        ocrResults.clear()
+        ocrManager?.clearCache()
         notifyStrokeView()
         controller.resetRenderBuffer()
         onStrokesChanged?.invoke()
@@ -428,7 +434,7 @@ internal class PenOverlay(
     }
 
     private fun notifyStrokeView() {
-        strokeView?.update(buf.strokes, currentTransform(), _bindGroups, bindPoints?.toList())
+        strokeView?.update(buf.strokes, currentTransform(), _bindGroups, bindPoints?.toList(), ocrResults.toList(), annotationMode)
     }
 
     private fun notifyStrokeViewLive() {
@@ -526,6 +532,36 @@ internal class PenOverlay(
 
     var onDeleteBindGroup: ((BindGroup) -> Unit)? = null
 
+    private fun ocrTextNear(screenX: Float, screenY: Float): String? {
+        val t = currentTransform()
+        val tapRadius = StrokeView.BADGE_RADIUS_PX * 2.5f
+        for (group in _bindGroups) {
+            val text = group.recognizedText ?: continue
+            if (StrokeView.groupScreenDiagonal(group, buf.strokes, t) < StrokeView.MIN_OCR_DIAGONAL_PX) continue
+            val sx = t.docToScreenX(group.markerDocX)
+            val sy = t.docToScreenY(group.markerDocY) - StrokeView.MARKER_RADIUS_PX - StrokeView.BADGE_RADIUS_PX - 6f
+            val dx = sx - screenX; val dy = sy - screenY
+            if (dx * dx + dy * dy <= tapRadius * tapRadius) return text
+        }
+        for (result in ocrResults) {
+            val sx = t.docToScreenX(result.docX)
+            val sy = t.docToScreenY(result.docY) - StrokeView.MARKER_RADIUS_PX - StrokeView.BADGE_RADIUS_PX - 6f
+            val dx = sx - screenX; val dy = sy - screenY
+            if (dx * dx + dy * dy <= tapRadius * tapRadius) return result.text
+        }
+        return null
+    }
+
+    private fun showOcrPopupNear(screenX: Float, screenY: Float): Boolean {
+        val text = ocrTextNear(screenX, screenY) ?: return false
+        AlertDialog.Builder(webView.context)
+            .setTitle("Recognized text")
+            .setMessage(text)
+            .setPositiveButton("OK", null)
+            .show()
+        return true
+    }
+
     private fun flashMarkerNear(screenX: Float, screenY: Float) {
         if (_bindGroups.isEmpty()) return
         val t = currentTransform()
@@ -579,6 +615,13 @@ internal class PenOverlay(
     private var nextGroupId = 0
     var onBindComplete: (() -> Unit)? = null
     var onBindGroupsChanged: (() -> Unit)? = null
+    var onOcrResultsChanged: ((List<OcrResult>) -> Unit)? = null
+
+    fun loadOcrResults(results: List<OcrResult>) {
+        ocrResults.clear()
+        ocrResults.addAll(results)
+        notifyStrokeView()
+    }
 
     fun loadBindGroups(groups: List<BindGroup>) {
         _bindGroups.clear()

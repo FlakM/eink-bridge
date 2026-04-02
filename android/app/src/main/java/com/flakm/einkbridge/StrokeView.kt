@@ -2,6 +2,7 @@ package com.flakm.einkbridge
 
 import android.content.Context
 import android.graphics.*
+import android.graphics.Typeface
 import android.util.AttributeSet
 import android.view.View
 
@@ -14,8 +15,10 @@ internal class StrokeView @JvmOverloads constructor(
         private set
     private var transform = ViewTransform()
     private var bindGroups: List<BindGroup> = emptyList()
+    private var ocrResults: List<OcrResult> = emptyList()
     private var bindPathPoints: List<PointF>? = null
     private var expandedGroupIds = mutableSetOf<Int>()
+    private var annotationMode = false
     var bindDrawingActive = false
 
     private val strokePaint = Paint().apply {
@@ -53,16 +56,54 @@ internal class StrokeView @JvmOverloads constructor(
         style = Paint.Style.FILL
     }
 
+    private val ocrBadgePaint = Paint().apply {
+        isAntiAlias = true
+        style = Paint.Style.FILL
+        color = 0xFF444444.toInt()
+    }
+
+    private val ocrTextPaint = Paint().apply {
+        isAntiAlias = true
+        color = Color.WHITE
+        textSize = 26f
+        textAlign = Paint.Align.CENTER
+        typeface = Typeface.DEFAULT_BOLD
+    }
+
+    private val ocrBoxBgPaint = Paint().apply {
+        isAntiAlias = true
+        style = Paint.Style.FILL
+        color = 0xF0FFFFFF.toInt()
+    }
+
+    private val ocrBoxBorderPaint = Paint().apply {
+        isAntiAlias = true
+        style = Paint.Style.STROKE
+        strokeWidth = 2f
+        color = 0xFF888888.toInt()
+    }
+
+    private val ocrLabelPaint = Paint().apply {
+        isAntiAlias = true
+        color = Color.BLACK
+        textSize = 28f
+        textAlign = Paint.Align.CENTER
+    }
+
     fun update(
         strokes: List<Stroke>,
         transform: ViewTransform = ViewTransform(),
         bindGroups: List<BindGroup> = emptyList(),
         bindPath: List<PointF>? = null,
+        ocrResults: List<OcrResult> = emptyList(),
+        annotationMode: Boolean = false,
     ) {
         this.strokes = strokes
         this.transform = transform
         this.bindGroups = bindGroups
         this.bindPathPoints = bindPath
+        this.ocrResults = ocrResults
+        this.annotationMode = annotationMode
         invalidate()
     }
 
@@ -123,12 +164,15 @@ internal class StrokeView @JvmOverloads constructor(
             }
         }
 
+        if (!annotationMode) return
+
         for (group in bindGroups) {
             val isExpanded = group.id in expanded
+            val showLines = isExpanded || annotationMode
             val sx = t.docToScreenX(group.markerDocX)
             val sy = t.docToScreenY(group.markerDocY)
 
-            if (isExpanded) {
+            if (showLines) {
                 val semiColor = (group.color and 0x00FFFFFF) or (0xCC shl 24)
                 dashPaint.color = semiColor
                 for ((cx, cy) in group.strokeDocCenters) {
@@ -148,6 +192,38 @@ internal class StrokeView @JvmOverloads constructor(
             markerPaint.strokeWidth = 3f
             canvas.drawCircle(sx, sy, radius, markerPaint)
             markerPaint.style = Paint.Style.FILL
+
+            if (group.recognizedText != null && groupScreenDiagonal(group, strokes, t) >= MIN_OCR_DIAGONAL_PX) {
+                if (annotationMode) {
+                    drawAnnotationLabel(canvas, group.recognizedText, sx, sy - radius - 4f)
+                } else {
+                    val bx = sx
+                    val by = sy - MARKER_RADIUS_PX - BADGE_RADIUS_PX - 6f
+                    canvas.drawCircle(bx, by, BADGE_RADIUS_PX, ocrBadgePaint)
+                    canvas.drawText("ℹ", bx, by + ocrTextPaint.textSize * 0.35f, ocrTextPaint)
+                }
+            }
+        }
+
+        for (result in ocrResults) {
+            val sx = t.docToScreenX(result.docX)
+            val sy = t.docToScreenY(result.docY)
+            markerPaint.color = UNBOUND_MARKER_COLOR
+            markerPaint.style = Paint.Style.FILL
+            canvas.drawCircle(sx, sy, MARKER_RADIUS_PX, markerPaint)
+            markerPaint.color = Color.WHITE
+            markerPaint.style = Paint.Style.STROKE
+            markerPaint.strokeWidth = 3f
+            canvas.drawCircle(sx, sy, MARKER_RADIUS_PX, markerPaint)
+            markerPaint.style = Paint.Style.FILL
+            if (annotationMode) {
+                drawAnnotationLabel(canvas, result.text, sx, sy - MARKER_RADIUS_PX - 4f)
+            } else {
+                val bx = sx
+                val by = sy - MARKER_RADIUS_PX - BADGE_RADIUS_PX - 6f
+                canvas.drawCircle(bx, by, BADGE_RADIUS_PX, ocrBadgePaint)
+                canvas.drawText("ℹ", bx, by + ocrTextPaint.textSize * 0.35f, ocrTextPaint)
+            }
         }
 
         bindPathPoints?.let { pts ->
@@ -163,8 +239,38 @@ internal class StrokeView @JvmOverloads constructor(
         }
     }
 
+    private fun drawAnnotationLabel(canvas: Canvas, text: String, cx: Float, boxBottomY: Float) {
+        val padding = 10f
+        val textWidth = ocrLabelPaint.measureText(text)
+        val halfW = textWidth / 2 + padding
+        val boxTop = boxBottomY - ocrLabelPaint.textSize - padding * 2
+        val rect = RectF(cx - halfW, boxTop, cx + halfW, boxBottomY)
+        canvas.drawRoundRect(rect, 6f, 6f, ocrBoxBgPaint)
+        canvas.drawRoundRect(rect, 6f, 6f, ocrBoxBorderPaint)
+        canvas.drawText(text, cx, boxBottomY - padding, ocrLabelPaint)
+    }
+
     companion object {
+        const val UNBOUND_MARKER_COLOR = 0xFF888888.toInt()
         const val MARKER_RADIUS_PX = 28f
+        const val BADGE_RADIUS_PX = 18f
         const val SHOW_DURATION_MS = 3000L
+        const val MIN_OCR_DIAGONAL_PX = 80f
+
+        fun groupScreenDiagonal(group: BindGroup, strokes: List<Stroke>, t: ViewTransform): Float {
+            var minX = Float.MAX_VALUE; var maxX = Float.MIN_VALUE
+            var minY = Float.MAX_VALUE; var maxY = Float.MIN_VALUE
+            for (idx in group.strokeIndices) {
+                val stroke = strokes.getOrNull(idx) ?: continue
+                for ((x, y) in stroke.points) {
+                    if (x < minX) minX = x; if (x > maxX) maxX = x
+                    if (y < minY) minY = y; if (y > maxY) maxY = y
+                }
+            }
+            if (minX > maxX) return 0f
+            val sw = t.docToScreenWidth(maxX - minX)
+            val sh = t.docToScreenWidth(maxY - minY)
+            return kotlin.math.sqrt((sw * sw + sh * sh).toDouble()).toFloat()
+        }
     }
 }
