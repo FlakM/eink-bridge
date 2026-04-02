@@ -181,9 +181,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnLink: Button
     private lateinit var btnColor: Button
     private lateinit var btnAnnotations: Button
+    private lateinit var btnSelect: Button
     private var selectedStyleIndex = 0
     internal var bindModeActive = false
     private var annotationModeActive = false
+    private var selectModeActive = false
     private var currentStrokeColor = Color.BLACK
 
     private val styleDotIds = listOf(R.id.dotPencil, R.id.dotBrush, R.id.dotEraser)
@@ -209,6 +211,7 @@ class MainActivity : AppCompatActivity() {
         btnLink = findViewById(R.id.btnLink)
         btnColor = findViewById(R.id.btnColor)
         btnAnnotations = findViewById(R.id.btnAnnotations)
+        btnSelect = findViewById(R.id.btnSelect)
 
         val btnEraser = findViewById<Button>(R.id.btnEraser)
         styleButtons.addAll(listOf(btnPencil, btnBrush, btnEraser))
@@ -223,18 +226,24 @@ class MainActivity : AppCompatActivity() {
 
         btnPencil.setOnClickListener {
             if (bindModeActive) exitBindMode()
+            if (selectModeActive) exitSelectMode()
             selectStyle(0)
             penOverlay?.setStylePencil()
         }
         btnBrush.setOnClickListener {
             if (bindModeActive) exitBindMode()
+            if (selectModeActive) exitSelectMode()
             selectStyle(1)
             penOverlay?.setStyleBrush()
         }
         btnEraser.setOnClickListener {
             if (bindModeActive) exitBindMode()
+            if (selectModeActive) exitSelectMode()
             selectStyle(2)
             penOverlay?.setStyleEraser()
+        }
+        btnSelect.setOnClickListener {
+            if (selectModeActive) exitSelectMode() else enterSelectMode()
         }
         btnUndo.setOnClickListener { penOverlay?.undoLastStroke() }
         btnClear.setOnClickListener {
@@ -276,6 +285,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     internal fun enterBindMode() {
+        if (selectModeActive) exitSelectMode()
         bindModeActive = true
         btnLink.alpha = 1.0f
         btnLink.textSize = 42f
@@ -297,6 +307,29 @@ class MainActivity : AppCompatActivity() {
         selectStyle(selectedStyleIndex)
         strokeSlider.isEnabled = true
         penOverlay?.exitBindMode()
+    }
+
+    private fun enterSelectMode() {
+        if (bindModeActive) exitBindMode()
+        selectModeActive = true
+        btnSelect.alpha = 1.0f
+        btnSelect.textSize = 42f
+        findViewById<View>(R.id.dotSelect).visibility = View.VISIBLE
+        styleDotIds.forEach { findViewById<View>(it).visibility = View.GONE }
+        styleButtons.forEach { it.isEnabled = false; it.alpha = 0.2f }
+        strokeSlider.isEnabled = false
+        penOverlay?.enterSelectMode()
+    }
+
+    private fun exitSelectMode() {
+        selectModeActive = false
+        btnSelect.alpha = 0.35f
+        btnSelect.textSize = 34f
+        findViewById<View>(R.id.dotSelect).visibility = View.GONE
+        styleButtons.forEach { it.isEnabled = true }
+        selectStyle(selectedStyleIndex)
+        strokeSlider.isEnabled = true
+        penOverlay?.exitSelectMode()
     }
 
     private fun showColorPicker() {
@@ -355,6 +388,14 @@ class MainActivity : AppCompatActivity() {
         btnAnnotations.alpha = 0.35f
         btnAnnotations.textSize = 34f
         findViewById<View>(R.id.dotAnnotations).visibility = View.GONE
+        if (selectModeActive) {
+            selectModeActive = false
+            btnSelect.alpha = 0.35f
+            btnSelect.textSize = 34f
+            findViewById<View>(R.id.dotSelect).visibility = View.GONE
+            styleButtons.forEach { it.isEnabled = true }
+            strokeSlider.isEnabled = true
+        }
         wsClient?.disconnect()
         wsClient = WebSocketClient(
             serverUrl = serverUrl,

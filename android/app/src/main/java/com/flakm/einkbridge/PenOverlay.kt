@@ -253,7 +253,7 @@ internal class PenOverlay(
     private val touchRouter = View.OnTouchListener { _, event ->
         val action = rawDrawingAction(event.pointerCount, event::getToolType, event.actionMasked)
         if (action != null) {
-            if (!isBindMode) {
+            if (!isBindMode && !isSelectMode) {
                 if (!action) {
                     notifyStrokeView()
                     controller.setEnabled(false)
@@ -262,7 +262,7 @@ internal class PenOverlay(
                     notifyStrokeView()
                 }
             }
-            isBindMode  // consume finger events during bind to prevent WebView scroll
+            isBindMode || isSelectMode  // consume finger events to prevent WebView scroll
         } else {
             // Stylus/eraser event — consume it so the WebView doesn't scroll.
             val hasPen = (0 until event.pointerCount).any {
@@ -298,6 +298,45 @@ internal class PenOverlay(
             val result = origListener.onTouch(v, event)
 
             when {
+                isSelectMode && event.pointerCount == 1 -> when (event.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        val hit = strokeView?.hitTestLabel(event.x, event.y)
+                        if (hit != null) {
+                            selectedLabel = hit
+                            dragLabel = hit
+                            dragStartX = event.x
+                            dragStartY = event.y
+                            dragBaseDocX = when (hit) {
+                                is LabelId.Group -> groupLabelOffsets[hit.groupId]?.first ?: 0f
+                                is LabelId.Cluster -> clusterLabelOffsets[hit.clusterIdx]?.first ?: 0f
+                            }
+                            dragBaseDocY = when (hit) {
+                                is LabelId.Group -> groupLabelOffsets[hit.groupId]?.second ?: 0f
+                                is LabelId.Cluster -> clusterLabelOffsets[hit.clusterIdx]?.second ?: 0f
+                            }
+                        } else {
+                            selectedLabel = null
+                            dragLabel = null
+                        }
+                        notifyStrokeView()
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        val dragging = dragLabel
+                        if (dragging != null) {
+                            val t = currentTransform()
+                            val docDX = (event.x - dragStartX) / t.scale + dragBaseDocX
+                            val docDY = (event.y - dragStartY) / t.scale + dragBaseDocY
+                            when (dragging) {
+                                is LabelId.Group -> groupLabelOffsets[dragging.groupId] = docDX to docDY
+                                is LabelId.Cluster -> clusterLabelOffsets[dragging.clusterIdx] = docDX to docDY
+                            }
+                            notifyStrokeView()
+                        }
+                    }
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                        dragLabel = null
+                    }
+                }
                 isBindMode && event.pointerCount == 1 -> when (event.actionMasked) {
                     MotionEvent.ACTION_DOWN -> {
                         val pts = mutableListOf(PointF(event.x, event.y))
@@ -330,13 +369,14 @@ internal class PenOverlay(
                         }
                     }
                 }
-                !isBindMode && event.actionMasked == MotionEvent.ACTION_UP -> {
+                !isBindMode && !isSelectMode && event.actionMasked == MotionEvent.ACTION_UP -> {
                     if (!showOcrPopupNear(event.x, event.y)) flashMarkerNear(event.x, event.y)
                 }
                 event.actionMasked == MotionEvent.ACTION_MOVE && event.pointerCount >= 2 ->
                     strokeView?.updateTransform(currentTransform())
             }
-            result
+            // In select mode with a single finger always consume to prevent WebView scroll
+            result || (isSelectMode && event.pointerCount == 1)
         }
         webView.setOnTouchListener(wrappedListener)
     }
@@ -434,7 +474,12 @@ internal class PenOverlay(
     }
 
     private fun notifyStrokeView() {
-        strokeView?.update(buf.strokes, currentTransform(), _bindGroups, bindPoints?.toList(), ocrResults.toList(), annotationMode)
+        strokeView?.update(
+            buf.strokes, currentTransform(), _bindGroups, bindPoints?.toList(),
+            ocrResults.toList(), annotationMode,
+            groupLabelOffsets.toMap(), clusterLabelOffsets.toMap(),
+            selectedLabel,
+        )
     }
 
     private fun notifyStrokeViewLive() {
@@ -451,6 +496,19 @@ internal class PenOverlay(
         bindPoints = null
         strokeView?.setBindPath(null)
         controller.resetRenderBuffer()
+    }
+
+    fun enterSelectMode() {
+        isSelectMode = true
+        controller.setEnabled(false)
+    }
+
+    fun exitSelectMode() {
+        isSelectMode = false
+        dragLabel = null
+        selectedLabel = null
+        controller.resetRenderBuffer()
+        notifyStrokeView()
     }
 
     private fun completeBindGesture(pts: List<PointF>) {
@@ -616,6 +674,17 @@ internal class PenOverlay(
     var onBindComplete: (() -> Unit)? = null
     var onBindGroupsChanged: (() -> Unit)? = null
     var onOcrResultsChanged: ((List<OcrResult>) -> Unit)? = null
+
+    // Select / move mode
+    private var isSelectMode = false
+    private val groupLabelOffsets = mutableMapOf<Int, Pair<Float, Float>>()
+    private val clusterLabelOffsets = mutableMapOf<Int, Pair<Float, Float>>()
+    private var selectedLabel: LabelId? = null
+    private var dragLabel: LabelId? = null
+    private var dragStartX = 0f
+    private var dragStartY = 0f
+    private var dragBaseDocX = 0f
+    private var dragBaseDocY = 0f
 
     fun loadOcrResults(results: List<OcrResult>) {
         ocrResults.clear()

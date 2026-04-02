@@ -457,6 +457,7 @@ internal fun ocrResultsToJson(results: List<OcrResult>): String {
         arr.put(JSONObject().apply {
             put("docX", r.docX.toDouble())
             put("docY", r.docY.toDouble())
+            put("minDocY", r.minDocY.toDouble())
             put("text", r.text)
         })
     }
@@ -467,7 +468,13 @@ internal fun ocrResultsFromJson(json: String): List<OcrResult> {
     val arr = JSONArray(json)
     return (0 until arr.length()).map { i ->
         val o = arr.getJSONObject(i)
-        OcrResult(o.getDouble("docX").toFloat(), o.getDouble("docY").toFloat(), o.getString("text"))
+        val docY = o.getDouble("docY").toFloat()
+        OcrResult(
+            o.getDouble("docX").toFloat(),
+            docY,
+            o.getString("text"),
+            o.optDouble("minDocY", docY.toDouble()).toFloat(),
+        )
     }
 }
 
