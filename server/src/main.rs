@@ -1,5 +1,6 @@
 use eink_bridge::app::AppState;
 use eink_bridge::config::AppConfig;
+use std::time::Duration;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -10,6 +11,8 @@ async fn main() {
         )
         .init();
 
+    eink_bridge::metrics::init();
+
     let config = AppConfig::load();
     tracing::info!(
         state_dir = %config.server.state_dir.display(),
@@ -18,8 +21,20 @@ async fn main() {
         "config loaded"
     );
     let state = AppState::new(config.server.state_dir.clone());
-    let app = eink_bridge::app::build_app(state);
+    let app = eink_bridge::app::build_app(state.clone());
     let addr = config.bind_addr();
+
+    let timeout = Duration::from_secs(config.server.session_timeout_minutes * 60);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            let expired = state.sessions.write().await.expire_stale(timeout);
+            if expired > 0 {
+                tracing::info!(count = expired, "expired stale sessions");
+            }
+        }
+    });
 
     tracing::info!(%addr, "eink-serve listening");
 

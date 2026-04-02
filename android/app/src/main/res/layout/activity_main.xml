@@ -84,6 +84,33 @@
                 android:text="Connect"
                 android:textSize="16sp" />
         </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:paddingTop="4dp">
+
+            <EditText
+                android:id="@+id/metricsInput"
+                android:layout_width="0dp"
+                android:layout_height="40dp"
+                android:layout_weight="1"
+                android:hint="Pushgateway URL (optional)"
+                android:textSize="13sp"
+                android:inputType="textUri"
+                android:padding="8dp"
+                android:textColor="#555555"
+                android:textColorHint="#AAAAAA" />
+
+            <Button
+                android:id="@+id/metricsBtn"
+                android:layout_width="wrap_content"
+                android:layout_height="40dp"
+                android:text="Save"
+                android:textSize="13sp"
+                style="?android:attr/buttonBarButtonStyle" />
+        </LinearLayout>
     </LinearLayout>
 
     <WebView

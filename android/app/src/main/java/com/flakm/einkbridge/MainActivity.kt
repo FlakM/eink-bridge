@@ -2,7 +2,6 @@ package com.flakm.einkbridge
 
 import android.annotation.SuppressLint
 import android.app.AlertDialog
-import android.content.SharedPreferences
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
@@ -14,15 +13,14 @@ import android.webkit.*
 import android.widget.*
 import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import kotlinx.coroutines.*
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.MultipartBody
+import kotlinx.coroutines.flow.collect
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
-import org.json.JSONArray
 import org.json.JSONObject
 import org.json.JSONTokener
 import java.util.concurrent.TimeUnit
@@ -35,14 +33,17 @@ class MainActivity : AppCompatActivity() {
     internal lateinit var penToolbar: View
     internal lateinit var sessionList: RecyclerView
     private lateinit var serverInput: EditText
+    private lateinit var metricsInput: EditText
     private lateinit var serverUrlText: TextView
     internal lateinit var emptyState: TextView
     private lateinit var strokeView: StrokeView
     internal lateinit var adapter: SessionAdapter
-    private lateinit var prefs: SharedPreferences
+    private lateinit var sessionRepo: SessionRepository
+    private lateinit var submissionManager: SubmissionManager
     private var penOverlay: PenOverlay? = null
     private lateinit var docCache: DocumentCache
     private var wsClient: WebSocketClient? = null
+    private var loadedVersion: Int = 0
     private lateinit var ocrOverlay: View
     private lateinit var ocrStatus: TextView
     private val client = OkHttpClient.Builder()
@@ -51,23 +52,28 @@ class MainActivity : AppCompatActivity() {
         .build()
 
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
-    private var pollJob: Job? = null
+    private lateinit var sessionViewModel: SessionViewModel
     private var serverUrl = ""
+    private var pushgatewayUrl = ""
     private var currentSessionId: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        prefs = getSharedPreferences("eink_bridge", MODE_PRIVATE)
+        sessionRepo = SessionRepository(this)
+        submissionManager = SubmissionManager(client)
         docCache = DocumentCache(this)
-        serverUrl = prefs.getString("server_url", "http://amd-pc:3333") ?: "http://amd-pc:3333"
+        sessionViewModel = ViewModelProvider(this)[SessionViewModel::class.java]
+        serverUrl = sessionViewModel.serverUrl
+        pushgatewayUrl = sessionRepo.pushgatewayUrl()
 
         webView = findViewById(R.id.webView)
         sessionListContainer = findViewById(R.id.sessionListContainer)
         penToolbar = findViewById(R.id.penToolbar)
         sessionList = findViewById(R.id.sessionList)
         serverInput = findViewById(R.id.serverInput)
+        metricsInput = findViewById(R.id.metricsInput)
         serverUrlText = findViewById(R.id.serverUrl)
         emptyState = findViewById(R.id.emptyState)
         strokeView = findViewById(R.id.strokeView)
@@ -75,6 +81,7 @@ class MainActivity : AppCompatActivity() {
         ocrStatus = findViewById(R.id.processingStatus)
 
         serverInput.setText(serverUrl)
+        metricsInput.setText(pushgatewayUrl)
         serverUrlText.text = if (serverUrl.isNotEmpty()) "Connected: $serverUrl" else "Not connected"
 
         adapter = SessionAdapter { session -> openSession(session.id) }
@@ -96,23 +103,51 @@ class MainActivity : AppCompatActivity() {
             }
         })
 
+        lifecycleScope.launch {
+            sessionViewModel.state.collect { listState ->
+                val hadSessions = adapter.itemCount
+                adapter.setPendingStrokes(listState.pendingStrokes)
+                adapter.setCachedSessions(listState.cachedSessions)
+                adapter.submitList(listState.sessions)
+                if (listState.sessions.isEmpty()) {
+                    sessionList.visibility = View.GONE
+                    emptyState.visibility = View.VISIBLE
+                } else {
+                    sessionList.visibility = View.VISIBLE
+                    emptyState.visibility = View.GONE
+                }
+                if (listState.sessions.size > hadSessions && hadSessions > 0) {
+                    @Suppress("DEPRECATION")
+                    (getSystemService(VIBRATOR_SERVICE) as? Vibrator)?.vibrate(200)
+                }
+                when (listState.connectionStatus) {
+                    is ConnectionStatus.Online -> {
+                        serverUrlText.text = "Connected: ${sessionViewModel.serverUrl}"
+                        serverUrlText.setTextColor(Color.parseColor("#006600"))
+                    }
+                    is ConnectionStatus.Offline -> {
+                        serverUrlText.text = "Offline \u2014 showing cached: ${sessionViewModel.serverUrl}"
+                        serverUrlText.setTextColor(Color.parseColor("#FF9800"))
+                    }
+                    is ConnectionStatus.Unreachable -> {
+                        serverUrlText.text = "Unreachable: ${sessionViewModel.serverUrl}"
+                        serverUrlText.setTextColor(Color.parseColor("#CC0000"))
+                    }
+                    is ConnectionStatus.Unknown -> {}
+                }
+            }
+        }
+
         findViewById<Button>(R.id.connectBtn).setOnClickListener {
             val url = serverInput.text.toString().trimEnd('/')
             if (url.isNotEmpty()) {
                 serverUrl = url
-                prefs.edit().putString("server_url", url).apply()
+                sessionViewModel.setServerUrl(url)
                 serverUrlText.text = "Connecting..."
                 serverUrlText.setTextColor(Color.GRAY)
                 scope.launch {
-                    val reachable = withContext(Dispatchers.IO) {
-                        try {
-                            val req = Request.Builder().url("$url/api/health").build()
-                            client.newCall(req).execute().isSuccessful
-                        } catch (_: Exception) { false }
-                    }
+                    val reachable = sessionViewModel.checkReachable(url)
                     if (reachable) {
-                        serverUrlText.text = "Connected: $serverUrl"
-                        serverUrlText.setTextColor(Color.parseColor("#006600"))
                         startPolling()
                     } else {
                         serverUrlText.text = "Unreachable: $serverUrl"
@@ -122,8 +157,13 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        if (serverUrl.isNotEmpty()) {
-            startPolling()
+        if (sessionViewModel.serverUrl.isNotEmpty()) {
+            sessionViewModel.startPolling()
+        }
+
+        findViewById<Button>(R.id.metricsBtn).setOnClickListener {
+            pushgatewayUrl = metricsInput.text.toString().trimEnd('/')
+            sessionRepo.savePushgatewayUrl(pushgatewayUrl)
         }
 
         findViewById<Button>(R.id.btnClearSessions).setOnClickListener {
@@ -268,6 +308,7 @@ class MainActivity : AppCompatActivity() {
             penOverlay?.annotationMode = annotationModeActive
         }
         findViewById<Button>(R.id.btnSubmit).setOnClickListener { submitAndGoBack() }
+        findViewById<Button>(R.id.btnRequestUpdate).setOnClickListener { requestUpdate() }
 
         selectStyle(0)
     }
@@ -380,8 +421,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun openSession(sessionId: String) {
         Log.i(TAG, "openSession id=$sessionId serverUrl=$serverUrl")
+        MetricsReporter.recordSessionView()
         currentSessionId = sessionId
-        pollJob?.cancel()
+        sessionViewModel.stopPolling()
         penOverlay?.destroy()
         penOverlay = null
         annotationModeActive = false
@@ -397,10 +439,13 @@ class MainActivity : AppCompatActivity() {
             strokeSlider.isEnabled = true
         }
         wsClient?.disconnect()
+        loadedVersion = 0
+        MetricsReporter.recordWsConnection()
         wsClient = WebSocketClient(
             serverUrl = serverUrl,
             sessionId = sessionId,
             onMessage = { type, json -> handleWsMessage(type, json) },
+            onReconnected = { checkVersionAndReload(sessionId) },
             onClosed = { Log.w(TAG, "ws onClosed session=$sessionId") },
         ).also { it.connect() }
         sessionListContainer.visibility = View.GONE
@@ -414,71 +459,52 @@ class MainActivity : AppCompatActivity() {
             webView.loadUrl("$serverUrl/session/$sessionId")
         }
         val buf = StrokeBuffer()
-        loadStrokes(sessionId, buf)
+        sessionRepo.loadStrokes(sessionId, buf)
         val ocrClient = OcrClient { serverUrl }
         val overlay = PenOverlay(webView, penToolbar, strokeView, buf = buf,
-            onStrokesChanged = { saveStrokes(sessionId, buf) },
+            onStrokesChanged = { sessionRepo.saveStrokes(sessionId, buf) },
         )
-        overlay.ocrManager = OcrManager(
-            recognize = ocrClient::recognize,
-            scope = scope,
-            onGroupRecognized = { groupId, text -> overlay.onGroupOcrResult(groupId, text) },
-            onUnboundResults = { results -> overlay.onUnboundOcrResults(results) },
-            onPendingChanged = { remaining, total -> updateOcrProgress(remaining, total) },
-        )
+        val ocrRecognize: suspend (List<Stroke>) -> String? = { strokes ->
+            try {
+                val result = ocrClient.recognize(strokes)
+                MetricsReporter.recordOcr(result != null)
+                result
+            } catch (e: Exception) {
+                MetricsReporter.recordOcr(false)
+                throw e
+            }
+        }
+        val ocrManager = OcrManager(recognize = ocrRecognize, scope = scope)
+        scope.launch {
+            ocrManager.events.collect { event ->
+                when (event) {
+                    is OcrEvent.GroupRecognized -> overlay.onGroupOcrResult(event.groupId, event.text)
+                    is OcrEvent.UnboundResults -> overlay.onUnboundOcrResults(event.results)
+                    is OcrEvent.PendingChanged -> updateOcrProgress(event.remaining, event.total)
+                }
+            }
+        }
+        overlay.ocrManager = ocrManager
         overlay.init()
         overlay.setStrokeColor(currentStrokeColor)
-        overlay.onBindGroupsChanged = { saveBindGroups(sessionId, overlay.bindGroups) }
-        overlay.onOcrResultsChanged = { results -> saveOcrResults(sessionId, results) }
+        overlay.onBindGroupsChanged = { sessionRepo.saveBindGroups(sessionId, overlay.bindGroups) }
+        overlay.onOcrResultsChanged = { results -> sessionRepo.saveOcrResults(sessionId, results) }
         overlay.onDeleteBindGroup = { group ->
             AlertDialog.Builder(this)
                 .setTitle("Remove link?")
                 .setMessage("Unlink ${group.strokeIndices.size} stroke(s) and ${group.elementIndices.size} element(s)?")
                 .setPositiveButton("Remove") { _, _ ->
                     overlay.removeBindGroup(group.id)
-                    saveBindGroups(sessionId, overlay.bindGroups)
+                    sessionRepo.saveBindGroups(sessionId, overlay.bindGroups)
                 }
                 .setNegativeButton("Cancel", null)
                 .show()
         }
-        val savedBindGroups = loadBindGroups(sessionId)
+        val savedBindGroups = sessionRepo.loadBindGroups(sessionId)
         if (savedBindGroups.isNotEmpty()) overlay.loadBindGroups(savedBindGroups)
-        val savedOcrResults = loadOcrResults(sessionId)
+        val savedOcrResults = sessionRepo.loadOcrResults(sessionId)
         if (savedOcrResults.isNotEmpty()) overlay.loadOcrResults(savedOcrResults)
         penOverlay = overlay
-    }
-
-    private fun saveStrokes(sessionId: String, buf: StrokeBuffer) {
-        val key = "strokes_$sessionId"
-        if (buf.isEmpty) prefs.edit().remove(key).apply()
-        else prefs.edit().putString(key, buf.toJson()).apply()
-    }
-
-    private fun loadStrokes(sessionId: String, buf: StrokeBuffer) {
-        val json = prefs.getString("strokes_$sessionId", null) ?: return
-        try { buf.loadJson(json) } catch (_: Exception) {}
-    }
-
-    private fun saveBindGroups(sessionId: String, groups: List<BindGroup>) {
-        val key = "binds_$sessionId"
-        if (groups.isEmpty()) prefs.edit().remove(key).apply()
-        else prefs.edit().putString(key, bindGroupsToJson(groups)).apply()
-    }
-
-    private fun loadBindGroups(sessionId: String): List<BindGroup> {
-        val json = prefs.getString("binds_$sessionId", null) ?: return emptyList()
-        return try { bindGroupsFromJson(json) } catch (_: Exception) { emptyList() }
-    }
-
-    private fun saveOcrResults(sessionId: String, results: List<OcrResult>) {
-        val key = "ocr_$sessionId"
-        if (results.isEmpty()) prefs.edit().remove(key).apply()
-        else prefs.edit().putString(key, ocrResultsToJson(results)).apply()
-    }
-
-    private fun loadOcrResults(sessionId: String): List<OcrResult> {
-        val json = prefs.getString("ocr_$sessionId", null) ?: return emptyList()
-        return try { ocrResultsFromJson(json) } catch (_: Exception) { emptyList() }
     }
 
     private fun updateOcrProgress(remaining: Int, total: Int) {
@@ -488,14 +514,6 @@ class MainActivity : AppCompatActivity() {
             ocrStatus.text = "OCR $remaining / $total"
             ocrOverlay.visibility = View.VISIBLE
         }
-    }
-
-    private fun clearSavedStrokes(sessionId: String) {
-        prefs.edit().remove("strokes_$sessionId").remove("binds_$sessionId").remove("ocr_$sessionId").apply()
-    }
-
-    private fun hasStrokes(sessionId: String): Boolean {
-        return prefs.contains("strokes_$sessionId")
     }
 
     private fun showSessionList() {
@@ -523,72 +541,91 @@ class MainActivity : AppCompatActivity() {
         }
         Log.i(TAG, "submitAndGoBack: starting session=$sessionId strokes=${overlay.buf.strokes.size}")
         overlay.queryElementMap { elements ->
-            Log.d(TAG, "submitAndGoBack: queryElementMap callback elements=${elements.size}")
             scope.launch {
                 try {
                     val pngData = overlay.exportToPng()
-                    Log.d(TAG, "submitAndGoBack: png exported size=${pngData?.size ?: 0}")
                     val strokeJson = overlay.exportStrokeJson()
-                    val (explicitGroups, unanchoredStrokes) = bindGroupsToAnnotations(
-                        overlay.buf.strokes, overlay.bindGroups
+                    val annotationsJson = submissionManager.buildAnnotationsJson(
+                        overlay.buf.strokes, overlay.bindGroups, elements
                     )
-                    val (proximityGroups, trulyUnanchored) = groupStrokesWithProximity(
-                        unanchoredStrokes, elements
-                    )
-                    val allGroups = explicitGroups + proximityGroups
-                    Log.i(TAG, "submitAndGoBack: explicit=${explicitGroups.size} proximity=${proximityGroups.size} unanchored=${trulyUnanchored.size}")
-                    val annotationsJson = annotationsToJson(allGroups, trulyUnanchored)
-
-                    withContext(Dispatchers.IO) {
-                        val builder = MultipartBody.Builder()
-                            .setType(MultipartBody.FORM)
-                            .addFormDataPart("typed_notes", "")
-                            .addFormDataPart("annotations", annotationsJson)
-
-                        if (pngData != null) {
-                            builder.addFormDataPart(
-                                "annotation", "strokes.png",
-                                pngData.toRequestBody("image/png".toMediaType())
-                            )
+                    val result = withContext(Dispatchers.IO) {
+                        submissionManager.submit(serverUrl, sessionId, annotationsJson, pngData, strokeJson)
+                    }
+                    when {
+                        result.isSuccessful -> {
+                            MetricsReporter.recordSubmission(true)
+                            scope.launch { MetricsReporter.push(pushgatewayUrl) }
+                            sessionRepo.clearSession(sessionId)
+                            Toast.makeText(this@MainActivity, "Submitted!", Toast.LENGTH_SHORT).show()
+                            showSessionList()
+                            startPolling()
                         }
-                        if (strokeJson != null) {
-                            builder.addFormDataPart("stroke_data", strokeJson)
+                        result.isConflict -> {
+                            MetricsReporter.recordSubmission(false)
+                            Toast.makeText(this@MainActivity, "Session already submitted or expired", Toast.LENGTH_LONG).show()
+                            showSessionList()
+                            startPolling()
                         }
-
-                        val url = "$serverUrl/api/sessions/$sessionId/submit"
-                        Log.i(TAG, "submitAndGoBack: POST $url")
-                        val request = Request.Builder().url(url).post(builder.build()).build()
-
-                        val response = client.newCall(request).execute()
-                        Log.i(TAG, "submitAndGoBack: response code=${response.code} session=$sessionId")
-                        withContext(Dispatchers.Main) {
-                            when {
-                                response.isSuccessful -> {
-                                    Log.i(TAG, "submitAndGoBack: success, clearing strokes and going back")
-                                    clearSavedStrokes(sessionId)
-                                    Toast.makeText(this@MainActivity, "Submitted!", Toast.LENGTH_SHORT).show()
-                                    showSessionList()
-                                    startPolling()
-                                }
-                                response.code == 409 -> {
-                                    Log.w(TAG, "submitAndGoBack: 409 conflict session=$sessionId")
-                                    Toast.makeText(this@MainActivity, "Session already submitted or expired", Toast.LENGTH_LONG).show()
-                                    showSessionList()
-                                    startPolling()
-                                }
-                                else -> {
-                                    val body = response.body?.string() ?: ""
-                                    Log.e(TAG, "submitAndGoBack: failed code=${response.code} body=$body")
-                                    Toast.makeText(this@MainActivity, "Submit failed: ${response.code}", Toast.LENGTH_SHORT).show()
-                                }
-                            }
+                        result is SubmitResult.Http -> {
+                            MetricsReporter.recordSubmission(false)
+                            Toast.makeText(this@MainActivity, "Submit failed: ${result.code}", Toast.LENGTH_SHORT).show()
+                        }
+                        result is SubmitResult.Failure -> {
+                            MetricsReporter.recordSubmission(false)
+                            Toast.makeText(this@MainActivity, "Error: ${result.exception.message}", Toast.LENGTH_SHORT).show()
                         }
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "submitAndGoBack: exception session=$sessionId", e)
-                    withContext(Dispatchers.Main) {
-                        Toast.makeText(this@MainActivity, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@MainActivity, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
+    private fun checkVersionAndReload(sessionId: String) {
+        scope.launch {
+            try {
+                val serverVersion = withContext(Dispatchers.IO) {
+                    val req = Request.Builder().url("$serverUrl/api/sessions/$sessionId").build()
+                    val resp = client.newCall(req).execute()
+                    if (!resp.isSuccessful) return@withContext -1
+                    val body = resp.body?.string() ?: return@withContext -1
+                    org.json.JSONObject(body).optInt("version", -1)
+                }
+                if (serverVersion > loadedVersion) {
+                    Log.i(TAG, "reconnect: server version=$serverVersion > loaded=$loadedVersion — reloading")
+                    loadedVersion = serverVersion
+                    webView.loadUrl("$serverUrl/session/$sessionId")
+                } else {
+                    Log.d(TAG, "reconnect: version up to date ($serverVersion)")
+                }
+            } catch (_: Exception) {}
+        }
+    }
+
+    private fun requestUpdate() {
+        val sessionId = currentSessionId ?: return
+        val overlay = penOverlay ?: return
+        overlay.queryElementMap { elements ->
+            scope.launch {
+                try {
+                    ocrStatus.text = "Sending annotations..."
+                    ocrOverlay.visibility = View.VISIBLE
+                    val annotationsJson = submissionManager.buildAnnotationsJson(
+                        overlay.buf.strokes, overlay.bindGroups, elements
+                    )
+                    val ok = withContext(Dispatchers.IO) {
+                        submissionManager.requestUpdate(serverUrl, sessionId, annotationsJson)
                     }
+                    if (!ok) {
+                        ocrOverlay.visibility = View.GONE
+                        Toast.makeText(this@MainActivity, "Request failed", Toast.LENGTH_SHORT).show()
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "requestUpdate: exception session=$sessionId", e)
+                    ocrOverlay.visibility = View.GONE
+                    Toast.makeText(this@MainActivity, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
                 }
             }
         }
@@ -596,98 +633,16 @@ class MainActivity : AppCompatActivity() {
 
     private fun clearFinishedSessions() {
         scope.launch {
-            val ok = withContext(Dispatchers.IO) {
-                try {
-                    val request = Request.Builder()
-                        .url("$serverUrl/api/sessions")
-                        .delete()
-                        .build()
-                    client.newCall(request).execute().isSuccessful
-                } catch (_: Exception) { false }
-            }
+            val ok = sessionViewModel.clearFinishedSessions()
             if (ok) {
-                fetchSessions()
+                sessionViewModel.startPolling()
             } else {
                 Toast.makeText(this@MainActivity, "Failed to clear sessions", Toast.LENGTH_SHORT).show()
             }
         }
     }
 
-    private fun startPolling() {
-        pollJob?.cancel()
-        pollJob = scope.launch {
-            while (isActive) {
-                fetchSessions()
-                delay(5000)
-            }
-        }
-    }
-
-    private suspend fun fetchSessions() {
-        withContext(Dispatchers.IO) {
-            try {
-                val request = Request.Builder()
-                    .url("$serverUrl/api/sessions")
-                    .build()
-                val response = client.newCall(request).execute()
-                if (response.isSuccessful) {
-                    val body = response.body?.string() ?: "[]"
-                    val arr = JSONArray(body)
-                    val sessions = mutableListOf<SessionInfo>()
-                    for (i in 0 until arr.length()) {
-                        val obj = arr.getJSONObject(i)
-                        sessions.add(SessionInfo(
-                            id = obj.getString("id"),
-                            title = obj.optString("title", "(untitled)"),
-                            status = obj.getString("status"),
-                            createdAt = obj.getString("created_at"),
-                            updatedAt = obj.optString("updated_at", obj.getString("created_at")),
-                        ))
-                    }
-                    docCache.saveSessions(sessions)
-                    val hadSessions = adapter.itemCount
-                    val pending = sessions.filter { hasStrokes(it.id) }.map { it.id }.toSet()
-                    val cached = sessions.filter { docCache.hasCached(it.id) }.map { it.id }.toSet()
-                    withContext(Dispatchers.Main) {
-                        adapter.setPendingStrokes(pending)
-                        adapter.setCachedSessions(cached)
-                        adapter.submitList(sessions)
-                        if (sessions.isEmpty()) {
-                            sessionList.visibility = View.GONE
-                            emptyState.visibility = View.VISIBLE
-                        } else {
-                            sessionList.visibility = View.VISIBLE
-                            emptyState.visibility = View.GONE
-                        }
-                        if (sessions.size > hadSessions && hadSessions > 0) {
-                            @Suppress("DEPRECATION")
-                            (getSystemService(VIBRATOR_SERVICE) as? Vibrator)?.vibrate(200)
-                        }
-                        serverUrlText.text = "Connected: $serverUrl"
-                        serverUrlText.setTextColor(Color.parseColor("#006600"))
-                    }
-                }
-            } catch (_: Exception) {
-                withContext(Dispatchers.Main) {
-                    val cached = docCache.loadSessions()
-                    if (cached.isNotEmpty()) {
-                        serverUrlText.text = "Offline \u2014 showing cached: $serverUrl"
-                        serverUrlText.setTextColor(Color.parseColor("#FF9800"))
-                        val cachedIds = cached.filter { docCache.hasCached(it.id) }.map { it.id }.toSet()
-                        val pending = cached.filter { hasStrokes(it.id) }.map { it.id }.toSet()
-                        adapter.setPendingStrokes(pending)
-                        adapter.setCachedSessions(cachedIds)
-                        adapter.submitList(cached)
-                        sessionList.visibility = View.VISIBLE
-                        emptyState.visibility = View.GONE
-                    } else {
-                        serverUrlText.text = "Unreachable: $serverUrl"
-                        serverUrlText.setTextColor(Color.parseColor("#CC0000"))
-                    }
-                }
-            }
-        }
-    }
+    private fun startPolling() { sessionViewModel.startPolling() }
 
     override fun onResume() {
         super.onResume()
@@ -714,8 +669,11 @@ class MainActivity : AppCompatActivity() {
             when (type) {
                 "version_updated" -> {
                     val version = json.optInt("version")
+                    val sid = currentSessionId ?: return@runOnUiThread
                     Log.i(TAG, "version_updated: version=$version — reloading webview")
-                    webView.reload()
+                    loadedVersion = version
+                    ocrOverlay.visibility = View.GONE
+                    webView.loadUrl("$serverUrl/session/$sid")
                     Toast.makeText(this, "Document updated ✓", Toast.LENGTH_SHORT).show()
                 }
                 "session_submitted" -> {

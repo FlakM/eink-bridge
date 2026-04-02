@@ -43,20 +43,36 @@ impl OcrEngine {
             "images": [b64],
             "stream": false,
         });
-        let resp = self
+        let resp = match self
             .client
             .post(format!("{}/api/generate", self.ollama_url))
             .json(&body)
             .send()
             .await
-            .map_err(|e| format!("Ollama request: {e}"))?;
+        {
+            Ok(r) => r,
+            Err(e) => {
+                crate::metrics::OCR_REQUESTS
+                    .with_label_values(&["error"])
+                    .inc();
+                return Err(format!("Ollama request: {e}"));
+            }
+        };
         if !resp.status().is_success() {
+            crate::metrics::OCR_REQUESTS
+                .with_label_values(&["error"])
+                .inc();
             return Err(format!("Ollama returned {}", resp.status()));
         }
-        let json: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| format!("Ollama parse: {e}"))?;
+        let json: serde_json::Value = match resp.json().await {
+            Ok(j) => j,
+            Err(e) => {
+                crate::metrics::OCR_REQUESTS
+                    .with_label_values(&["error"])
+                    .inc();
+                return Err(format!("Ollama parse: {e}"));
+            }
+        };
         let text = json["response"].as_str().unwrap_or("").trim().to_string();
         let elapsed = t.elapsed();
         let eval_ms = json["eval_duration"]
@@ -67,6 +83,8 @@ impl OcrEngine {
             .as_u64()
             .map(|ns| ns / 1_000_000)
             .unwrap_or(0);
+        let eval_tokens = json["eval_count"].as_u64().unwrap_or(0);
+        let prompt_tokens = json["prompt_eval_count"].as_u64().unwrap_or(0);
         info!(
             text = %text,
             wall_ms = elapsed.as_millis(),
@@ -74,6 +92,16 @@ impl OcrEngine {
             token_eval_ms = eval_ms,
             "OCR complete"
         );
+        crate::metrics::OCR_REQUESTS
+            .with_label_values(&["ok"])
+            .inc();
+        crate::metrics::OCR_DURATION.observe(elapsed.as_secs_f64());
+        crate::metrics::OCR_TOKENS
+            .with_label_values(&["prompt"])
+            .inc_by(prompt_tokens);
+        crate::metrics::OCR_TOKENS
+            .with_label_values(&["eval"])
+            .inc_by(eval_tokens);
         Ok(text)
     }
 
@@ -225,5 +253,4 @@ mod tests {
             Err(e) => eprintln!("OCR engine init skipped: {e}"),
         }
     }
-
 }

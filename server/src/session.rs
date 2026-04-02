@@ -271,17 +271,24 @@ impl SessionManager {
         count
     }
 
-    pub fn expire_stale(&mut self, timeout: Duration) {
+    pub fn expire_stale(&mut self, timeout: Duration) -> usize {
         let now = Utc::now();
+        let mut count = 0usize;
         for session in self.sessions.values_mut() {
             if session.status == SessionStatus::Active {
                 let age = now.signed_duration_since(session.created_at);
                 if age.to_std().unwrap_or(Duration::ZERO) > timeout {
                     session.status = SessionStatus::Expired;
                     session.persist();
+                    count += 1;
                 }
             }
         }
+        if count > 0 {
+            crate::metrics::SESSIONS_EXPIRED.inc_by(count as u64);
+            crate::metrics::SESSIONS_ACTIVE.sub(count as i64);
+        }
+        count
     }
 }
 

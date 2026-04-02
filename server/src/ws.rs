@@ -27,6 +27,10 @@ pub enum ServerMessage {
     SessionSubmitted {
         result: Box<SessionResultResponse>,
     },
+    AnnotationResult {
+        version: u32,
+        annotations: Vec<crate::api::AnnotationGroup>,
+    },
     Error {
         message: String,
     },
@@ -48,6 +52,7 @@ pub async fn ws_handler(
 
 async fn handle_ws(mut socket: WebSocket, id: String, state: AppState) {
     info!(session_id = %id, "ws connected");
+    crate::metrics::WS_CONNECTIONS_ACTIVE.inc();
     let mut rx = state.ws_subscribe(&id).await;
 
     loop {
@@ -93,6 +98,7 @@ async fn handle_ws(mut socket: WebSocket, id: String, state: AppState) {
     }
 
     info!(session_id = %id, "ws disconnected");
+    crate::metrics::WS_CONNECTIONS_ACTIVE.dec();
 }
 
 fn extract_type(text: &str) -> &str {

@@ -54,6 +54,7 @@ image = "0.25"
 ocrs = "0.12"
 rten = "0.24"
 tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+prometheus = { version = "0.13", default-features = false }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

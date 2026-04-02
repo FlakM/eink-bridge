@@ -1,8 +1,9 @@
 use axum::{
     Router,
     body::Bytes,
-    extract::{Path, Query, State},
+    extract::{MatchedPath, Path, Query, Request, State},
     http::{HeaderMap, StatusCode, header},
+    middleware::Next,
     response::{Html, IntoResponse, Json, Response},
     routing::{get, post, put},
 };
@@ -49,8 +50,15 @@ impl AppState {
                 None
             }
         };
+        let mgr = SessionManager::new(state_dir);
+        let active = mgr
+            .list()
+            .iter()
+            .filter(|s| s.status == SessionStatus::Active)
+            .count() as i64;
+        crate::metrics::SESSIONS_ACTIVE.set(active);
         Self {
-            sessions: Arc::new(RwLock::new(SessionManager::new(state_dir))),
+            sessions: Arc::new(RwLock::new(mgr)),
             notifiers: Arc::new(RwLock::new(HashMap::new())),
             ws_senders: Arc::new(RwLock::new(HashMap::new())),
             long_poll_seconds,
@@ -125,6 +133,7 @@ type SubmitError = (StatusCode, String);
 pub fn build_app(state: AppState) -> Router {
     let assets_dir = state.assets_dir.clone();
     Router::new()
+        .route("/metrics", get(metrics_handler))
         .route("/api/health", get(health))
         .route("/api/openapi.json", get(openapi_json))
         .route("/api/ocr", post(ocr_strokes))
@@ -141,12 +150,45 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/sessions/{id}/result", get(get_result))
         .route("/api/sessions/{id}/content", put(update_content))
         .route("/api/sessions/{id}/submit", post(submit_review))
+        .route("/api/sessions/{id}/request_update", post(request_update))
         .route("/ws/{id}", get(crate::ws::ws_handler))
         .route("/session/{id}", get(render_session))
+        .route_layer(axum::middleware::from_fn(track_metrics))
         .nest_service("/assets", ServeDir::new(assets_dir))
         .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY_SIZE))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
+}
+
+async fn metrics_handler() -> impl IntoResponse {
+    let body = crate::metrics::render();
+    (
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        body,
+    )
+}
+
+async fn track_metrics(req: Request, next: Next) -> Response {
+    let method = req.method().as_str().to_string();
+    let path = req
+        .extensions()
+        .get::<MatchedPath>()
+        .map(|mp| mp.as_str().to_string())
+        .unwrap_or_else(|| req.uri().path().to_string());
+    let start = std::time::Instant::now();
+    let resp = next.run(req).await;
+    let status = resp.status().as_u16().to_string();
+    let dur = start.elapsed().as_secs_f64();
+    crate::metrics::HTTP_REQUESTS
+        .with_label_values(&[&method, &path, &status])
+        .inc();
+    crate::metrics::HTTP_DURATION
+        .with_label_values(&[&method, &path])
+        .observe(dur);
+    resp
 }
 
 async fn health() -> &'static str {
@@ -162,10 +204,7 @@ struct OcrRequest {
     strokes: Vec<Vec<[f64; 2]>>,
 }
 
-async fn ocr_strokes(
-    State(state): State<AppState>,
-    Json(body): Json<OcrRequest>,
-) -> Response {
+async fn ocr_strokes(State(state): State<AppState>, Json(body): Json<OcrRequest>) -> Response {
     let Some(engine) = &state.ocr_engine else {
         return (StatusCode::SERVICE_UNAVAILABLE, "OCR engine not available").into_response();
     };
@@ -241,6 +280,9 @@ async fn create_session(
         content_bytes = content_len,
         "session created"
     );
+    crate::metrics::SESSIONS_CREATED.inc();
+    crate::metrics::SESSIONS_ACTIVE.inc();
+    crate::metrics::SESSION_CONTENT_BYTES.observe(content_len as f64);
 
     (
         StatusCode::CREATED,
@@ -299,6 +341,8 @@ async fn cancel_session(
     match mgr.cancel(&id) {
         true => {
             tracing::info!(id = %id, "session cancelled");
+            crate::metrics::SESSIONS_CANCELLED.inc();
+            crate::metrics::SESSIONS_ACTIVE.dec();
             let webhook = mgr.get(&id).and_then(webhook_payload);
             drop(mgr);
             state.notify_and_cleanup(&id).await;
@@ -371,8 +415,24 @@ fn webhook_payload(session: &Session) -> Option<(String, SessionResultResponse)>
 fn fire_webhook(callback_url: String, body: SessionResultResponse) {
     tokio::spawn(async move {
         let client = reqwest::Client::new();
-        if let Err(error) = client.post(&callback_url).json(&body).send().await {
-            tracing::warn!("webhook POST to {callback_url} failed: {error}");
+        match client.post(&callback_url).json(&body).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                crate::metrics::WEBHOOK_TOTAL
+                    .with_label_values(&["ok"])
+                    .inc();
+            }
+            Ok(resp) => {
+                tracing::warn!("webhook POST to {callback_url} returned {}", resp.status());
+                crate::metrics::WEBHOOK_TOTAL
+                    .with_label_values(&["error"])
+                    .inc();
+            }
+            Err(error) => {
+                tracing::warn!("webhook POST to {callback_url} failed: {error}");
+                crate::metrics::WEBHOOK_TOTAL
+                    .with_label_values(&["error"])
+                    .inc();
+            }
         }
     });
 }
@@ -397,14 +457,19 @@ async fn get_result(
 
     tracing::debug!(id = %id, "long-poll waiting");
     let notify = state.get_or_create_notify(&id).await;
-    tokio::select! {
+    let poll_outcome = tokio::select! {
         _ = notify.notified() => {
             tracing::debug!(id = %id, "long-poll: notified");
+            "notified"
         }
         _ = tokio::time::sleep(Duration::from_secs(state.long_poll_seconds)) => {
             tracing::debug!(id = %id, "long-poll: timeout");
+            "timeout"
         }
-    }
+    };
+    crate::metrics::LONG_POLL_TOTAL
+        .with_label_values(&[poll_outcome])
+        .inc();
 
     let mgr = state.sessions.read().await;
     match mgr.get(&id) {
@@ -468,6 +533,9 @@ async fn submit_review(
             let ws_result = mgr.get(&id).map(SessionResultResponse::from_session);
             drop(mgr);
             tracing::info!(id = %id, ?verdict, images = image_count, "review submitted");
+            crate::metrics::SESSIONS_SUBMITTED.inc();
+            crate::metrics::SESSIONS_ACTIVE.dec();
+            crate::metrics::SESSION_ANNOTATION_IMAGES.observe(image_count as f64);
             state.notify_and_cleanup(&id).await;
             if let Some(result) = ws_result {
                 state
@@ -494,6 +562,61 @@ async fn submit_review(
             StatusCode::CONFLICT.into_response()
         }
     }
+}
+
+async fn request_update(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<SubmitReviewRequest>,
+) -> Response {
+    let version = {
+        let mgr = state.sessions.read().await;
+        match mgr.get(&id) {
+            None => return StatusCode::NOT_FOUND.into_response(),
+            Some(s) if s.status != crate::session::SessionStatus::Active => {
+                return StatusCode::CONFLICT.into_response();
+            }
+            Some(s) => s.version,
+        }
+    };
+
+    let mut annotations = body.annotations;
+
+    if let Some(engine) = &state.ocr_engine {
+        let futs: Vec<_> = annotations
+            .iter()
+            .map(|g| {
+                let engine = Arc::clone(engine);
+                let strokes = g.strokes.clone();
+                let needs_ocr = g.recognized_text.is_none() && !strokes.is_empty();
+                async move {
+                    if needs_ocr {
+                        engine.recognize_strokes(&strokes).await.ok()
+                    } else {
+                        None
+                    }
+                }
+            })
+            .collect();
+        let results = futures_util::future::join_all(futs).await;
+        for (ann, text) in annotations.iter_mut().zip(results) {
+            if let Some(t) = text {
+                ann.recognized_text = Some(t);
+            }
+        }
+    }
+
+    tracing::info!(id = %id, version, count = annotations.len(), "annotation_result broadcast");
+    state
+        .ws_send(
+            &id,
+            crate::ws::ServerMessage::AnnotationResult {
+                version,
+                annotations,
+            },
+        )
+        .await;
+    StatusCode::OK.into_response()
 }
 
 fn parse_json_submit(body: &[u8]) -> Result<SubmitPayload, SubmitError> {

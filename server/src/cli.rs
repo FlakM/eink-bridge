@@ -72,6 +72,15 @@ async fn main() {
     let cli = Cli::parse();
     let client = Client::new();
 
+    let command_name = match &cli.command {
+        Command::Push { .. } => "push",
+        Command::Update { .. } => "update",
+        Command::Result { .. } => "result",
+        Command::Cancel { .. } => "cancel",
+        Command::List { .. } => "list",
+    };
+
+    let start = std::time::Instant::now();
     let result = match cli.command {
         Command::Push {
             file,
@@ -99,10 +108,41 @@ async fn main() {
         Command::List { status } => cmd_list(&client, &cli.server, status).await,
     };
 
+    let duration = start.elapsed().as_secs_f64();
+    let result_label = if result.is_ok() { "ok" } else { "error" };
+    push_cli_metrics(command_name, duration, result_label).await;
+
     if let Err(e) = result {
         eprintln!("error: {e}");
         std::process::exit(1);
     }
+}
+
+async fn push_cli_metrics(command: &str, duration_secs: f64, result: &str) {
+    let Ok(gw) = std::env::var("EINK_PUSHGATEWAY_URL") else {
+        return;
+    };
+    let metrics = format!(
+        "# HELP eink_cli_commands_total CLI command invocations\n\
+         # TYPE eink_cli_commands_total counter\n\
+         eink_cli_commands_total{{command=\"{command}\",result=\"{result}\"}} 1\n\
+         # HELP eink_cli_duration_seconds CLI command wall-clock duration\n\
+         # TYPE eink_cli_duration_seconds gauge\n\
+         eink_cli_duration_seconds{{command=\"{command}\",result=\"{result}\"}} {duration_secs:.3}\n"
+    );
+    let url = format!("{gw}/metrics/job/eink-review/instance/cli");
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+    else {
+        return;
+    };
+    let _ = client
+        .post(&url)
+        .header("Content-Type", "text/plain")
+        .body(metrics)
+        .send()
+        .await;
 }
 
 #[allow(clippy::too_many_arguments)]
