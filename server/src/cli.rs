@@ -46,6 +46,14 @@ enum Command {
         /// File with updated content
         file: String,
     },
+    /// Watch an existing session for events via WebSocket (emits same events as push --interactive)
+    Watch {
+        /// Session ID
+        id: String,
+        /// Timeout in minutes
+        #[arg(long, default_value = "30")]
+        timeout: u64,
+    },
     /// Get result of a session
     Result {
         /// Session ID
@@ -75,6 +83,7 @@ async fn main() {
     let command_name = match &cli.command {
         Command::Push { .. } => "push",
         Command::Update { .. } => "update",
+        Command::Watch { .. } => "watch",
         Command::Result { .. } => "result",
         Command::Cancel { .. } => "cancel",
         Command::List { .. } => "list",
@@ -103,6 +112,7 @@ async fn main() {
             .await
         }
         Command::Update { id, file } => cmd_update(&cli.server, &id, &file).await,
+        Command::Watch { id, timeout } => cmd_push_interactive(&cli.server, &id, timeout).await,
         Command::Result { id, json } => cmd_result(&client, &cli.server, &id, json).await,
         Command::Cancel { id } => cmd_cancel(&client, &cli.server, &id).await,
         Command::List { status } => cmd_list(&client, &cli.server, status).await,
@@ -293,7 +303,15 @@ async fn cmd_push_interactive(server: &str, id: &str, timeout_minutes: u64) -> a
                     let v: serde_json::Value = serde_json::from_str(&text)?;
                     match v["type"].as_str() {
                         Some("annotation_result") => {
-                            println!("EVENT:ANNOTATION_RESULT {text}");
+                            let mut out = v.clone();
+                            if let Some(anns) = out["annotations"].as_array_mut() {
+                                for ann in anns.iter_mut() {
+                                    if let Some(obj) = ann.as_object_mut() {
+                                        obj.remove("strokes");
+                                    }
+                                }
+                            }
+                            println!("EVENT:ANNOTATION_RESULT {out}");
                             std::io::stdout().flush().ok();
                         }
                         Some("session_submitted") => {

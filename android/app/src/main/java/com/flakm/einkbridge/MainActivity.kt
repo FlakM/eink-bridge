@@ -8,6 +8,7 @@ import android.os.Bundle
 import android.os.Vibrator
 import android.util.Log
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.webkit.*
 import android.widget.*
@@ -26,6 +27,7 @@ import org.json.JSONTokener
 import java.util.concurrent.TimeUnit
 
 private const val TAG = "EinkMain"
+private const val INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000L
 
 class MainActivity : AppCompatActivity() {
     internal lateinit var webView: WebView
@@ -44,6 +46,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var docCache: DocumentCache
     private var wsClient: WebSocketClient? = null
     private var loadedVersion: Int = 0
+    private var savedScrollY: Int = 0
     private lateinit var ocrOverlay: View
     private lateinit var ocrStatus: TextView
     private val client = OkHttpClient.Builder()
@@ -56,6 +59,8 @@ class MainActivity : AppCompatActivity() {
     private var serverUrl = ""
     private var pushgatewayUrl = ""
     private var currentSessionId: String? = null
+    private var inactivityJob: Job? = null
+    private var wsInSleep = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -188,6 +193,11 @@ class MainActivity : AppCompatActivity() {
             override fun onPageFinished(view: WebView, url: String) {
                 val sid = currentSessionId ?: return
                 Log.d(TAG, "webview onPageFinished url=$url session=$sid")
+                val scrollY = savedScrollY
+                if (scrollY > 0) {
+                    savedScrollY = 0
+                    view.post { view.scrollTo(0, scrollY) }
+                }
                 view.evaluateJavascript("document.documentElement.outerHTML") { html ->
                     if (html.isNullOrBlank() || html == "null") return@evaluateJavascript
                     val cleaned = try {
@@ -505,6 +515,7 @@ class MainActivity : AppCompatActivity() {
         val savedOcrResults = sessionRepo.loadOcrResults(sessionId)
         if (savedOcrResults.isNotEmpty()) overlay.loadOcrResults(savedOcrResults)
         penOverlay = overlay
+        resetInactivityTimer()
     }
 
     private fun updateOcrProgress(remaining: Int, total: Int) {
@@ -518,6 +529,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun showSessionList() {
         Log.i(TAG, "showSessionList: leaving session=$currentSessionId")
+        inactivityJob?.cancel()
+        inactivityJob = null
+        wsInSleep = false
         penOverlay?.disableDrawing()
         penOverlay?.destroy()
         penOverlay = null
@@ -644,6 +658,30 @@ class MainActivity : AppCompatActivity() {
 
     private fun startPolling() { sessionViewModel.startPolling() }
 
+    private fun resetInactivityTimer() {
+        inactivityJob?.cancel()
+        if (currentSessionId == null) return
+        inactivityJob = scope.launch {
+            delay(INACTIVITY_TIMEOUT_MS)
+            Log.i(TAG, "inactivity timeout — disconnecting ws for deep sleep")
+            scope.launch { MetricsReporter.push(pushgatewayUrl) }
+            wsClient?.disconnect()
+            wsInSleep = true
+        }
+    }
+
+    override fun dispatchTouchEvent(event: MotionEvent?): Boolean {
+        if (event?.action == MotionEvent.ACTION_DOWN && currentSessionId != null) {
+            if (wsInSleep) {
+                Log.i(TAG, "waking ws from inactivity sleep")
+                wsInSleep = false
+                wsClient?.connect()
+            }
+            resetInactivityTimer()
+        }
+        return super.dispatchTouchEvent(event)
+    }
+
     override fun onResume() {
         super.onResume()
         if (currentSessionId != null) {
@@ -657,6 +695,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        inactivityJob?.cancel()
         penOverlay?.destroy()
         wsClient?.disconnect()
         scope.cancel()
@@ -673,6 +712,7 @@ class MainActivity : AppCompatActivity() {
                     Log.i(TAG, "version_updated: version=$version — reloading webview")
                     loadedVersion = version
                     ocrOverlay.visibility = View.GONE
+                    savedScrollY = webView.scrollY
                     webView.loadUrl("$serverUrl/session/$sid")
                     Toast.makeText(this, "Document updated ✓", Toast.LENGTH_SHORT).show()
                 }

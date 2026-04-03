@@ -11,64 +11,79 @@ Push content to the Boox for reading and annotation. Supports iterative rounds: 
 
 ```
 /eink [file]
+/eink continue [session-id]
 ```
 
 - If a file path is given, push it directly.
 - Otherwise, write a context summary to `/tmp/eink-review-XXXXX.md`.
+- `continue` resumes watching an already-active session (no new push).
 
-## Steps
+---
+
+## Steps for `/eink continue [session-id]`
+
+1. If no session-id was given, find the most recent active session:
+   ```bash
+   eink-review list --status active
+   ```
+   Pick the first ID from the output. If none, tell the user there are no active sessions.
+
+2. Skip to **"Launch background watcher"** below with that session ID.
+
+---
+
+## Steps for a new push
 
 ### 1. Determine content
 
 - If the user provided a file path, use it directly.
 - Otherwise, write a context summary to `/tmp/eink-review-XXXXX.md`.
 
-### 2. Start the interactive push in the background
-
-Redirect **only stdout** to the logfile (stderr goes to terminal — keeps event log clean):
+### 2. Create session (non-blocking)
 
 ```bash
-LOGFILE=$(mktemp /tmp/eink-events-XXXXX.log)
-eink-review push --interactive --timeout 60 <file> >"$LOGFILE" 2>/dev/null &
-echo "PID:$! LOG:$LOGFILE"
+SESSION_ID=$(eink-review push --async <file>)
+echo "SESSION_ID:$SESSION_ID"
 ```
-
-### 3. Get the session ID
-
-The first line of the logfile is always `SESSION_ID:<id>`:
-
-```bash
-sleep 2 && grep -m1 "^SESSION_ID:" "$LOGFILE"
-```
-
-Parse the session ID: strip the `SESSION_ID:` prefix.
-
-Set `NEXT_LINE=2` (line 1 is the SESSION_ID, already consumed).
-
-### 4. Event loop
-
-Poll in a loop until `EVENT:SUBMITTED` appears. Between polls, sleep 3 seconds.
-
-```bash
-tail -n +$NEXT_LINE "$LOGFILE"
-```
-
-After reading, advance `NEXT_LINE` by the number of lines returned.
-
-**Logfile line format:**
-
-| Prefix | Meaning |
-|--------|---------|
-| `SESSION_ID:<id>` | Line 1 only — already consumed |
-| `EVENT:ANNOTATION_RESULT <json>` | User tapped "Request Update", OCR complete |
-| `EVENT:SUBMITTED <json>` | User submitted — exit the loop |
-| anything else | Ignore (trailing print_result output) |
 
 ---
 
-**On `EVENT:ANNOTATION_RESULT <json>`:**
+## Launch background watcher
 
-Strip the `EVENT:ANNOTATION_RESULT ` prefix to get the JSON. Structure:
+Spawn a **background Haiku agent** (`model: haiku`, `run_in_background: true`) with this task:
+
+> You are watching eink session `<SESSION_ID>`.
+>
+> Run:
+> ```bash
+> LOGFILE=$(mktemp /tmp/eink-events-XXXXX.log)
+> eink-review watch <SESSION_ID> --timeout 60 >"$LOGFILE" 2>/dev/null &
+> sleep 2
+> ```
+>
+> Then monitor `$LOGFILE` in a loop (poll every 3 seconds with `tail -n +$NEXT_LINE "$LOGFILE"`),
+> advancing `NEXT_LINE` after each read.
+>
+> **On `EVENT:ANNOTATION_RESULT <json>`:** Return immediately with the annotation JSON so the
+> main agent can rewrite the document. Your task is complete for this round — the main agent
+> will re-launch you for the next event.
+>
+> **On `EVENT:SUBMITTED <json>`:** Return immediately with the full submitted JSON result.
+>
+> **On timeout or error:** Return an error message.
+
+After launching the background watcher, tell the user the session is active and you are watching
+in the background. You are free to answer other questions while waiting.
+
+---
+
+## When the background watcher returns
+
+Inspect what it returned:
+
+### Case: annotation result
+
+The Haiku agent returned an `EVENT:ANNOTATION_RESULT` payload. Structure:
 
 ```json
 {
@@ -83,69 +98,52 @@ Strip the `EVENT:ANNOTATION_RESULT ` prefix to get the JSON. Structure:
           { "section_id": "section-background", "tag": "h2", "text": "Background" }
         ]
       }
-    },
-    {
-      "recognized_text": "wrong — fix",
-      "anchor": null
     }
   ]
 }
 ```
 
 Key fields:
-- `version` — which document version the user annotated
-- `annotations[].recognized_text` — OCR'd handwriting (may have errors; use judgement)
-- `annotations[].anchor.elements[].tag` — `h1`, `h2`, `p`, etc.
-- `annotations[].anchor.elements[].text` — nearby element text (use to locate the section)
-- `anchor: null` — annotation not near any element; treat as general comment
+- `annotations[].recognized_text` — OCR'd handwriting
+- `annotations[].anchor.elements[]` — nearby document elements (use to locate sections)
+- `anchor: null` — unanchored; treat as general comment
 
-**Each round is fresh**: annotations contain only the strokes currently on the tablet. The user may clear strokes between rounds. Do not re-apply feedback from previous rounds.
+**Each round is fresh** — annotations contain only current strokes. Do not re-apply previous round's feedback.
 
-Rewrite the document:
-- Apply feedback to the annotated sections (correct, expand, simplify, etc.)
-- Leave un-annotated sections unchanged
-- **Preserve heading text exactly** — heading IDs are derived from heading text and used for anchoring in subsequent rounds. Changing a heading breaks its anchor.
+Rewrite the document, applying feedback to annotated sections. Leave un-annotated sections unchanged.
+**Preserve heading text exactly** — IDs are derived from heading text and used for anchoring.
 
-Write updated content to `/tmp/eink-update-XXXXX.md`.
-
-Push the update (fast HTTP PUT — tablet reloads in ~25ms):
+Write updated content to `/tmp/eink-update-XXXXX.md`, then push the update:
 
 ```bash
 eink-review update <session-id> /tmp/eink-update-XXXXX.md
 ```
 
-Sleep 3 seconds, then poll again for the next event.
+Then **re-launch the background Haiku watcher** for the next event (same instructions as above).
 
----
+### Case: submitted result
 
-**On `EVENT:SUBMITTED <json>`:**
+The Haiku agent returned an `EVENT:SUBMITTED` payload. Parse `result.annotation_images[]` — use
+the **Read** tool to view each PNG. Summarize all feedback received and continue the conversation.
 
-Parse `result.annotation_images[]` — use the **Read** tool to view each PNG.
+### Case: error / timeout
 
-Break out of the event loop. Do not process any further lines.
-
-### 5. After all rounds
-
-Summarize all feedback received across rounds and continue the conversation informed by it.
-
-### 6. On failure
-
-- Exit 1 or timeout → report the error.
-- Connection refused → `systemctl --user start eink-serve`.
+Report the error. If connection refused: `systemctl --user start eink-serve`.
 
 ---
 
 ## Authoring Rich Review Documents
 
-**Always use colors and diagrams.** The Boox is a color e-ink tablet — take advantage of it. Plain prose is fine for text, but any architecture, plan, status breakdown, or relationship should be a colored graph or mindmap.
+**Always use colors and diagrams.** The Boox is a color e-ink tablet — plain prose is fine for
+text, but any architecture, plan, status breakdown, or relationship should be a colored graph or mindmap.
 
-The renderer supports normal Markdown plus three diagram types:
+The renderer supports normal Markdown plus:
 
 - `mermaid` for flowcharts, sequence diagrams, state machines
 - `mindmap` for plans, review branches, task decomposition
 - `graph` for component relationships, data flows, architecture maps
 
-### Color semantics — use these consistently
+### Color semantics — use consistently
 
 | Color | Meaning |
 |-------|---------|
@@ -156,7 +154,7 @@ The renderer supports normal Markdown plus three diagram types:
 | `purple` | Key decision or design point |
 | `slate` | Deprioritized, deferred, secondary |
 
-### `graph` — architecture and data flow
+### `graph` example
 
 ```graph
 layout:
@@ -177,7 +175,7 @@ edges:
     label: HTTPS
 ```
 
-### `mindmap` — plans and code review
+### `mindmap` example
 
 ```mindmap
 root: Fix Auth Bug
@@ -191,7 +189,7 @@ nodes:
         color: red
 ```
 
-### `mermaid` — flows and sequences
+### `mermaid` example
 
 ```mermaid
 sequenceDiagram
@@ -205,7 +203,7 @@ sequenceDiagram
 
 - Push to the Boox whenever the user needs to review a plan, architecture, or diff.
 - Prefer a graph or mindmap over a bullet list whenever structure or status matters.
-- Color every node intentionally — `red` for what needs attention, `green` for what's good.
+- Color every node intentionally.
 - The `eink-serve` systemd service must be running. Connection refused → `systemctl --user start eink-serve`.
-- Do NOT proceed with other work while waiting — the review is the user's input.
+- You are NOT blocked while waiting — the Haiku watcher runs in the background.
 - After all rounds complete, summarize all feedback and continue informed by it.
