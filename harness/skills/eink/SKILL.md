@@ -50,27 +50,22 @@ echo "SESSION_ID:$SESSION_ID"
 
 ## Launch background watcher
 
-Spawn a **background Haiku agent** (`model: haiku`, `run_in_background: true`) with this task:
+Run the following as a **background Bash command** (`run_in_background: true`):
 
-> You are watching eink session `<SESSION_ID>`.
->
-> Run:
-> ```bash
-> LOGFILE=$(mktemp /tmp/eink-events-XXXXX.log)
-> eink-review watch <SESSION_ID> --timeout 60 >"$LOGFILE" 2>/dev/null &
-> sleep 2
-> ```
->
-> Then monitor `$LOGFILE` in a loop (poll every 3 seconds with `tail -n +$NEXT_LINE "$LOGFILE"`),
-> advancing `NEXT_LINE` after each read.
->
-> **On `EVENT:ANNOTATION_RESULT <json>`:** Return immediately with the annotation JSON so the
-> main agent can rewrite the document. Your task is complete for this round — the main agent
-> will re-launch you for the next event.
->
-> **On `EVENT:SUBMITTED <json>`:** Return immediately with the full submitted JSON result.
->
-> **On timeout or error:** Return an error message.
+```bash
+eink-review watch <SESSION_ID> --timeout 60 2>/dev/null | while IFS= read -r line; do
+  case "$line" in
+    EVENT:ANNOTATION_RESULT*|EVENT:SUBMITTED*)
+      echo "$line"
+      exit 0
+      ;;
+  esac
+done
+echo "EVENT:TIMEOUT"
+```
+
+This exits as soon as the first relevant event arrives and prints it to stdout.
+No LLM is involved — the Bash tool notifies the main agent when the command completes.
 
 After launching the background watcher, tell the user the session is active and you are watching
 in the background. You are free to answer other questions while waiting.
@@ -79,11 +74,11 @@ in the background. You are free to answer other questions while waiting.
 
 ## When the background watcher returns
 
-Inspect what it returned:
+The background Bash command prints one line to stdout. Inspect it:
 
 ### Case: annotation result
 
-The Haiku agent returned an `EVENT:ANNOTATION_RESULT` payload. Structure:
+The output starts with `EVENT:ANNOTATION_RESULT`. The JSON follows after the prefix. Structure:
 
 ```json
 {
@@ -119,16 +114,16 @@ Write updated content to `/tmp/eink-update-XXXXX.md`, then push the update:
 eink-review update <session-id> /tmp/eink-update-XXXXX.md
 ```
 
-Then **re-launch the background Haiku watcher** for the next event (same instructions as above).
+Then **re-launch the background Bash watcher** for the next event (same command as above).
 
 ### Case: submitted result
 
-The Haiku agent returned an `EVENT:SUBMITTED` payload. Parse `result.annotation_images[]` — use
+The output starts with `EVENT:SUBMITTED`. Parse `result.annotation_images[]` — use
 the **Read** tool to view each PNG. Summarize all feedback received and continue the conversation.
 
-### Case: error / timeout
+### Case: timeout / error
 
-Report the error. If connection refused: `systemctl --user start eink-serve`.
+Output is `EVENT:TIMEOUT` or empty. Report the error. If connection refused: `systemctl --user start eink-serve`.
 
 ---
 
