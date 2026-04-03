@@ -553,6 +553,7 @@ class MainActivity : AppCompatActivity() {
                 contextBar.visibility = if (groupId != null && selectModeActive) View.VISIBLE else View.GONE
             }
         }
+        overlay.onSelectModeExitRequested = { runOnUiThread { if (selectModeActive) exitSelectMode() } }
         val savedBindGroups = sessionRepo.loadBindGroups(sessionId)
         if (savedBindGroups.isNotEmpty()) overlay.loadBindGroups(savedBindGroups)
         val savedOcrResults = sessionRepo.loadOcrResults(sessionId)

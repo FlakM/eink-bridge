@@ -369,6 +369,7 @@ internal class PenOverlay(
                                     selectedLabel = null; dragLabel = null
                                     dragGroupId = null; dragClusterIdx = null
                                     onGroupSelectionChanged?.invoke(null)
+                                    onSelectModeExitRequested?.invoke()
                                 }
                             }
                         }
@@ -708,6 +709,8 @@ internal class PenOverlay(
     var onOcrResultsChanged: ((List<OcrResult>) -> Unit)? = null
     /** Called with the selected group id when a group is tapped in select mode, null when deselected. */
     var onGroupSelectionChanged: ((groupId: Int?) -> Unit)? = null
+    /** Called when the user taps empty space in select mode — host should exit the mode. */
+    var onSelectModeExitRequested: (() -> Unit)? = null
 
     // Select / move mode
     private var isSelectMode = false
