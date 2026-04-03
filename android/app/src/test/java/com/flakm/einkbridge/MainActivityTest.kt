@@ -179,4 +179,67 @@ class MainActivityTest {
             assertNotNull("Clear must show a confirmation dialog", dialog)
         }
     }
+
+    // ── Draw controls visibility ───────────────────────────────────────────────
+
+    @Test
+    fun drawControls_visibleByDefault() {
+        scenario.onActivity { activity ->
+            val dc = activity.findViewById<View>(R.id.drawControls)
+            assertEquals(View.VISIBLE, dc.visibility)
+        }
+    }
+
+    @Test
+    fun drawControls_hiddenInBindMode() {
+        scenario.onActivity { activity ->
+            activity.enterBindMode()
+            val dc = activity.findViewById<View>(R.id.drawControls)
+            assertEquals("drawControls must be GONE in bind mode", View.GONE, dc.visibility)
+        }
+    }
+
+    @Test
+    fun drawControls_restoredAfterExitBindMode() {
+        scenario.onActivity { activity ->
+            activity.enterBindMode()
+            activity.exitBindMode()
+            val dc = activity.findViewById<View>(R.id.drawControls)
+            assertEquals("drawControls must return to VISIBLE after exiting bind mode", View.VISIBLE, dc.visibility)
+        }
+    }
+
+    // ── Tag mode toggle ────────────────────────────────────────────────────────
+
+    @Test
+    fun btnLink_isToggle_entersThenExitsBindMode() {
+        scenario.onActivity { activity ->
+            val btn = activity.findViewById<android.widget.Button>(R.id.btnLink)
+            assertFalse(activity.bindModeActive)
+            btn.performClick()
+            assertTrue("First click must enter bind mode", activity.bindModeActive)
+            btn.performClick()
+            assertFalse("Second click must exit bind mode", activity.bindModeActive)
+        }
+    }
+
+    // ── Context bar ───────────────────────────────────────────────────────────
+
+    @Test
+    fun contextBar_goneByDefault() {
+        scenario.onActivity { activity ->
+            val bar = activity.findViewById<View>(R.id.contextBar)
+            assertEquals(View.GONE, bar.visibility)
+        }
+    }
+
+    @Test
+    fun contextBar_hiddenWhenExitingSelectMode() {
+        scenario.onActivity { activity ->
+            activity.enterSelectMode()
+            activity.exitSelectMode()
+            val bar = activity.findViewById<View>(R.id.contextBar)
+            assertEquals("contextBar must be GONE after exiting select mode", View.GONE, bar.visibility)
+        }
+    }
 }

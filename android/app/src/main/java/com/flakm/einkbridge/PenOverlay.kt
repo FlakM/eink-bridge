@@ -52,7 +52,7 @@ internal fun rawDrawingAction(
 internal class OnyxPenController(
     private val buf: StrokeBuffer,
     private val getTransform: () -> ViewTransform,
-    private val onEraseApplied: () -> Unit = {},
+    private val onEraseApplied: (Set<Int>) -> Unit = {},
     internal var onStrokeProgress: (() -> Unit)? = null,
     private val onStrokeCommitted: (() -> Unit)? = null,
 ) : PenInputController {
@@ -82,9 +82,9 @@ internal class OnyxPenController(
         override fun onEndRawDrawing(b: Boolean, tp: TouchPoint) {
             if (eraseMode) {
                 eraserPath.add(tp.x to tp.y)
-                buf.erase(eraserPath, ERASER_RADIUS, getTransform())
+                val removed = buf.erase(eraserPath, ERASER_RADIUS, getTransform())
                 eraserPath.clear()
-                onEraseApplied()
+                onEraseApplied(removed)
             } else {
                 buf.commit()
                 onStrokeProgress?.invoke()
@@ -113,9 +113,9 @@ internal class OnyxPenController(
         override fun onRawErasingTouchPointListReceived(list: TouchPointList) {}
         override fun onEndRawErasing(b: Boolean, tp: TouchPoint) {
             eraserPath.add(tp.x to tp.y)
-            buf.erase(eraserPath, ERASER_RADIUS, getTransform())
+            val removed = buf.erase(eraserPath, ERASER_RADIUS, getTransform())
             eraserPath.clear()
-            onEraseApplied()
+            onEraseApplied(removed)
             val helper = touchHelper ?: return
             helper.setRawDrawingEnabled(false)
             penViewRef?.get()?.postDelayed({ helper.setRawDrawingEnabled(true) }, 50)
@@ -182,14 +182,42 @@ internal class PenOverlay(
     private val onStrokesChanged: (() -> Unit)? = null,
     internal var ocrManager: OcrManager? = null,
 ) {
+    private val bridge = WebViewBridge(webView)
     private val controller: PenInputController by lazy {
-        val c = controllerOverride ?: OnyxPenController(buf, ::currentTransform, onEraseApplied = {
+        val c = controllerOverride ?: OnyxPenController(buf, ::currentTransform, onEraseApplied = { removedIndices ->
+            if (removedIndices.isNotEmpty()) {
+                _bindGroups.removeAll { bg -> bg.strokeIndices.all { it in removedIndices } }
+                _bindGroups.replaceAll { bg ->
+                    val newIndices = bg.strokeIndices.mapNotNullTo(mutableSetOf()) { idx ->
+                        if (idx in removedIndices) null
+                        else idx - removedIndices.count { it < idx }
+                    }
+                    val strokesRemoved = newIndices.size < bg.strokeIndices.size
+                    bg.copy(
+                        strokeIndices = newIndices,
+                        recognizedText = if (strokesRemoved) null else bg.recognizedText,
+                    )
+                }
+                // Drop OCR results that had any strokes erased — text is now stale.
+                ocrResults.removeAll { r -> r.strokeIndices.any { it in removedIndices } }
+                val reindexed = ocrResults.map { r ->
+                    r.copy(strokeIndices = r.strokeIndices.mapTo(mutableSetOf()) { idx ->
+                        idx - removedIndices.count { it < idx }
+                    })
+                }
+                ocrResults.clear()
+                ocrResults.addAll(reindexed)
+            }
             undoStack.clear()
             notifyStrokeView()
             controller.resetRenderBuffer()
             onStrokesChanged?.invoke()
+            onBindGroupsChanged?.invoke()
+            onOcrResultsChanged?.invoke(ocrResults.toList())
             webView.post { refreshStrokeLinks() }
+            scheduleOcr()
         }, onStrokeProgress = { notifyStrokeViewLive() }, onStrokeCommitted = {
+            lastStrokeEndMs = System.currentTimeMillis()
             undoStack.add(UndoAction.StrokeAdded(buf.size - 1))
             onStrokesChanged?.invoke()
             webView.post { refreshStrokeLinks() }
@@ -202,6 +230,7 @@ internal class PenOverlay(
     }
     private var initialized = false
     private val ocrResults = mutableListOf<OcrResult>()
+    private var lastStrokeEndMs = 0L
 
     var annotationMode = false
         set(value) {
@@ -326,6 +355,7 @@ internal class PenOverlay(
                                     dragStartX = event.x; dragStartY = event.y
                                     dragBaseDocX = groupStrokeOffsets[groupHit]?.first ?: 0f
                                     dragBaseDocY = groupStrokeOffsets[groupHit]?.second ?: 0f
+                                    onGroupSelectionChanged?.invoke(groupHit)
                                 }
                                 clusterHit != null -> {
                                     selectedLabel = LabelId.Cluster(clusterHit)
@@ -333,10 +363,12 @@ internal class PenOverlay(
                                     dragStartX = event.x; dragStartY = event.y
                                     dragBaseDocX = clusterStrokeOffsets[clusterHit]?.first ?: 0f
                                     dragBaseDocY = clusterStrokeOffsets[clusterHit]?.second ?: 0f
+                                    onGroupSelectionChanged?.invoke(null)
                                 }
                                 else -> {
                                     selectedLabel = null; dragLabel = null
                                     dragGroupId = null; dragClusterIdx = null
+                                    onGroupSelectionChanged?.invoke(null)
                                 }
                             }
                         }
@@ -370,34 +402,22 @@ internal class PenOverlay(
                 }
                 isBindMode && event.pointerCount == 1 -> when (event.actionMasked) {
                     MotionEvent.ACTION_DOWN -> {
-                        val pts = mutableListOf(PointF(event.x, event.y))
-                        bindPoints = pts
+                        val pts = bindHandler.onDown(event.x, event.y)
                         strokeView?.setBindPath(pts)
                         strokeView?.bindDrawingActive = true
                         strokeView?.invalidate()
-                        webView.evaluateJavascript("window.__einkHighlightAll && window.__einkHighlightAll()", null)
+                        bridge.highlightAll()
                     }
                     MotionEvent.ACTION_MOVE -> {
-                        bindPoints?.add(PointF(event.x, event.y))
-                        strokeView?.setBindPath(bindPoints)
+                        bindHandler.onMove(event.x, event.y)
+                        strokeView?.setBindPath(bindHandler.currentPoints())
                     }
                     MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                        val pts = bindPoints ?: emptyList<PointF>()
-                        bindPoints = null
                         strokeView?.setBindPath(null)
                         strokeView?.bindDrawingActive = false
                         strokeView?.invalidate()
-                        webView.evaluateJavascript("window.__einkUnhighlightAll && window.__einkUnhighlightAll()", null)
-                        val moved = pts.size > 1 && run {
-                            val dx = pts.last().x - pts.first().x
-                            val dy = pts.last().y - pts.first().y
-                            dx * dx + dy * dy > TAP_THRESHOLD_PX2
-                        }
-                        if (moved && event.actionMasked == MotionEvent.ACTION_UP) {
-                            completeBindGesture(pts)
-                        } else {
-                            flashMarkerNear(event.x, event.y)
-                        }
+                        bridge.unhighlightAll()
+                        bindHandler.onUp(event.x, event.y, event.actionMasked == MotionEvent.ACTION_CANCEL)
                     }
                 }
                 !isBindMode && !isSelectMode && event.actionMasked == MotionEvent.ACTION_UP -> {
@@ -406,8 +426,10 @@ internal class PenOverlay(
                 event.actionMasked == MotionEvent.ACTION_MOVE && event.pointerCount >= 2 ->
                     strokeView?.updateTransform(currentTransform())
             }
-            // In select mode with a single finger always consume to prevent WebView scroll
-            result || (isSelectMode && event.pointerCount == 1)
+            // Block scroll briefly after a stroke ends to absorb residual touch events.
+            val scrollBlocked = !isBindMode && !isSelectMode &&
+                System.currentTimeMillis() - lastStrokeEndMs < SCROLL_BLOCK_MS
+            result || scrollBlocked || (isSelectMode && event.pointerCount == 1)
         }
         webView.setOnTouchListener(wrappedListener)
     }
@@ -499,14 +521,12 @@ internal class PenOverlay(
         notifyStrokeView()
         controller.resetRenderBuffer()
         onStrokesChanged?.invoke()
-        webView.post {
-            webView.evaluateJavascript("window.__einkComputeStrokeLinks && window.__einkComputeStrokeLinks([],[])", null)
-        }
+        bridge.computeStrokeLinks()
     }
 
     private fun notifyStrokeView() {
         strokeView?.update(
-            buf.strokes, currentTransform(), _bindGroups, bindPoints?.toList(),
+            buf.strokes, currentTransform(), _bindGroups, bindHandler.currentPoints(),
             ocrResults.toList(), annotationMode,
             groupLabelOffsets.toMap(), clusterLabelOffsets.toMap(),
             selectedLabel,
@@ -526,7 +546,6 @@ internal class PenOverlay(
 
     fun exitBindMode() {
         isBindMode = false
-        bindPoints = null
         strokeView?.setBindPath(null)
         controller.resetRenderBuffer()
     }
@@ -540,85 +559,66 @@ internal class PenOverlay(
         isSelectMode = false
         dragLabel = null; dragGroupId = null; dragClusterIdx = null
         selectedLabel = null
+        onGroupSelectionChanged?.invoke(null)
         controller.resetRenderBuffer()
         notifyStrokeView()
     }
 
-    private fun completeBindGesture(pts: List<PointF>) {
-        val t = currentTransform()
-        val docPolygon = pts.map { t.screenToDocX(it.x) to t.screenToDocY(it.y) }
-        val docXs = docPolygon.map { it.first }
-        val docYs = docPolygon.map { it.second }
-        val left = docXs.min()
-        val top = docYs.min()
-        val right = docXs.max()
-        val bottom = docYs.max()
-
-        val strokeIndices = mutableSetOf<Int>()
-        buf.strokes.forEachIndexed { idx, stroke ->
-            val (cx, cy) = strokeCentroid(stroke)
-            val captured = pointInPolygon(cx, cy, docPolygon)
-                || stroke.points.any { (px, py) -> pointInPolygon(px, py, docPolygon) }
-            if (captured) strokeIndices.add(idx)
-        }
-
-        webView.evaluateJavascript("window.__einkFindElements($left, $top, $right, $bottom)") { raw ->
-            val elements = parseFoundElements(raw)
-            val markerX = docXs.average().toFloat()
-            val markerY = docYs.average().toFloat()
-            if (strokeIndices.isNotEmpty() || elements.isNotEmpty()) {
-                val color = nextGroupColor()
-                val centers = strokeIndices.mapNotNull { idx ->
-                    buf.strokes.getOrNull(idx)?.let { strokeCentroid(it) }
-                }
-                val elementCenters = elements.map { it.cx to it.cy }
-                val allCenters = centers + elementCenters
-                val midX = if (allCenters.isNotEmpty()) allCenters.map { it.first }.average().toFloat() else markerX
-                val midY = if (allCenters.isNotEmpty()) allCenters.map { it.second }.average().toFloat() else markerY
-                val groupId = nextGroupId++
-                _bindGroups.add(BindGroup(
-                    id = groupId,
-                    color = color,
-                    strokeIndices = strokeIndices,
-                    elementIndices = elements.map { it.i },
-                    elementRefs = elements.map { ElementRef(it.section ?: it.id, it.tag, it.text) },
-                    markerDocX = midX,
-                    markerDocY = midY,
-                    strokeDocCenters = centers,
-                    elementDocCenters = elementCenters,
-                ))
-                @Suppress("DEPRECATION")
-                (webView.context.getSystemService(android.content.Context.VIBRATOR_SERVICE) as? android.os.Vibrator)?.vibrate(50)
-                undoStack.add(UndoAction.BindGroupAdded(groupId))
-                notifyStrokeView()
-                syncBindGroupsToWebView()
-                expandGroup(_bindGroups.last())
-            } else {
-                notifyStrokeView()
-            }
-            onBindGroupsChanged?.invoke()
-            onBindComplete?.invoke()
-        }
+    fun scheduleReOcr(groupId: Int) {
+        val idx = _bindGroups.indexOfFirst { it.id == groupId }
+        if (idx < 0) return
+        _bindGroups[idx] = _bindGroups[idx].copy(recognizedText = null)
+        notifyStrokeView()
+        scheduleOcr()
     }
 
-    private fun parseFoundElements(raw: String?): List<FoundElement> {
-        val cleaned = raw?.trim()?.removeSurrounding("\"")
-            ?.replace("\\\"", "\"")?.replace("\\\\", "\\") ?: "[]"
-        return try {
-            val arr = org.json.JSONArray(cleaned)
-            (0 until arr.length()).map {
-                val obj = arr.getJSONObject(it)
-                FoundElement(
-                    i = obj.getInt("i"),
-                    tag = obj.getString("tag"),
-                    id = obj.optString("id", null),
-                    section = obj.optString("section", null),
-                    text = obj.optString("text", ""),
-                    cx = obj.optDouble("cx", 0.0).toFloat(),
-                    cy = obj.optDouble("cy", 0.0).toFloat(),
-                )
+    private val bindHandler: BindGestureHandler by lazy {
+        BindGestureHandler(
+            buf = buf,
+            getTransform = ::currentTransform,
+            elementLookup = bridge.asElementLookup(),
+            onGestureComplete = { result -> completeBindGestureResult(result) },
+            onTap = { screenX, screenY -> flashMarkerNear(screenX, screenY) },
+        )
+    }
+
+    private fun completeBindGestureResult(result: BindGestureResult) {
+        val docXs = result.docPolygon.map { it.first }
+        val docYs = result.docPolygon.map { it.second }
+        val markerX = docXs.average().toFloat()
+        val markerY = docYs.average().toFloat()
+        if (result.strokeIndices.isNotEmpty() || result.elements.isNotEmpty()) {
+            val color = nextGroupColor()
+            val centers = result.strokeIndices.mapNotNull { idx ->
+                buf.strokes.getOrNull(idx)?.let { strokeCentroid(it) }
             }
-        } catch (_: Exception) { emptyList<FoundElement>() }
+            val elementCenters = result.elements.map { it.cx to it.cy }
+            val allCenters = centers + elementCenters
+            val midX = if (allCenters.isNotEmpty()) allCenters.map { it.first }.average().toFloat() else markerX
+            val midY = if (allCenters.isNotEmpty()) allCenters.map { it.second }.average().toFloat() else markerY
+            val groupId = nextGroupId++
+            _bindGroups.add(BindGroup(
+                id = groupId,
+                color = color,
+                strokeIndices = result.strokeIndices,
+                elementIndices = result.elements.map { it.i },
+                elementRefs = result.elements.map { ElementRef(it.section ?: it.id, it.tag, it.text) },
+                markerDocX = midX,
+                markerDocY = midY,
+                strokeDocCenters = centers,
+                elementDocCenters = elementCenters,
+            ))
+            @Suppress("DEPRECATION")
+            (webView.context.getSystemService(android.content.Context.VIBRATOR_SERVICE) as? android.os.Vibrator)?.vibrate(50)
+            undoStack.add(UndoAction.BindGroupAdded(groupId))
+            notifyStrokeView()
+            syncBindGroupsToWebView()
+            expandGroup(_bindGroups.last())
+        } else {
+            notifyStrokeView()
+        }
+        onBindGroupsChanged?.invoke()
+        onBindComplete?.invoke()
     }
 
     var onDeleteBindGroup: ((BindGroup) -> Unit)? = null
@@ -675,9 +675,7 @@ internal class PenOverlay(
 
     private fun expandGroup(group: BindGroup) {
         strokeView?.showGroup(group.id)
-        val colorHex = "#%06X".format(group.color and 0xFFFFFF)
-        val indicesJson = org.json.JSONArray(group.elementIndices).toString()
-        webView.evaluateJavascript("window.__einkFlashGroup($indicesJson, '$colorHex')", null)
+        bridge.flashGroup(group.elementIndices, group.color)
     }
 
     fun removeBindGroup(groupId: Int) {
@@ -704,11 +702,12 @@ internal class PenOverlay(
     val bindGroups: List<BindGroup> get() = _bindGroups
     private val undoStack = mutableListOf<UndoAction>()
     private var isBindMode = false
-    private var bindPoints: MutableList<PointF>? = null
     private var nextGroupId = 0
     var onBindComplete: (() -> Unit)? = null
     var onBindGroupsChanged: (() -> Unit)? = null
     var onOcrResultsChanged: ((List<OcrResult>) -> Unit)? = null
+    /** Called with the selected group id when a group is tapped in select mode, null when deselected. */
+    var onGroupSelectionChanged: ((groupId: Int?) -> Unit)? = null
 
     // Select / move mode
     private var isSelectMode = false
@@ -740,16 +739,7 @@ internal class PenOverlay(
     }
 
     fun queryElementMap(callback: (List<ElementEntry>) -> Unit) {
-        webView.evaluateJavascript("JSON.stringify(window.__einkElementMap || [])") { json ->
-            val cleaned = json?.trim()?.removeSurrounding("\"")
-                ?.replace("\\\"", "\"")
-                ?.replace("\\\\", "\\") ?: "[]"
-            try {
-                callback(parseElementMap(cleaned))
-            } catch (_: Exception) {
-                callback(emptyList())
-            }
-        }
+        bridge.queryElementMap(callback)
     }
 
     fun clearBindGroups() {
@@ -761,29 +751,11 @@ internal class PenOverlay(
     }
 
     fun refreshStrokeLinks() {
-        webView.post {
-            webView.evaluateJavascript("window.__einkComputeStrokeLinks && window.__einkComputeStrokeLinks([],[])", null)
-        }
+        bridge.computeStrokeLinks()
     }
 
     private fun syncBindGroupsToWebView() {
-        if (_bindGroups.isEmpty()) {
-            webView.post {
-                webView.evaluateJavascript("window.__einkApplyBindGroups && window.__einkApplyBindGroups([])", null)
-            }
-            return
-        }
-        val groupsJson = org.json.JSONArray().apply {
-            for (g in _bindGroups) {
-                put(org.json.JSONObject().apply {
-                    put("color", "#%06X".format(g.color and 0xFFFFFF))
-                    put("indices", org.json.JSONArray(g.elementIndices))
-                })
-            }
-        }
-        webView.post {
-            webView.evaluateJavascript("window.__einkApplyBindGroups && window.__einkApplyBindGroups($groupsJson)", null)
-        }
+        bridge.applyBindGroups(_bindGroups)
     }
 
     fun exportToPng(): ByteArray? {
@@ -829,7 +801,7 @@ internal class PenOverlay(
     }
 
     companion object {
-        private const val TAP_THRESHOLD_PX2 = 30f * 30f
+        private const val SCROLL_BLOCK_MS = 500L
         private val GROUP_PALETTE = intArrayOf(
             0xFFe74c3c.toInt(), 0xFF2196f3.toInt(), 0xFF4caf50.toInt(),
             0xFFff9800.toInt(), 0xFF9c27b0.toInt(), 0xFF009688.toInt(),

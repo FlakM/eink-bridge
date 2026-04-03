@@ -61,6 +61,9 @@ class MainActivity : AppCompatActivity() {
     private var currentSessionId: String? = null
     private var inactivityJob: Job? = null
     private var wsInSleep = false
+    private lateinit var drawControls: android.widget.LinearLayout
+    private lateinit var contextBar: android.widget.LinearLayout
+    private var currentContextGroupId: Int? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -253,6 +256,8 @@ class MainActivity : AppCompatActivity() {
 
     @SuppressLint("ClickableViewAccessibility")
     private fun setupPenToolbar() {
+        drawControls = findViewById(R.id.drawControls)
+        contextBar = findViewById(R.id.contextBar)
         strokeSlider = findViewById(R.id.strokeSlider)
         val btnPencil = findViewById<Button>(R.id.btnPencil)
         val btnBrush = findViewById<Button>(R.id.btnBrush)
@@ -307,20 +312,49 @@ class MainActivity : AppCompatActivity() {
                 .setNegativeButton("Cancel", null)
                 .show()
         }
-        btnLink.setOnClickListener { enterBindMode() }
+        btnLink.setOnClickListener {
+            if (bindModeActive) exitBindMode() else enterBindMode()
+        }
         btnColor.setOnClickListener { showColorPicker() }
         btnAnnotations.setOnClickListener {
             annotationModeActive = !annotationModeActive
             btnAnnotations.alpha = if (annotationModeActive) 1.0f else 0.35f
-            btnAnnotations.textSize = if (annotationModeActive) 42f else 34f
+            btnAnnotations.textSize = if (annotationModeActive) 30f else 26f
             findViewById<View>(R.id.dotAnnotations).visibility =
                 if (annotationModeActive) View.VISIBLE else View.GONE
             penOverlay?.annotationMode = annotationModeActive
+        }
+        findViewById<Button>(R.id.btnReOcr).setOnClickListener {
+            val groupId = currentContextGroupId ?: return@setOnClickListener
+            penOverlay?.scheduleReOcr(groupId)
+        }
+        findViewById<Button>(R.id.btnRemoveGroup).setOnClickListener {
+            val groupId = currentContextGroupId ?: return@setOnClickListener
+            val group = penOverlay?.bindGroups?.find { it.id == groupId } ?: return@setOnClickListener
+            penOverlay?.onDeleteBindGroup?.invoke(group)
         }
         findViewById<Button>(R.id.btnSubmit).setOnClickListener { submitAndGoBack() }
         findViewById<Button>(R.id.btnRequestUpdate).setOnClickListener { requestUpdate() }
 
         selectStyle(0)
+    }
+
+    private fun setModeButtonActive(btn: Button, dotId: Int, active: Boolean) {
+        if (active) {
+            btn.background = android.graphics.drawable.GradientDrawable().apply {
+                shape = android.graphics.drawable.GradientDrawable.RECTANGLE
+                cornerRadius = resources.displayMetrics.density * 8
+                setColor(Color.parseColor("#222222"))
+            }
+            btn.setTextColor(Color.WHITE)
+            btn.alpha = 1.0f
+        } else {
+            btn.setBackgroundColor(Color.TRANSPARENT)
+            btn.setTextColor(Color.BLACK)
+            btn.alpha = 0.5f
+        }
+        btn.textSize = if (active) 36f else 32f
+        findViewById<View>(dotId).visibility = if (active) View.VISIBLE else View.GONE
     }
 
     private fun selectStyle(idx: Int) {
@@ -338,12 +372,11 @@ class MainActivity : AppCompatActivity() {
     internal fun enterBindMode() {
         if (selectModeActive) exitSelectMode()
         bindModeActive = true
-        btnLink.alpha = 1.0f
-        btnLink.textSize = 42f
-        findViewById<View>(R.id.dotLink).visibility = View.VISIBLE
+        setModeButtonActive(btnLink, R.id.dotLink, true)
+        drawControls.visibility = View.GONE
+        contextBar.visibility = View.GONE
         styleDotIds.forEach { findViewById<View>(it).visibility = View.GONE }
         styleButtons.forEach { it.isEnabled = false; it.alpha = 0.2f }
-        strokeSlider.isEnabled = false
         val overlay = penOverlay ?: return
         overlay.onBindComplete = { exitBindMode() }
         overlay.enterBindMode()
@@ -351,35 +384,33 @@ class MainActivity : AppCompatActivity() {
 
     internal fun exitBindMode() {
         bindModeActive = false
-        btnLink.alpha = 0.35f
-        btnLink.textSize = 34f
-        findViewById<View>(R.id.dotLink).visibility = View.GONE
+        setModeButtonActive(btnLink, R.id.dotLink, false)
+        drawControls.visibility = View.VISIBLE
         styleButtons.forEach { it.isEnabled = true }
         selectStyle(selectedStyleIndex)
-        strokeSlider.isEnabled = true
         penOverlay?.exitBindMode()
     }
 
-    private fun enterSelectMode() {
+    internal fun enterSelectMode() {
         if (bindModeActive) exitBindMode()
         selectModeActive = true
-        btnSelect.alpha = 1.0f
-        btnSelect.textSize = 42f
-        findViewById<View>(R.id.dotSelect).visibility = View.VISIBLE
+        setModeButtonActive(btnSelect, R.id.dotSelect, true)
+        drawControls.visibility = View.GONE
+        contextBar.visibility = View.GONE
+        currentContextGroupId = null
         styleDotIds.forEach { findViewById<View>(it).visibility = View.GONE }
         styleButtons.forEach { it.isEnabled = false; it.alpha = 0.2f }
-        strokeSlider.isEnabled = false
         penOverlay?.enterSelectMode()
     }
 
-    private fun exitSelectMode() {
+    internal fun exitSelectMode() {
         selectModeActive = false
-        btnSelect.alpha = 0.35f
-        btnSelect.textSize = 34f
-        findViewById<View>(R.id.dotSelect).visibility = View.GONE
+        setModeButtonActive(btnSelect, R.id.dotSelect, false)
+        drawControls.visibility = View.VISIBLE
+        contextBar.visibility = View.GONE
+        currentContextGroupId = null
         styleButtons.forEach { it.isEnabled = true }
         selectStyle(selectedStyleIndex)
-        strokeSlider.isEnabled = true
         penOverlay?.exitSelectMode()
     }
 
@@ -438,15 +469,21 @@ class MainActivity : AppCompatActivity() {
         penOverlay = null
         annotationModeActive = false
         btnAnnotations.alpha = 0.35f
-        btnAnnotations.textSize = 34f
+        btnAnnotations.textSize = 26f
         findViewById<View>(R.id.dotAnnotations).visibility = View.GONE
+        currentContextGroupId = null
+        contextBar.visibility = View.GONE
+        if (bindModeActive) {
+            bindModeActive = false
+            setModeButtonActive(btnLink, R.id.dotLink, false)
+            drawControls.visibility = View.VISIBLE
+            styleButtons.forEach { it.isEnabled = true }
+        }
         if (selectModeActive) {
             selectModeActive = false
-            btnSelect.alpha = 0.35f
-            btnSelect.textSize = 34f
-            findViewById<View>(R.id.dotSelect).visibility = View.GONE
+            setModeButtonActive(btnSelect, R.id.dotSelect, false)
+            drawControls.visibility = View.VISIBLE
             styleButtons.forEach { it.isEnabled = true }
-            strokeSlider.isEnabled = true
         }
         wsClient?.disconnect()
         loadedVersion = 0
@@ -510,6 +547,12 @@ class MainActivity : AppCompatActivity() {
                 .setNegativeButton("Cancel", null)
                 .show()
         }
+        overlay.onGroupSelectionChanged = { groupId ->
+            runOnUiThread {
+                currentContextGroupId = groupId
+                contextBar.visibility = if (groupId != null && selectModeActive) View.VISIBLE else View.GONE
+            }
+        }
         val savedBindGroups = sessionRepo.loadBindGroups(sessionId)
         if (savedBindGroups.isNotEmpty()) overlay.loadBindGroups(savedBindGroups)
         val savedOcrResults = sessionRepo.loadOcrResults(sessionId)
@@ -532,6 +575,7 @@ class MainActivity : AppCompatActivity() {
         inactivityJob?.cancel()
         inactivityJob = null
         wsInSleep = false
+        currentContextGroupId = null
         penOverlay?.disableDrawing()
         penOverlay?.destroy()
         penOverlay = null
