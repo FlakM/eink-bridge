@@ -38,6 +38,9 @@ enum Command {
         /// Interactive mode: stay connected via WebSocket, emit structured events
         #[arg(long)]
         interactive: bool,
+        /// Webhook URL to POST annotation_result and submitted events to
+        #[arg(long)]
+        callback_url: Option<String>,
     },
     /// Push updated content to an existing session (interactive mode)
     Update {
@@ -62,8 +65,13 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Cancel a session
+    /// Cancel an active session (keeps it in history as Cancelled)
     Cancel {
+        /// Session ID
+        id: String,
+    },
+    /// Permanently remove a session (any status) from disk
+    Remove {
         /// Session ID
         id: String,
     },
@@ -86,6 +94,7 @@ async fn main() {
         Command::Watch { .. } => "watch",
         Command::Result { .. } => "result",
         Command::Cancel { .. } => "cancel",
+        Command::Remove { .. } => "remove",
         Command::List { .. } => "list",
     };
 
@@ -98,6 +107,7 @@ async fn main() {
             non_blocking,
             json,
             interactive,
+            callback_url,
         } => {
             cmd_push(
                 &client,
@@ -108,6 +118,7 @@ async fn main() {
                 non_blocking,
                 json,
                 interactive,
+                callback_url,
             )
             .await
         }
@@ -115,6 +126,7 @@ async fn main() {
         Command::Watch { id, timeout } => cmd_push_interactive(&cli.server, &id, timeout).await,
         Command::Result { id, json } => cmd_result(&client, &cli.server, &id, json).await,
         Command::Cancel { id } => cmd_cancel(&client, &cli.server, &id).await,
+        Command::Remove { id } => cmd_remove(&client, &cli.server, &id).await,
         Command::List { status } => cmd_list(&client, &cli.server, status).await,
     };
 
@@ -165,6 +177,7 @@ async fn cmd_push(
     non_blocking: bool,
     json_output: bool,
     interactive: bool,
+    callback_url: Option<String>,
 ) -> anyhow::Result<()> {
     let content = if file == "-" {
         let mut buf = String::new();
@@ -182,6 +195,7 @@ async fn cmd_push(
             "schema_version": SCHEMA_VERSION,
             "title": title,
             "content": content,
+            "callback_url": callback_url,
         }))
         .send()
         .await?;
@@ -426,6 +440,22 @@ async fn cmd_cancel(client: &Client, server: &str, id: &str) -> anyhow::Result<(
         Ok(())
     } else {
         anyhow::bail!("failed to cancel: {}", resp.status())
+    }
+}
+
+async fn cmd_remove(client: &Client, server: &str, id: &str) -> anyhow::Result<()> {
+    let resp = client
+        .delete(format!("{server}/api/sessions/{id}"))
+        .send()
+        .await?;
+
+    match resp.status().as_u16() {
+        200 => {
+            eprintln!("session {id} removed");
+            Ok(())
+        }
+        404 => anyhow::bail!("session {id} not found"),
+        s => anyhow::bail!("failed to remove: {s}"),
     }
 }
 

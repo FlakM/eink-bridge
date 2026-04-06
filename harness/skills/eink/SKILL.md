@@ -28,7 +28,16 @@ Push content to the Boox for reading and annotation. Supports iterative rounds: 
    ```
    Pick the first ID from the output. If none, tell the user there are no active sessions.
 
-2. Skip to **"Launch background watcher"** below with that session ID.
+2. For `continue`, the callback_url cannot be added retroactively. Use the watch fallback:
+   ```bash
+   eink-review watch <SESSION_ID> --timeout 1800 2>/dev/null | while IFS= read -r line; do
+     case "$line" in
+       EVENT:ANNOTATION_RESULT*|EVENT:SUBMITTED*) echo "$line"; exit 0 ;;
+     esac
+   done
+   echo "EVENT:TIMEOUT"
+   ```
+   Launch this as a **background Bash command** and proceed as normal.
 
 ---
 
@@ -39,46 +48,62 @@ Push content to the Boox for reading and annotation. Supports iterative rounds: 
 - If the user provided a file path, use it directly.
 - Otherwise, write a context summary to `/tmp/eink-review-XXXXX.md`.
 
-### 2. Create session (non-blocking)
+### 2. Reserve a webhook port
 
 ```bash
-SESSION_ID=$(eink-review push --async <file>)
+PORT=$(python3 -c "import socket; s=socket.socket(); s.bind(('',0)); p=s.getsockname()[1]; s.close(); print(p)")
+echo "PORT:$PORT"
+```
+
+### 3. Create session with callback URL
+
+```bash
+SESSION_ID=$(eink-review push --async --callback-url "http://127.0.0.1:$PORT/" <file>)
 echo "SESSION_ID:$SESSION_ID"
 ```
 
 ---
 
-## Launch background watcher
+## Launch webhook listener
 
-Run the following as a **background Bash command** (`run_in_background: true`):
+Run the following as a **background Bash command** (`run_in_background: true`).
+Substitute the actual numeric port for `PORT_NUMBER`:
 
 ```bash
-eink-review watch <SESSION_ID> --timeout 60 2>/dev/null | while IFS= read -r line; do
-  case "$line" in
-    EVENT:ANNOTATION_RESULT*|EVENT:SUBMITTED*)
-      echo "$line"
-      exit 0
-      ;;
-  esac
-done
-echo "EVENT:TIMEOUT"
+python3 -c "
+import http.server, json
+
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get('Content-Length', 0))).decode()
+        self.send_response(200)
+        self.end_headers()
+        data = json.loads(body)
+        if data.get('type') == 'annotation_result':
+            print('EVENT:ANNOTATION_RESULT ' + body, flush=True)
+        elif data.get('status') == 'Submitted':
+            print('EVENT:SUBMITTED ' + body, flush=True)
+        else:
+            print('EVENT:CANCELLED', flush=True)
+        raise SystemExit(0)
+    def log_message(self, *a): pass
+
+http.server.HTTPServer(('127.0.0.1', PORT_NUMBER), H).handle_request()
+"
 ```
 
-This exits as soon as the first relevant event arrives and prints it to stdout.
-No LLM is involved — the Bash tool notifies the main agent when the command completes.
-
-After launching the background watcher, tell the user the session is active and you are watching
-in the background. You are free to answer other questions while waiting.
+This blocks indefinitely until the server POSTs — no timeout, no reconnect loops.
+Tell the user the session is active. You are free to answer other questions while waiting.
 
 ---
 
-## When the background watcher returns
+## When the webhook listener returns
 
 The background Bash command prints one line to stdout. Inspect it:
 
 ### Case: annotation result
 
-The output starts with `EVENT:ANNOTATION_RESULT`. The JSON follows after the prefix. Structure:
+Output starts with `EVENT:ANNOTATION_RESULT`. JSON follows. Structure:
 
 ```json
 {
@@ -103,10 +128,9 @@ Key fields:
 - `annotations[].anchor.elements[]` — nearby document elements (use to locate sections)
 - `anchor: null` — unanchored; treat as general comment
 
-**Each round is fresh** — annotations contain only current strokes. Do not re-apply previous round's feedback.
+**Each round is fresh** — annotations contain only current strokes. Do not re-apply previous rounds.
 
-Rewrite the document, applying feedback to annotated sections. Leave un-annotated sections unchanged.
-**Preserve heading text exactly** — IDs are derived from heading text and used for anchoring.
+Rewrite the document applying the feedback. **Preserve heading text exactly** — IDs are derived from it.
 
 Write updated content to `/tmp/eink-update-XXXXX.md`, then push the update:
 
@@ -114,16 +138,24 @@ Write updated content to `/tmp/eink-update-XXXXX.md`, then push the update:
 eink-review update <session-id> /tmp/eink-update-XXXXX.md
 ```
 
-Then **re-launch the background Bash watcher** for the next event (same command as above).
+Then **re-launch the webhook listener on the same PORT** (it's free now that the previous listener exited).
 
 ### Case: submitted result
 
-The output starts with `EVENT:SUBMITTED`. Parse `result.annotation_images[]` — use
-the **Read** tool to view each PNG. Summarize all feedback received and continue the conversation.
+Output starts with `EVENT:SUBMITTED`. The JSON is `SessionResultResponse`. Key fields:
+- `annotation_images[]` — base64 PNG strings; save each to `/tmp/eink-img-N.png` and use the **Read** tool to view
+- `verdict` — `LGTM` or `CHANGES`
+- `annotations[]` — final annotation set
 
-### Case: timeout / error
+Summarize all feedback and continue the conversation.
 
-Output is `EVENT:TIMEOUT` or empty. Report the error. If connection refused: `systemctl --user start eink-serve`.
+### Case: cancelled
+
+Output is `EVENT:CANCELLED`. Tell the user the session was cancelled.
+
+### Case: connection refused
+
+If `eink-review push` fails: `systemctl --user start eink-serve`
 
 ---
 
@@ -200,5 +232,5 @@ sequenceDiagram
 - Prefer a graph or mindmap over a bullet list whenever structure or status matters.
 - Color every node intentionally.
 - The `eink-serve` systemd service must be running. Connection refused → `systemctl --user start eink-serve`.
-- You are NOT blocked while waiting — the Haiku watcher runs in the background.
+- You are NOT blocked while waiting — the webhook listener runs in the background.
 - After all rounds complete, summarize all feedback and continue informed by it.

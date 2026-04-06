@@ -145,7 +145,7 @@ pub fn build_app(state: AppState) -> Router {
         )
         .route(
             "/api/sessions/{id}",
-            get(get_session).delete(cancel_session),
+            get(get_session).delete(delete_session),
         )
         .route("/api/sessions/{id}/result", get(get_result))
         .route("/api/sessions/{id}/content", put(update_content))
@@ -282,6 +282,7 @@ async fn create_session(
     );
     crate::metrics::SESSIONS_CREATED.inc();
     crate::metrics::SESSIONS_ACTIVE.inc();
+    crate::metrics::SESSIONS_STORED.set(mgr.count() as i64);
     crate::metrics::SESSION_CONTENT_BYTES.observe(content_len as f64);
 
     (
@@ -333,42 +334,59 @@ async fn get_session(
     }
 }
 
-async fn cancel_session(
+async fn delete_session(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     let mut mgr = state.sessions.write().await;
-    match mgr.cancel(&id) {
-        true => {
-            tracing::info!(id = %id, "session cancelled");
-            crate::metrics::SESSIONS_CANCELLED.inc();
-            crate::metrics::SESSIONS_ACTIVE.dec();
-            let webhook = mgr.get(&id).and_then(webhook_payload);
-            drop(mgr);
-            state.notify_and_cleanup(&id).await;
-            state
-                .ws_send(
-                    &id,
-                    crate::ws::ServerMessage::Error {
-                        message: "session cancelled".into(),
-                    },
-                )
-                .await;
-            state.ws_cleanup(&id).await;
-            if let Some((url, body)) = webhook {
-                fire_webhook(url, body);
-            }
-            StatusCode::OK
-        }
-        false => StatusCode::NOT_FOUND,
+    if mgr.get(&id).is_none() {
+        return StatusCode::NOT_FOUND;
     }
+    let was_active = mgr
+        .get(&id)
+        .map(|s| s.status == crate::session::SessionStatus::Active)
+        .unwrap_or(false);
+    if was_active {
+        mgr.cancel(&id);
+    }
+    let webhook = if was_active {
+        mgr.get(&id).and_then(webhook_payload)
+    } else {
+        None
+    };
+    mgr.delete(&id);
+    tracing::info!(id = %id, "session deleted");
+    if was_active {
+        crate::metrics::SESSIONS_CANCELLED.inc();
+        crate::metrics::SESSIONS_ACTIVE.dec();
+    }
+    crate::metrics::SESSIONS_STORED.set(mgr.count() as i64);
+    drop(mgr);
+    state.notify_and_cleanup(&id).await;
+    if was_active {
+        state
+            .ws_send(
+                &id,
+                crate::ws::ServerMessage::Error {
+                    message: "session cancelled".into(),
+                },
+            )
+            .await;
+        if let Some((url, body)) = webhook {
+            fire_webhook(url, body);
+        }
+    }
+    state.ws_cleanup(&id).await;
+    StatusCode::OK
 }
 
 async fn purge_sessions(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let count = {
+    let (count, stored) = {
         let mut mgr = state.sessions.write().await;
-        mgr.purge_finished()
+        let n = mgr.purge_finished();
+        (n, mgr.count())
     };
+    crate::metrics::SESSIONS_STORED.set(stored as i64);
     tracing::info!(count, "sessions purged");
     Json(serde_json::json!({ "purged": count }))
 }
@@ -607,15 +625,21 @@ async fn request_update(
     }
 
     tracing::info!(id = %id, version, count = annotations.len(), "annotation_result broadcast");
-    state
-        .ws_send(
-            &id,
-            crate::ws::ServerMessage::AnnotationResult {
-                version,
-                annotations,
-            },
-        )
-        .await;
+    let msg = crate::ws::ServerMessage::AnnotationResult {
+        version,
+        annotations,
+    };
+    let callback_url = {
+        let mgr = state.sessions.read().await;
+        mgr.get(&id).and_then(|s| s.callback_url.clone())
+    };
+    state.ws_send(&id, msg.clone()).await;
+    if let Some(url) = callback_url {
+        tokio::spawn(async move {
+            let client = reqwest::Client::new();
+            let _ = client.post(&url).json(&msg).send().await;
+        });
+    }
     StatusCode::OK.into_response()
 }
 
