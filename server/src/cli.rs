@@ -2,10 +2,12 @@ use clap::{Parser, Subcommand};
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;
 use std::io::Read as _;
+use std::process::Command as StdCommand;
 use std::time::{Duration, Instant};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use eink_bridge::api::SCHEMA_VERSION;
+use eink_bridge::session::SessionOrigin;
 
 #[derive(Parser)]
 #[command(name = "eink-review", about = "E-ink review session CLI")]
@@ -41,6 +43,19 @@ enum Command {
         /// Webhook URL to POST annotation_result and submitted events to
         #[arg(long)]
         callback_url: Option<String>,
+        /// Mark the session as starred (pinned — survives purge/expire, reloads across reboots)
+        #[arg(long)]
+        star: bool,
+    },
+    /// Pin a session so it survives purge, expire, and server restarts
+    Star {
+        /// Session ID
+        id: String,
+    },
+    /// Unpin a previously starred session
+    Unstar {
+        /// Session ID
+        id: String,
     },
     /// Push updated content to an existing session (interactive mode)
     Update {
@@ -96,6 +111,8 @@ async fn main() {
         Command::Cancel { .. } => "cancel",
         Command::Remove { .. } => "remove",
         Command::List { .. } => "list",
+        Command::Star { .. } => "star",
+        Command::Unstar { .. } => "unstar",
     };
 
     let start = std::time::Instant::now();
@@ -108,6 +125,7 @@ async fn main() {
             json,
             interactive,
             callback_url,
+            star,
         } => {
             cmd_push(
                 &client,
@@ -119,6 +137,7 @@ async fn main() {
                 json,
                 interactive,
                 callback_url,
+                star,
             )
             .await
         }
@@ -128,6 +147,8 @@ async fn main() {
         Command::Cancel { id } => cmd_cancel(&client, &cli.server, &id).await,
         Command::Remove { id } => cmd_remove(&client, &cli.server, &id).await,
         Command::List { status } => cmd_list(&client, &cli.server, status).await,
+        Command::Star { id } => cmd_set_starred(&client, &cli.server, &id, true).await,
+        Command::Unstar { id } => cmd_set_starred(&client, &cli.server, &id, false).await,
     };
 
     let duration = start.elapsed().as_secs_f64();
@@ -178,6 +199,7 @@ async fn cmd_push(
     json_output: bool,
     interactive: bool,
     callback_url: Option<String>,
+    star: bool,
 ) -> anyhow::Result<()> {
     let content = if file == "-" {
         let mut buf = String::new();
@@ -188,6 +210,7 @@ async fn cmd_push(
     };
 
     let title = title.or_else(|| extract_title(&content));
+    let origin = capture_origin();
 
     let resp = client
         .post(format!("{server}/api/sessions"))
@@ -196,6 +219,8 @@ async fn cmd_push(
             "title": title,
             "content": content,
             "callback_url": callback_url,
+            "starred": star,
+            "origin": origin,
         }))
         .send()
         .await?;
@@ -477,7 +502,17 @@ async fn cmd_list(client: &Client, server: &str, status: Option<String>) -> anyh
         let id = s["id"].as_str().unwrap_or("?");
         let title = s["title"].as_str().unwrap_or("(untitled)");
         let status = s["status"].as_str().unwrap_or("?");
-        println!("{id}  {status:<12}  {title}");
+        let star = if s["starred"].as_bool().unwrap_or(false) {
+            "*"
+        } else {
+            " "
+        };
+        let cwd = s["origin"]["cwd"].as_str().unwrap_or("");
+        if cwd.is_empty() {
+            println!("{star} {id}  {status:<12}  {title}");
+        } else {
+            println!("{star} {id}  {status:<12}  {title}  [{cwd}]");
+        }
     }
     Ok(())
 }
@@ -549,6 +584,85 @@ fn print_result(id: &str, body: &serde_json::Value) {
                 println!("{path}");
             }
         }
+    }
+}
+
+/// Capture metadata about the invocation environment: cwd, hostname, git state.
+/// Every field is optional — nothing is fatal if it can't be read.
+fn capture_origin() -> SessionOrigin {
+    let cwd = std::env::current_dir()
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned());
+    let host = read_hostname();
+    let (git_branch, git_remote) = read_git_state();
+    SessionOrigin {
+        cwd,
+        host,
+        tool: Some("eink-review".into()),
+        git_branch,
+        git_remote,
+    }
+}
+
+fn read_hostname() -> Option<String> {
+    // Prefer the live kernel hostname; fall back to /etc/hostname (may be stale after hostnamectl).
+    StdCommand::new("hostname")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            std::fs::read_to_string("/etc/hostname")
+                .ok()
+                .map(|h| h.trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
+}
+
+fn read_git_state() -> (Option<String>, Option<String>) {
+    let branch = StdCommand::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && s != "HEAD");
+    let remote = StdCommand::new("git")
+        .args(["config", "--get", "remote.origin.url"])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    (branch, remote)
+}
+
+async fn cmd_set_starred(
+    client: &Client,
+    server: &str,
+    id: &str,
+    starred: bool,
+) -> anyhow::Result<()> {
+    let resp = client
+        .put(format!("{server}/api/sessions/{id}/star"))
+        .json(&serde_json::json!({ "starred": starred }))
+        .send()
+        .await?;
+    match resp.status().as_u16() {
+        200 => {
+            eprintln!(
+                "session {id} {}",
+                if starred { "starred" } else { "unstarred" }
+            );
+            Ok(())
+        }
+        404 => anyhow::bail!("session {id} not found"),
+        s => anyhow::bail!("failed to set starred: {s}"),
     }
 }
 

@@ -3,6 +3,7 @@
     "created_at": "<timestamp>",
     "id": "<id>",
     "schema_version": 1,
+    "starred": false,
     "status": "Active",
     "tags": {
       "type": "list"
@@ -14,6 +15,7 @@
     "created_at": "<timestamp>",
     "id": "<id>",
     "schema_version": 1,
+    "starred": false,
     "status": "Active",
     "tags": {},
     "title": "Plain Text",
@@ -23,6 +25,7 @@
     "created_at": "<timestamp>",
     "id": "<id>",
     "schema_version": 1,
+    "starred": false,
     "status": "Active",
     "tags": {
       "repo": "eink-bridge",

@@ -47,6 +47,10 @@ pub static SESSIONS_EXPIRED: LazyLock<IntCounter> = LazyLock::new(
 );
 pub static SESSIONS_ACTIVE: LazyLock<IntGauge> =
     LazyLock::new(|| reg!(gauge "eink_sessions_active", "Currently active sessions"));
+pub static SESSIONS_STORED: LazyLock<IntGauge> =
+    LazyLock::new(|| reg!(gauge "eink_sessions_stored", "Total sessions stored"));
+pub static SESSIONS_STARRED: LazyLock<IntGauge> =
+    LazyLock::new(|| reg!(gauge "eink_sessions_starred", "Currently starred (pinned) sessions"));
 pub static SESSION_CONTENT_BYTES: LazyLock<Histogram> = LazyLock::new(|| {
     reg!(
         histogram "eink_session_content_bytes",
@@ -122,6 +126,8 @@ pub fn init() {
     let _ = &*SESSIONS_CANCELLED;
     let _ = &*SESSIONS_EXPIRED;
     let _ = &*SESSIONS_ACTIVE;
+    let _ = &*SESSIONS_STORED;
+    let _ = &*SESSIONS_STARRED;
     let _ = &*SESSION_CONTENT_BYTES;
     let _ = &*SESSION_ANNOTATION_IMAGES;
     let _ = &*OCR_REQUESTS;

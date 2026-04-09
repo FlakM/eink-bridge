@@ -31,8 +31,14 @@
           "content": {
             "type": "string"
           },
+          "origin": {
+            "$ref": "#/components/schemas/SessionOrigin"
+          },
           "schema_version": {
             "type": "integer"
+          },
+          "starred": {
+            "type": "boolean"
           },
           "tags": {
             "additionalProperties": {
@@ -98,6 +104,42 @@
             "type": "object"
           }
         ]
+      },
+      "SessionOrigin": {
+        "description": "Metadata about where the session originated (cwd, host, git state).",
+        "properties": {
+          "cwd": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "git_branch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "git_remote": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tool": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
       },
       "SessionResultResponse": {
         "properties": {
@@ -165,8 +207,14 @@
         "properties": {
           "created_at": "<timestamp>",
           "id": "<id>",
+          "origin": {
+            "$ref": "#/components/schemas/SessionOrigin"
+          },
           "schema_version": {
             "type": "integer"
+          },
+          "starred": {
+            "type": "boolean"
           },
           "status": {
             "type": "string"
@@ -185,6 +233,17 @@
           },
           "updated_at": "<timestamp>"
         },
+        "type": "object"
+      },
+      "SetStarredRequest": {
+        "properties": {
+          "starred": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "starred"
+        ],
         "type": "object"
       },
       "SubmitReviewRequest": {
@@ -241,6 +300,26 @@
     },
     "/api/sessions": {
       "get": {
+        "parameters": [
+          {
+            "description": "Filter by session status (Active, Submitted, Cancelled, Expired)",
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter to only starred (true) or only unstarred (false) sessions",
+            "in": "query",
+            "name": "starred",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -253,7 +332,7 @@
                 }
               }
             },
-            "description": "Session summaries"
+            "description": "Session summaries (starred sessions sorted first)"
           }
         },
         "summary": "List sessions"
@@ -345,6 +424,30 @@
           }
         },
         "summary": "Poll session result"
+      }
+    },
+    "/api/sessions/{id}/star": {
+      "put": {
+        "description": "Starred sessions are pinned: they survive purge, expire_stale, and are reloaded from disk in any state.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetStarredRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Star flag updated"
+          },
+          "404": {
+            "description": "Session not found"
+          }
+        },
+        "summary": "Toggle starred flag on a session"
       }
     },
     "/api/sessions/{id}/submit": {

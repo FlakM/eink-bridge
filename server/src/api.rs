@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::session::{Session, SessionStatus};
+use crate::session::{Session, SessionOrigin, SessionStatus};
 
 pub const SCHEMA_VERSION: u32 = 1;
 
@@ -17,6 +17,15 @@ pub struct CreateSessionRequest {
     pub callback_url: Option<String>,
     #[serde(default)]
     pub tags: HashMap<String, String>,
+    #[serde(default)]
+    pub starred: bool,
+    #[serde(default)]
+    pub origin: Option<SessionOrigin>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct SetStarredRequest {
+    pub starred: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -85,6 +94,9 @@ pub struct SessionSummaryResponse {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub tags: HashMap<String, String>,
+    pub starred: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<SessionOrigin>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -97,6 +109,9 @@ pub struct SessionDetailResponse {
     pub updated_at: DateTime<Utc>,
     pub callback_url: Option<String>,
     pub tags: HashMap<String, String>,
+    pub starred: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<SessionOrigin>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -116,6 +131,9 @@ pub struct SessionResultResponse {
     pub stroke_data: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub annotations: Vec<AnnotationGroup>,
+    pub starred: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<SessionOrigin>,
 }
 
 impl SessionSummaryResponse {
@@ -128,6 +146,8 @@ impl SessionSummaryResponse {
             created_at: session.created_at,
             updated_at: session.updated_at,
             tags: session.tags.clone(),
+            starred: session.starred,
+            origin: session.origin.clone(),
         }
     }
 }
@@ -143,6 +163,8 @@ impl SessionDetailResponse {
             updated_at: session.updated_at,
             callback_url: session.callback_url.clone(),
             tags: session.tags.clone(),
+            starred: session.starred,
+            origin: session.origin.clone(),
         }
     }
 }
@@ -175,6 +197,8 @@ impl SessionResultResponse {
             tags: session.tags.clone(),
             stroke_data: session.stroke_data.clone(),
             annotations: session.annotations.clone(),
+            starred: session.starred,
+            origin: session.origin.clone(),
         }
     }
 }
@@ -207,9 +231,25 @@ pub fn openapi_spec() -> serde_json::Value {
             "/api/sessions": {
                 "get": {
                     "summary": "List sessions",
+                    "parameters": [
+                        {
+                            "name": "status",
+                            "in": "query",
+                            "required": false,
+                            "schema": {"type": "string"},
+                            "description": "Filter by session status (Active, Submitted, Cancelled, Expired)"
+                        },
+                        {
+                            "name": "starred",
+                            "in": "query",
+                            "required": false,
+                            "schema": {"type": "boolean"},
+                            "description": "Filter to only starred (true) or only unstarred (false) sessions"
+                        }
+                    ],
                     "responses": {
                         "200": {
-                            "description": "Session summaries",
+                            "description": "Session summaries (starred sessions sorted first)",
                             "content": {
                                 "application/json": {
                                     "schema": {"type": "array", "items": {"$ref": "#/components/schemas/SessionSummaryResponse"}}
@@ -263,6 +303,24 @@ pub fn openapi_spec() -> serde_json::Value {
                     "summary": "Cancel session",
                     "responses": {
                         "200": {"description": "Session cancelled"},
+                        "404": {"description": "Session not found"}
+                    }
+                }
+            },
+            "/api/sessions/{id}/star": {
+                "put": {
+                    "summary": "Toggle starred flag on a session",
+                    "description": "Starred sessions are pinned: they survive purge, expire_stale, and are reloaded from disk in any state.",
+                    "requestBody": {
+                        "required": true,
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/SetStarredRequest"}
+                            }
+                        }
+                    },
+                    "responses": {
+                        "200": {"description": "Star flag updated"},
                         "404": {"description": "Session not found"}
                     }
                 }
@@ -335,7 +393,27 @@ pub fn openapi_spec() -> serde_json::Value {
                         "tags": {
                             "type": "object",
                             "additionalProperties": {"type": "string"}
-                        }
+                        },
+                        "starred": {"type": "boolean"},
+                        "origin": {"$ref": "#/components/schemas/SessionOrigin"}
+                    }
+                },
+                "SetStarredRequest": {
+                    "type": "object",
+                    "required": ["starred"],
+                    "properties": {
+                        "starred": {"type": "boolean"}
+                    }
+                },
+                "SessionOrigin": {
+                    "type": "object",
+                    "description": "Metadata about where the session originated (cwd, host, git state).",
+                    "properties": {
+                        "cwd": {"type": ["string", "null"]},
+                        "host": {"type": ["string", "null"]},
+                        "tool": {"type": ["string", "null"]},
+                        "git_branch": {"type": ["string", "null"]},
+                        "git_remote": {"type": ["string", "null"]}
                     }
                 },
                 "SubmitReviewRequest": {
@@ -367,7 +445,9 @@ pub fn openapi_spec() -> serde_json::Value {
                         "status": {"type": "string"},
                         "created_at": {"type": "string", "format": "date-time"},
                         "updated_at": {"type": "string", "format": "date-time"},
-                        "tags": {"type": "object", "additionalProperties": {"type": "string"}}
+                        "tags": {"type": "object", "additionalProperties": {"type": "string"}},
+                        "starred": {"type": "boolean"},
+                        "origin": {"$ref": "#/components/schemas/SessionOrigin"}
                     }
                 },
                 "SessionDetailResponse": {

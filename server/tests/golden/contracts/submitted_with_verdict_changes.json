@@ -5,6 +5,7 @@
   "id": "<id>",
   "review_duration_seconds": 0,
   "schema_version": 1,
+  "starred": false,
   "status": "Submitted",
   "stroke_data": null,
   "tags": {},

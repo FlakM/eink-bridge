@@ -272,6 +272,8 @@ async fn session_expiry() {
         None,
         None,
         std::collections::HashMap::new(),
+        false,
+        None,
     );
 
     // Expire with zero timeout (everything is stale)
@@ -337,6 +339,142 @@ async fn list_filters_by_status() {
     let body: Vec<serde_json::Value> =
         serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(body.len(), 1);
+}
+
+#[tokio::test]
+async fn list_filters_by_starred_and_sorts_starred_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = common::test_app(dir.path().to_path_buf());
+
+    // Create a plain session
+    app.clone()
+        .oneshot(
+            Request::post("/api/sessions")
+                .body(Body::from("# Plain"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Create a starred session via JSON
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::post("/api/sessions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r##"{"content":"# Pinned","starred":true,"origin":{"cwd":"/proj"}}"##,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body: serde_json::Value =
+        serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let pinned_id = body["id"].as_str().unwrap().to_string();
+
+    // Full list: starred should come first
+    let resp = app
+        .clone()
+        .oneshot(Request::get("/api/sessions").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let list: Vec<serde_json::Value> =
+        serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(list.len(), 2);
+    assert_eq!(list[0]["id"].as_str().unwrap(), pinned_id);
+    assert_eq!(list[0]["starred"].as_bool(), Some(true));
+    assert_eq!(list[0]["origin"]["cwd"].as_str(), Some("/proj"));
+
+    // Filter starred=true returns only the pinned one
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::get("/api/sessions?starred=true")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let list: Vec<serde_json::Value> =
+        serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0]["id"].as_str().unwrap(), pinned_id);
+
+    // Filter starred=false returns only the plain one
+    let resp = app
+        .oneshot(
+            Request::get("/api/sessions?starred=false")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let list: Vec<serde_json::Value> =
+        serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0]["starred"].as_bool(), Some(false));
+}
+
+#[tokio::test]
+async fn put_star_toggles_and_persists() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = common::test_app(dir.path().to_path_buf());
+
+    // Create
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::post("/api/sessions")
+                .body(Body::from("# Doc"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body: serde_json::Value =
+        serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let id = body["id"].as_str().unwrap().to_string();
+
+    // Star it
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::put(format!("/api/sessions/{id}/star"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"starred":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["starred"].as_bool(), Some(true));
+
+    // Unstar it
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::put(format!("/api/sessions/{id}/star"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"starred":false}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Star an unknown session → 404
+    let resp = app
+        .oneshot(
+            Request::put("/api/sessions/doesnotexist/star")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"starred":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -440,6 +578,8 @@ async fn get_result_for_expired_session_returns_410() {
             None,
             None,
             std::collections::HashMap::new(),
+            false,
+            None,
         );
         mgr.expire_stale(Duration::ZERO);
         s.id

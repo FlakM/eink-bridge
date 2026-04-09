@@ -43,6 +43,22 @@ impl SessionStatus {
     }
 }
 
+/// Typed metadata about where a session originated from.
+/// Populated by the client (CLI, agent, etc.) at creation time.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SessionOrigin {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_remote: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     #[serde(default = "default_schema_version")]
@@ -70,6 +86,12 @@ pub struct Session {
     pub callback_url: Option<String>,
     #[serde(default)]
     pub tags: HashMap<String, String>,
+    /// Starred sessions are pinned — they survive purge, expire, and are
+    /// always reloaded from disk regardless of terminal status.
+    #[serde(default)]
+    pub starred: bool,
+    #[serde(default)]
+    pub origin: Option<SessionOrigin>,
     pub state_dir: PathBuf,
 }
 
@@ -129,22 +151,32 @@ impl SessionManager {
             Err(_) => return,
         };
         let mut loaded = 0usize;
+        let mut loaded_starred = 0usize;
         for entry in entries.flatten() {
             let json_path = entry.path().join("session.json");
             if json_path.exists()
                 && let Ok(content) = fs::read_to_string(&json_path)
                 && let Ok(session) = serde_json::from_str::<Session>(&content)
-                && matches!(
+            {
+                let is_live = matches!(
                     session.status,
                     SessionStatus::Active | SessionStatus::Submitted
-                )
-            {
-                self.sessions.insert(session.id.clone(), session);
-                loaded += 1;
+                );
+                if is_live || session.starred {
+                    if session.starred {
+                        loaded_starred += 1;
+                    }
+                    self.sessions.insert(session.id.clone(), session);
+                    loaded += 1;
+                }
             }
         }
         if loaded > 0 {
-            tracing::info!(count = loaded, "restored sessions from disk");
+            tracing::info!(
+                count = loaded,
+                starred = loaded_starred,
+                "restored sessions from disk"
+            );
         }
     }
 
@@ -154,6 +186,8 @@ impl SessionManager {
         title: Option<String>,
         callback_url: Option<String>,
         tags: HashMap<String, String>,
+        starred: bool,
+        origin: Option<SessionOrigin>,
     ) -> Session {
         let id = loop {
             let candidate = Uuid::new_v4().as_simple().to_string()[..12].to_string();
@@ -180,11 +214,27 @@ impl SessionManager {
             annotations: Vec::new(),
             callback_url,
             tags,
+            starred,
+            origin,
             state_dir: session_dir,
         };
         session.persist();
         self.sessions.insert(id, session.clone());
         session
+    }
+
+    /// Toggle the starred flag on a session. Returns true if the session exists.
+    pub fn set_starred(&mut self, id: &str, starred: bool) -> bool {
+        if let Some(s) = self.sessions.get_mut(id) {
+            if s.starred != starred {
+                s.starred = starred;
+                s.updated_at = Utc::now();
+                s.persist();
+            }
+            true
+        } else {
+            false
+        }
     }
 
     pub fn get(&self, id: &str) -> Option<&Session> {
@@ -195,14 +245,16 @@ impl SessionManager {
         self.sessions.values().collect()
     }
 
+    /// Cancel an Active session. Returns true only if the session existed and was Active.
     pub fn cancel(&mut self, id: &str) -> bool {
-        if let Some(s) = self.sessions.get_mut(id) {
-            s.status = SessionStatus::Cancelled;
-            s.updated_at = Utc::now();
-            s.persist();
-            true
-        } else {
-            false
+        match self.sessions.get_mut(id) {
+            Some(s) if s.status == SessionStatus::Active => {
+                s.status = SessionStatus::Cancelled;
+                s.updated_at = Utc::now();
+                s.persist();
+                true
+            }
+            _ => false,
         }
     }
 
@@ -246,26 +298,46 @@ impl SessionManager {
         Some(s.version)
     }
 
+    pub fn count(&self) -> usize {
+        self.sessions.len()
+    }
+
+    pub fn starred_count(&self) -> usize {
+        self.sessions.values().filter(|s| s.starred).count()
+    }
+
+    pub fn delete(&mut self, id: &str) -> bool {
+        if let Some(s) = self.sessions.remove(id) {
+            let _ = fs::remove_dir_all(&s.state_dir);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Remove all terminal-state sessions (Submitted, Cancelled, Expired) from memory and disk.
-    /// Returns the number of sessions purged.
+    /// Starred sessions are never purged. Returns the number of sessions purged.
     pub fn purge_finished(&mut self) -> usize {
         let finished: Vec<String> = self
             .sessions
             .values()
             .filter(|s| {
-                matches!(
-                    s.status,
-                    SessionStatus::Submitted | SessionStatus::Cancelled | SessionStatus::Expired
-                )
+                !s.starred
+                    && matches!(
+                        s.status,
+                        SessionStatus::Submitted
+                            | SessionStatus::Cancelled
+                            | SessionStatus::Expired
+                    )
             })
             .map(|s| s.id.clone())
             .collect();
         let count = finished.len();
         for id in &finished {
-            if let Some(s) = self.sessions.remove(id) {
-                if let Err(e) = fs::remove_dir_all(&s.state_dir) {
-                    warn!(path = %s.state_dir.display(), error = %e, "failed to remove session dir");
-                }
+            if let Some(s) = self.sessions.remove(id)
+                && let Err(e) = fs::remove_dir_all(&s.state_dir)
+            {
+                warn!(path = %s.state_dir.display(), error = %e, "failed to remove session dir");
             }
         }
         count
@@ -275,7 +347,7 @@ impl SessionManager {
         let now = Utc::now();
         let mut count = 0usize;
         for session in self.sessions.values_mut() {
-            if session.status == SessionStatus::Active {
+            if session.status == SessionStatus::Active && !session.starred {
                 let age = now.signed_duration_since(session.created_at);
                 if age.to_std().unwrap_or(Duration::ZERO) > timeout {
                     session.status = SessionStatus::Expired;
@@ -305,7 +377,14 @@ mod tests {
     #[test]
     fn create_returns_active_session() {
         let (mut m, _d) = mgr();
-        let s = m.create("# Hello".into(), Some("title".into()), None, HashMap::new());
+        let s = m.create(
+            "# Hello".into(),
+            Some("title".into()),
+            None,
+            HashMap::new(),
+            false,
+            None,
+        );
         assert_eq!(s.status, SessionStatus::Active);
         assert_eq!(s.title.unwrap(), "title");
     }
@@ -313,7 +392,7 @@ mod tests {
     #[test]
     fn get_returns_created_session() {
         let (mut m, _d) = mgr();
-        let s = m.create("content".into(), None, None, HashMap::new());
+        let s = m.create("content".into(), None, None, HashMap::new(), false, None);
         assert!(m.get(&s.id).is_some());
     }
 
@@ -326,7 +405,7 @@ mod tests {
     #[test]
     fn cancel_known_session_returns_true() {
         let (mut m, _d) = mgr();
-        let s = m.create("x".into(), None, None, HashMap::new());
+        let s = m.create("x".into(), None, None, HashMap::new(), false, None);
         assert!(m.cancel(&s.id));
         assert_eq!(m.get(&s.id).unwrap().status, SessionStatus::Cancelled);
     }
@@ -340,7 +419,7 @@ mod tests {
     #[test]
     fn submit_known_session_returns_ok() {
         let (mut m, _d) = mgr();
-        let s = m.create("x".into(), None, None, HashMap::new());
+        let s = m.create("x".into(), None, None, HashMap::new(), false, None);
         assert!(matches!(
             m.submit(&s.id, "notes".into(), vec![], None, None, vec![]),
             SubmitResult::Ok
@@ -362,7 +441,7 @@ mod tests {
     #[test]
     fn submit_already_submitted_returns_not_active() {
         let (mut m, _d) = mgr();
-        let s = m.create("x".into(), None, None, HashMap::new());
+        let s = m.create("x".into(), None, None, HashMap::new(), false, None);
         m.submit(&s.id, "first".into(), vec![], None, None, vec![]);
         assert!(matches!(
             m.submit(&s.id, "second".into(), vec![], None, None, vec![]),
@@ -373,8 +452,8 @@ mod tests {
     #[test]
     fn expire_stale_only_affects_active_sessions() {
         let (mut m, _d) = mgr();
-        let active = m.create("a".into(), None, None, HashMap::new());
-        let will_cancel = m.create("b".into(), None, None, HashMap::new());
+        let active = m.create("a".into(), None, None, HashMap::new(), false, None);
+        let will_cancel = m.create("b".into(), None, None, HashMap::new(), false, None);
         m.cancel(&will_cancel.id);
 
         m.expire_stale(Duration::ZERO);
@@ -390,15 +469,15 @@ mod tests {
     #[test]
     fn list_returns_all_sessions() {
         let (mut m, _d) = mgr();
-        m.create("a".into(), None, None, HashMap::new());
-        m.create("b".into(), None, None, HashMap::new());
+        m.create("a".into(), None, None, HashMap::new(), false, None);
+        m.create("b".into(), None, None, HashMap::new(), false, None);
         assert_eq!(m.list().len(), 2);
     }
 
     #[test]
     fn ids_are_12_chars() {
         let (mut m, _d) = mgr();
-        let s = m.create("x".into(), None, None, HashMap::new());
+        let s = m.create("x".into(), None, None, HashMap::new(), false, None);
         assert_eq!(s.id.len(), 12);
         assert!(s.id.chars().all(|c| c.is_ascii_hexdigit()));
     }
@@ -425,7 +504,7 @@ mod tests {
     #[test]
     fn update_content_increments_version() {
         let (mut m, _d) = mgr();
-        let s = m.create("v1".into(), None, None, HashMap::new());
+        let s = m.create("v1".into(), None, None, HashMap::new(), false, None);
         assert_eq!(m.get(&s.id).unwrap().version, 1);
         let new_version = m.update_content(&s.id, "v2".into()).unwrap();
         assert_eq!(new_version, 2);
@@ -437,9 +516,92 @@ mod tests {
     #[test]
     fn update_content_on_submitted_returns_none() {
         let (mut m, _d) = mgr();
-        let s = m.create("content".into(), None, None, HashMap::new());
+        let s = m.create("content".into(), None, None, HashMap::new(), false, None);
         m.submit(&s.id, "done".into(), vec![], None, None, vec![]);
         assert!(m.update_content(&s.id, "new".into()).is_none());
+    }
+
+    #[test]
+    fn starred_session_survives_purge_finished() {
+        let (mut m, _d) = mgr();
+        let pinned = m.create("keep".into(), None, None, HashMap::new(), true, None);
+        let ephemeral = m.create("drop".into(), None, None, HashMap::new(), false, None);
+        m.submit(&pinned.id, "notes".into(), vec![], None, None, vec![]);
+        m.submit(&ephemeral.id, "notes".into(), vec![], None, None, vec![]);
+
+        let purged = m.purge_finished();
+        assert_eq!(purged, 1);
+        assert!(m.get(&pinned.id).is_some());
+        assert!(m.get(&ephemeral.id).is_none());
+    }
+
+    #[test]
+    fn starred_session_skipped_by_expire_stale() {
+        let (mut m, _d) = mgr();
+        let pinned = m.create("keep".into(), None, None, HashMap::new(), true, None);
+        let ephemeral = m.create("drop".into(), None, None, HashMap::new(), false, None);
+
+        m.expire_stale(Duration::ZERO);
+
+        assert_eq!(m.get(&pinned.id).unwrap().status, SessionStatus::Active);
+        assert_eq!(m.get(&ephemeral.id).unwrap().status, SessionStatus::Expired);
+    }
+
+    #[test]
+    fn set_starred_persists_and_toggles() {
+        let (mut m, _d) = mgr();
+        let s = m.create("x".into(), None, None, HashMap::new(), false, None);
+        assert!(m.set_starred(&s.id, true));
+        assert!(m.get(&s.id).unwrap().starred);
+        assert!(m.set_starred(&s.id, false));
+        assert!(!m.get(&s.id).unwrap().starred);
+        assert!(!m.set_starred("ghost", true));
+    }
+
+    #[test]
+    fn starred_cancelled_session_reloads_from_disk() {
+        let dir = tempdir().unwrap();
+        let id = {
+            let mut m = SessionManager::new(dir.path().to_path_buf());
+            let s = m.create(
+                "important".into(),
+                Some("doc".into()),
+                None,
+                HashMap::new(),
+                true,
+                Some(SessionOrigin {
+                    cwd: Some("/home/me/project".into()),
+                    host: Some("laptop".into()),
+                    tool: Some("claude-code".into()),
+                    git_branch: Some("main".into()),
+                    git_remote: Some("git@github.com:me/project.git".into()),
+                }),
+            );
+            m.cancel(&s.id);
+            s.id
+        };
+        let m2 = SessionManager::new(dir.path().to_path_buf());
+        let s = m2
+            .get(&id)
+            .expect("starred cancelled session should reload");
+        assert_eq!(s.status, SessionStatus::Cancelled);
+        assert!(s.starred);
+        let origin = s.origin.as_ref().unwrap();
+        assert_eq!(origin.cwd.as_deref(), Some("/home/me/project"));
+        assert_eq!(origin.tool.as_deref(), Some("claude-code"));
+    }
+
+    #[test]
+    fn unstarred_cancelled_session_does_not_reload() {
+        let dir = tempdir().unwrap();
+        let id = {
+            let mut m = SessionManager::new(dir.path().to_path_buf());
+            let s = m.create("x".into(), None, None, HashMap::new(), false, None);
+            m.cancel(&s.id);
+            s.id
+        };
+        let m2 = SessionManager::new(dir.path().to_path_buf());
+        assert!(m2.get(&id).is_none());
     }
 
     #[test]
@@ -447,8 +609,15 @@ mod tests {
         let dir = tempdir().unwrap();
         let id = {
             let mut m = SessionManager::new(dir.path().to_path_buf());
-            m.create("persisted".into(), Some("doc".into()), None, HashMap::new())
-                .id
+            m.create(
+                "persisted".into(),
+                Some("doc".into()),
+                None,
+                HashMap::new(),
+                false,
+                None,
+            )
+            .id
         };
         let m2 = SessionManager::new(dir.path().to_path_buf());
         let s = m2.get(&id).unwrap();

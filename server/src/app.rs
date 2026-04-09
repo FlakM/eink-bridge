@@ -17,7 +17,8 @@ use tower_http::trace::TraceLayer;
 
 use crate::api::{
     CreateSessionRequest, CreateSessionResponse, SCHEMA_VERSION, SessionDetailResponse,
-    SessionResultResponse, SessionSummaryResponse, SubmitReviewRequest, openapi_spec,
+    SessionResultResponse, SessionSummaryResponse, SetStarredRequest, SubmitReviewRequest,
+    openapi_spec,
 };
 use crate::ocr::OcrEngine;
 use crate::render;
@@ -57,6 +58,8 @@ impl AppState {
             .filter(|s| s.status == SessionStatus::Active)
             .count() as i64;
         crate::metrics::SESSIONS_ACTIVE.set(active);
+        crate::metrics::SESSIONS_STORED.set(mgr.count() as i64);
+        crate::metrics::SESSIONS_STARRED.set(mgr.starred_count() as i64);
         Self {
             sessions: Arc::new(RwLock::new(mgr)),
             notifiers: Arc::new(RwLock::new(HashMap::new())),
@@ -149,6 +152,7 @@ pub fn build_app(state: AppState) -> Router {
         )
         .route("/api/sessions/{id}/result", get(get_result))
         .route("/api/sessions/{id}/content", put(update_content))
+        .route("/api/sessions/{id}/star", put(set_starred))
         .route("/api/sessions/{id}/submit", post(submit_review))
         .route("/api/sessions/{id}/request_update", post(request_update))
         .route("/ws/{id}", get(crate::ws::ws_handler))
@@ -191,8 +195,14 @@ async fn track_metrics(req: Request, next: Next) -> Response {
     resp
 }
 
-async fn health() -> &'static str {
-    "ok"
+async fn health() -> Json<serde_json::Value> {
+    let exe = std::env::current_exe()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| "unknown".to_string());
+    Json(serde_json::json!({
+        "status": "ok",
+        "exe": exe,
+    }))
 }
 
 async fn openapi_json() -> Json<serde_json::Value> {
@@ -263,6 +273,8 @@ async fn create_session(
             content,
             callback_url: params.callback_url,
             tags: HashMap::new(),
+            starred: false,
+            origin: None,
         }
     };
 
@@ -273,6 +285,8 @@ async fn create_session(
         request.title,
         request.callback_url,
         request.tags,
+        request.starred,
+        request.origin,
     );
     tracing::info!(
         id = %session.id,
@@ -283,6 +297,7 @@ async fn create_session(
     crate::metrics::SESSIONS_CREATED.inc();
     crate::metrics::SESSIONS_ACTIVE.inc();
     crate::metrics::SESSIONS_STORED.set(mgr.count() as i64);
+    crate::metrics::SESSIONS_STARRED.set(mgr.starred_count() as i64);
     crate::metrics::SESSION_CONTENT_BYTES.observe(content_len as f64);
 
     (
@@ -299,6 +314,7 @@ async fn create_session(
 #[derive(Deserialize, Default)]
 struct ListParams {
     status: Option<String>,
+    starred: Option<bool>,
 }
 
 async fn list_sessions(
@@ -313,8 +329,16 @@ async fn list_sessions(
             Some(st) => s.status.as_str().eq_ignore_ascii_case(st),
             None => true,
         })
+        .filter(|s| match params.starred {
+            Some(want) => s.starred == want,
+            None => true,
+        })
         .collect();
-    filtered.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    filtered.sort_by(|a, b| {
+        b.starred
+            .cmp(&a.starred)
+            .then_with(|| b.updated_at.cmp(&a.updated_at))
+    });
     Json(
         filtered
             .iter()
@@ -338,30 +362,22 @@ async fn delete_session(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let mut mgr = state.sessions.write().await;
-    if mgr.get(&id).is_none() {
-        return StatusCode::NOT_FOUND;
-    }
-    let was_active = mgr
-        .get(&id)
-        .map(|s| s.status == crate::session::SessionStatus::Active)
-        .unwrap_or(false);
-    if was_active {
-        mgr.cancel(&id);
-    }
-    let webhook = if was_active {
-        mgr.get(&id).and_then(webhook_payload)
-    } else {
-        None
+    let (was_active, webhook) = {
+        let mut mgr = state.sessions.write().await;
+        if mgr.get(&id).is_none() {
+            return StatusCode::NOT_FOUND;
+        }
+        let was_active = mgr.cancel(&id);
+        if was_active {
+            crate::metrics::SESSIONS_CANCELLED.inc();
+            crate::metrics::SESSIONS_ACTIVE.dec();
+        }
+        let webhook = was_active
+            .then(|| mgr.get(&id).and_then(webhook_payload))
+            .flatten();
+        tracing::info!(id = %id, was_active, "session cancelled");
+        (was_active, webhook)
     };
-    mgr.delete(&id);
-    tracing::info!(id = %id, "session deleted");
-    if was_active {
-        crate::metrics::SESSIONS_CANCELLED.inc();
-        crate::metrics::SESSIONS_ACTIVE.dec();
-    }
-    crate::metrics::SESSIONS_STORED.set(mgr.count() as i64);
-    drop(mgr);
     state.notify_and_cleanup(&id).await;
     if was_active {
         state
@@ -381,12 +397,13 @@ async fn delete_session(
 }
 
 async fn purge_sessions(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let (count, stored) = {
+    let (count, stored, starred) = {
         let mut mgr = state.sessions.write().await;
         let n = mgr.purge_finished();
-        (n, mgr.count())
+        (n, mgr.count(), mgr.starred_count())
     };
     crate::metrics::SESSIONS_STORED.set(stored as i64);
+    crate::metrics::SESSIONS_STARRED.set(starred as i64);
     tracing::info!(count, "sessions purged");
     Json(serde_json::json!({ "purged": count }))
 }
@@ -421,6 +438,24 @@ async fn update_content(
             }
         }
     }
+}
+
+async fn set_starred(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<SetStarredRequest>,
+) -> Response {
+    let mut mgr = state.sessions.write().await;
+    if !mgr.set_starred(&id, body.starred) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    crate::metrics::SESSIONS_STARRED.set(mgr.starred_count() as i64);
+    let response = mgr
+        .get(&id)
+        .map(SessionDetailResponse::from_session)
+        .expect("session must exist after set_starred returned true");
+    tracing::info!(id = %id, starred = body.starred, "session star toggled");
+    Json(response).into_response()
 }
 
 fn webhook_payload(session: &Session) -> Option<(String, SessionResultResponse)> {
@@ -601,6 +636,12 @@ async fn request_update(
     let mut annotations = body.annotations;
 
     if let Some(engine) = &state.ocr_engine {
+        let ocr_start = std::time::Instant::now();
+        let needs_ocr_count = annotations
+            .iter()
+            .filter(|g| g.recognized_text.is_none() && !g.strokes.is_empty())
+            .count();
+        tracing::debug!(id = %id, total = annotations.len(), needs_ocr = needs_ocr_count, "request_update: starting OCR");
         let futs: Vec<_> = annotations
             .iter()
             .map(|g| {
@@ -622,6 +663,8 @@ async fn request_update(
                 ann.recognized_text = Some(t);
             }
         }
+        let ocr_ms = ocr_start.elapsed().as_millis();
+        tracing::debug!(id = %id, ocr_ms = ocr_ms, "request_update: OCR complete");
     }
 
     tracing::info!(id = %id, version, count = annotations.len(), "annotation_result broadcast");

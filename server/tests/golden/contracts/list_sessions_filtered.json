@@ -3,6 +3,7 @@
     "created_at": "<timestamp>",
     "id": "<id>",
     "schema_version": 1,
+    "starred": false,
     "status": "Submitted",
     "tags": {
       "purpose": "filter"
