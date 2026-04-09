@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "eink-channel": {
+      "command": "eink-channel-server"
+    }
+  }
+}

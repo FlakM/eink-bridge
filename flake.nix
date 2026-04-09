@@ -66,12 +66,28 @@
           '';
         });
 
+        einkChannel = pkgs.buildNpmPackage {
+          pname = "eink-channel";
+          version = "0.1.0";
+          src = ./harness/channels/eink-channel;
+          npmDepsHash = "sha256-F9jXvaYG9b7ZvqYSGGI8xouFt8yIYcM4aIVUdy22E/s=";
+          dontBuild = true;
+          nativeBuildInputs = [ pkgs.makeWrapper ];
+          installPhase = ''
+            mkdir -p $out/libexec/eink-channel $out/bin
+            cp channel.ts $out/libexec/eink-channel/
+            cp -r node_modules $out/libexec/eink-channel/
+            makeWrapper ${pkgs.nodejs}/bin/node $out/bin/eink-channel-server \
+              --add-flags "--experimental-strip-types $out/libexec/eink-channel/channel.ts"
+          '';
+        };
+
         harness = pkgs.stdenvNoCC.mkDerivation {
           name = "eink-bridge-harness";
           src = ./harness;
           phases = [ "installPhase" ];
           installPhase = ''
-            mkdir -p $out/skills $out/output-styles
+            mkdir -p $out/skills $out/output-styles $out/channels
             cp -r $src/skills/* $out/skills/
             cp -r $src/output-styles/* $out/output-styles/
           '';
@@ -80,7 +96,7 @@
         packages = {
           default = einkBridge;
           eink-bridge = einkBridge;
-          inherit harness;
+          inherit harness einkChannel;
         };
 
         devShells.default = craneLib.devShell {
@@ -95,6 +111,7 @@
             androidSdk
             jdk17
             einkBridge
+            einkChannel
           ];
           shellHook = let
             sdkPath = "${androidSdk}/libexec/android-sdk";

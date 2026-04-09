@@ -1,11 +1,13 @@
 ---
 name: eink
-description: Push content to Boox e-ink tablet for iterative review. Supports multiple annotation rounds — user annotates, agent updates document, tablet reloads.
+description: Push content to Boox e-ink tablet for iterative review. Supports multiple annotation rounds — user annotates, agent updates document via update_session tool, tablet reloads.
 ---
 
 # E-Ink Review
 
-Push content to the Boox for reading and annotation. Supports iterative rounds: the user annotates and taps "Request Update", the agent rewrites the document, and the tablet reloads automatically.
+Push content to the Boox for reading and annotation. Supports iterative rounds: the user annotates and taps "Request Update", the agent rewrites the document and calls `update_session`, and the tablet reloads automatically.
+
+Requires the `eink-channel` MCP server to be running (start Claude Code with `--dangerously-load-development-channels server:eink-channel`).
 
 ## Usage
 
@@ -48,62 +50,33 @@ Push content to the Boox for reading and annotation. Supports iterative rounds: 
 - If the user provided a file path, use it directly.
 - Otherwise, write a context summary to `/tmp/eink-review-XXXXX.md`.
 
-### 2. Reserve a webhook port
+### 2. Create session with channel callback URL
 
 ```bash
-PORT=$(python3 -c "import socket; s=socket.socket(); s.bind(('',0)); p=s.getsockname()[1]; s.close(); print(p)")
-echo "PORT:$PORT"
-```
-
-### 3. Create session with callback URL
-
-```bash
-SESSION_ID=$(eink-review push --async --callback-url "http://127.0.0.1:$PORT/" <file>)
+CHANNEL_PORT=${EINK_CHANNEL_PORT:-8789}
+SESSION_ID=$(eink-review push --async --callback-url "http://127.0.0.1:$CHANNEL_PORT/" <file>)
 echo "SESSION_ID:$SESSION_ID"
 ```
 
+Tell the user the session is active. You are free to answer other questions while waiting — events will arrive automatically via the `eink-channel` MCP server.
+
 ---
 
-## Launch webhook listener
+## When a channel event arrives
 
-Run the following as a **background Bash command** (`run_in_background: true`).
-Substitute the actual numeric port for `PORT_NUMBER`:
+Channel events arrive as:
 
-```bash
-python3 -c "
-import http.server, json
-
-class H(http.server.BaseHTTPRequestHandler):
-    def do_POST(self):
-        body = self.rfile.read(int(self.headers.get('Content-Length', 0))).decode()
-        self.send_response(200)
-        self.end_headers()
-        data = json.loads(body)
-        if data.get('type') == 'annotation_result':
-            print('EVENT:ANNOTATION_RESULT ' + body, flush=True)
-        elif data.get('status') == 'Submitted':
-            print('EVENT:SUBMITTED ' + body, flush=True)
-        else:
-            print('EVENT:CANCELLED', flush=True)
-        raise SystemExit(0)
-    def log_message(self, *a): pass
-
-http.server.HTTPServer(('127.0.0.1', PORT_NUMBER), H).handle_request()
-"
+```xml
+<channel source="eink-channel" event_type="..." session_id="...">
+{ ...JSON body... }
+</channel>
 ```
 
-This blocks indefinitely until the server POSTs — no timeout, no reconnect loops.
-Tell the user the session is active. You are free to answer other questions while waiting.
+Match `session_id` to the active session. Ignore events for other sessions.
 
----
+### Case: `event_type="annotation_result"`
 
-## When the webhook listener returns
-
-The background Bash command prints one line to stdout. Inspect it:
-
-### Case: annotation result
-
-Output starts with `EVENT:ANNOTATION_RESULT`. JSON follows. Structure:
+JSON body structure:
 
 ```json
 {
@@ -132,26 +105,32 @@ Key fields:
 
 Rewrite the document applying the feedback. **Preserve heading text exactly** — IDs are derived from it.
 
-Write updated content to `/tmp/eink-update-XXXXX.md`, then push the update:
-
-```bash
-eink-review update <session-id> /tmp/eink-update-XXXXX.md
+Then call the `update_session` tool:
+```
+update_session(session_id="<id>", content="<full updated markdown>")
 ```
 
-Then **re-launch the webhook listener on the same PORT** (it's free now that the previous listener exited).
+The tablet reloads automatically.
 
-### Case: submitted result
+### Case: `event_type="submitted"`
 
-Output starts with `EVENT:SUBMITTED`. The JSON is `SessionResultResponse`. Key fields:
+JSON is `SessionResultResponse`. Key fields:
 - `annotation_images[]` — base64 PNG strings; save each to `/tmp/eink-img-N.png` and use the **Read** tool to view
 - `verdict` — `LGTM` or `CHANGES`
 - `annotations[]` — final annotation set
 
 Summarize all feedback and continue the conversation.
 
-### Case: cancelled
+### Case: `event_type="cancelled"`
 
-Output is `EVENT:CANCELLED`. Tell the user the session was cancelled.
+Tell the user the session was cancelled.
+
+---
+
+## When the watch fallback returns (continue sessions)
+
+Output starts with `EVENT:ANNOTATION_RESULT` or `EVENT:SUBMITTED` — same JSON structure as above.
+Handle identically: rewrite doc → `update_session` for annotation_result, summarize for submitted.
 
 ### Case: connection refused
 
@@ -232,5 +211,6 @@ sequenceDiagram
 - Prefer a graph or mindmap over a bullet list whenever structure or status matters.
 - Color every node intentionally.
 - The `eink-serve` systemd service must be running. Connection refused → `systemctl --user start eink-serve`.
-- You are NOT blocked while waiting — the webhook listener runs in the background.
+- The `eink-channel` MCP server must be running — start Claude Code with `--dangerously-load-development-channels server:eink-channel`.
+- You are NOT blocked while waiting — channel events arrive asynchronously.
 - After all rounds complete, summarize all feedback and continue informed by it.
