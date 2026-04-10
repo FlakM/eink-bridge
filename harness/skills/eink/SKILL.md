@@ -64,6 +64,13 @@ SESSION_ID=$(eink-review push --async --callback-url "http://127.0.0.1:$CHANNEL_
 echo "SESSION_ID:$SESSION_ID"
 ```
 
+Immediately after getting the session ID, call the `subscribe_session` tool with it:
+```
+subscribe_session(session_id="<SESSION_ID>")
+```
+
+This claims the session so that webhook events are routed only to this Claude instance and not to other running instances.
+
 Tell the user the session is active. You are free to answer other questions while waiting — events will arrive automatically via the `eink-channel` MCP server.
 
 ---
