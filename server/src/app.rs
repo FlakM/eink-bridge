@@ -678,9 +678,28 @@ async fn request_update(
     };
     state.ws_send(&id, msg.clone()).await;
     if let Some(url) = callback_url {
+        let (version, annotations) = match msg {
+            crate::ws::ServerMessage::AnnotationResult { version, annotations } => {
+                (version, annotations)
+            }
+            _ => unreachable!(),
+        };
         tokio::spawn(async move {
+            #[derive(serde::Serialize)]
+            struct AnnotationWebhook {
+                #[serde(rename = "type")]
+                r#type: &'static str,
+                id: String,
+                version: u32,
+                annotations: Vec<crate::api::AnnotationGroup>,
+            }
             let client = reqwest::Client::new();
-            let _ = client.post(&url).json(&msg).send().await;
+            let _ = client.post(&url).json(&AnnotationWebhook {
+                r#type: "annotation_result",
+                id,
+                version,
+                annotations,
+            }).send().await;
         });
     }
     StatusCode::OK.into_response()

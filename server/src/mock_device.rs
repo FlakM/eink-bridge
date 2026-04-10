@@ -168,11 +168,7 @@ async fn simulate_request_update(server: &str, session_id: &str) {
         "annotations": [],
         "typed_notes": "mock annotation"
     });
-    if ws
-        .send(WsMessage::Text(msg.to_string().into()))
-        .await
-        .is_err()
-    {
+    if ws.send(WsMessage::Text(msg.to_string())).await.is_err() {
         eprintln!("mock-device: failed to send request_update");
         return;
     }

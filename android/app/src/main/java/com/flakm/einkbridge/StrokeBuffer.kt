@@ -119,6 +119,20 @@ internal class StrokeBuffer {
         currentPoints = mutableListOf()
     }
 
+    fun removeStrokes(indices: Collection<Int>) {
+        val sorted = indices.sortedDescending()
+        for (idx in sorted) {
+            if (idx in _strokes.indices) _strokes.removeAt(idx)
+        }
+    }
+
+    fun shiftStrokes(indices: Collection<Int>, dx: Float, dy: Float) {
+        for (idx in indices) {
+            val stroke = _strokes.getOrNull(idx) ?: continue
+            _strokes[idx] = stroke.copy(points = stroke.points.map { (x, y) -> x + dx to y + dy })
+        }
+    }
+
     fun undo() {
         if (_strokes.isNotEmpty()) _strokes.removeAt(_strokes.lastIndex)
     }
@@ -132,20 +146,27 @@ internal class StrokeBuffer {
      * Removes every committed stroke that comes within [radius] screen-pixels of any point in [path].
      * [path] is in screen coordinates; stored strokes are in document coordinates.
      */
-    fun erase(path: List<Pair<Float, Float>>, radius: Float, transform: ViewTransform = ViewTransform()): Boolean {
-        if (path.isEmpty()) return false
+    fun erase(path: List<Pair<Float, Float>>, radius: Float, transform: ViewTransform = ViewTransform()): Set<Int> {
+        if (path.isEmpty()) return emptySet()
         val docPath = path.map { (x, y) -> transform.screenToDocX(x) to transform.screenToDocY(y) }
         val docRadius = radius / transform.scale
         val r2 = docRadius * docRadius
-        val before = _strokes.size
-        _strokes.removeAll { stroke ->
-            stroke.points.any { (sx, sy) ->
+        val removed = mutableSetOf<Int>()
+        val iter = _strokes.listIterator()
+        while (iter.hasNext()) {
+            val idx = iter.nextIndex()
+            val stroke = iter.next()
+            val hit = stroke.points.any { (sx, sy) ->
                 docPath.any { (ex, ey) ->
                     (ex - sx) * (ex - sx) + (ey - sy) * (ey - sy) <= r2
                 }
             }
+            if (hit) {
+                removed.add(idx)
+                iter.remove()
+            }
         }
-        return _strokes.size < before
+        return removed
     }
 
     fun toJson(): String {
@@ -255,6 +276,17 @@ internal fun distToElement(px: Float, py: Float, el: ElementEntry): Float {
     val dx = max(el.l - px, max(0f, px - el.r))
     val dy = max(el.t - py, max(0f, py - el.b))
     return sqrt(dx * dx + dy * dy)
+}
+
+internal fun fuzzyTextScore(a: String, b: String): Float {
+    if (a.isEmpty() || b.isEmpty()) return 0f
+    val al = a.lowercase(); val bl = b.lowercase()
+    if (al == bl) return 1f
+    if (al.startsWith(bl) || bl.startsWith(al)) return 0.8f
+    if (al.contains(bl) || bl.contains(al)) return 0.7f
+    val aChars = al.toSet(); val bChars = bl.toSet()
+    val overlap = aChars.intersect(bChars).size.toFloat()
+    return overlap / maxOf(aChars.size, bChars.size)
 }
 
 internal fun elementToRef(el: ElementEntry): ElementRef =
@@ -453,6 +485,30 @@ private fun pairsFromJson(arr: JSONArray): List<Pair<Float, Float>> =
         val p = arr.getJSONArray(i)
         p.getDouble(0).toFloat() to p.getDouble(1).toFloat()
     }
+
+internal fun pointToSegmentDist(px: Float, py: Float, ax: Float, ay: Float, bx: Float, by: Float): Float {
+    val dx = bx - ax; val dy = by - ay
+    val lenSq = dx * dx + dy * dy
+    if (lenSq == 0f) return sqrt(((px - ax) * (px - ax) + (py - ay) * (py - ay)).toDouble()).toFloat()
+    val t = ((px - ax) * dx + (py - ay) * dy) / lenSq
+    val tc = t.coerceIn(0f, 1f)
+    val projX = ax + tc * dx; val projY = ay + tc * dy
+    return sqrt(((px - projX) * (px - projX) + (py - projY) * (py - projY)).toDouble()).toFloat()
+}
+
+internal fun distToPolygonBoundary(px: Float, py: Float, polygon: List<Pair<Float, Float>>): Float {
+    if (polygon.size < 2) return Float.MAX_VALUE
+    var minDist = Float.MAX_VALUE
+    var j = polygon.size - 1
+    for (i in polygon.indices) {
+        val (ax, ay) = polygon[i]
+        val (bx, by) = polygon[j]
+        val d = pointToSegmentDist(px, py, ax, ay, bx, by)
+        if (d < minDist) minDist = d
+        j = i
+    }
+    return minDist
+}
 
 internal fun pointInPolygon(px: Float, py: Float, polygon: List<Pair<Float, Float>>): Boolean {
     var inside = false

@@ -28,7 +28,9 @@ internal class OcrManager(
     private val onGroupRecognized: (groupId: Int, text: String) -> Unit,
     private val onUnboundResults: (List<OcrResult>) -> Unit,
     private val onPendingChanged: (remaining: Int, total: Int) -> Unit,
+    private val onError: ((message: String) -> Unit)? = null,
 ) {
+    private var lastErrorMs = 0L
     private val semaphore = Semaphore(PARALLELISM)
     private var debounceJob: Job? = null
     private val clusterCache = mutableMapOf<Set<Stroke>, String>()
@@ -50,6 +52,11 @@ internal class OcrManager(
         clusterCache.clear()
     }
 
+    fun evictCacheFor(strokes: Collection<Stroke>) {
+        val set = strokes.toSet()
+        clusterCache.keys.removeAll { key -> key.any { it in set } }
+    }
+
     private data class Task(
         val label: String,
         val strokes: List<Stroke>,
@@ -69,8 +76,9 @@ internal class OcrManager(
         }
 
         val boundIndices = bindGroups.flatMapTo(mutableSetOf()) { it.strokeIndices }
-        // keep global indices alongside strokes
-        val unboundIndexed = allStrokes.mapIndexedNotNull { i, s -> if (i !in boundIndices) i to s else null }
+        val unboundIndexed = allStrokes.mapIndexedNotNull { i, s ->
+            if (i !in boundIndices) i to s else null
+        }
         val clusters = clusterStrokes(unboundIndexed.map { it.second })
         val clusterResults = arrayOfNulls<OcrResult>(clusters.size)
 
@@ -127,16 +135,30 @@ internal class OcrManager(
                     semaphore.withPermit {
                         val pts = task.strokes.sumOf { it.points.size }
                         Log.d(TAG, "start: ${task.label} ($pts pts)")
+                        val t0 = System.currentTimeMillis()
                         try {
                             val text = recognize(task.strokes)
+                            val ms = System.currentTimeMillis() - t0
                             if (text != null) {
-                                Log.d(TAG, "done: ${task.label} -> \"$text\"")
+                                Log.i(TAG, "done: ${task.label} ($pts pts) -> \"$text\" [${ms}ms]")
+                                MetricsReporter.recordOcrDuration(ms)
                                 task.onResult(text)
                             } else {
-                                Log.w(TAG, "empty: ${task.label}")
+                                Log.w(TAG, "empty: ${task.label} [${ms}ms]")
+                                val now = System.currentTimeMillis()
+                                if (now - lastErrorMs > ERROR_THROTTLE_MS) {
+                                    lastErrorMs = now
+                                    onError?.invoke("OCR empty for ${task.label} (${ms}ms)")
+                                }
                             }
                         } catch (e: Exception) {
-                            Log.e(TAG, "error: ${task.label}: ${e.javaClass.simpleName}: ${e.message}")
+                            val ms = System.currentTimeMillis() - t0
+                            Log.e(TAG, "error: ${task.label} [${ms}ms]: ${e.javaClass.simpleName}: ${e.message}")
+                            val now = System.currentTimeMillis()
+                            if (now - lastErrorMs > ERROR_THROTTLE_MS) {
+                                lastErrorMs = now
+                                onError?.invoke("OCR failed (${ms}ms): ${e.message?.take(60)}")
+                            }
                         } finally {
                             val r = remaining.decrementAndGet()
                             onPendingChanged(r, total)
@@ -153,6 +175,7 @@ internal class OcrManager(
 
     companion object {
         const val PARALLELISM = 4
-        const val DEBOUNCE_MS = 2000L
+        const val DEBOUNCE_MS = 3000L
+        const val ERROR_THROTTLE_MS = 10_000L
     }
 }

@@ -103,7 +103,7 @@ deploy: nix-build
     @systemctl --user is-active eink-serve
 
 # build and deploy all components in parallel (server, CLI, APK)
-deploy-all:
+deploy-all host='localhost:3333':
     #!/usr/bin/env bash
     set -euo pipefail
     echo "=== building server (nix) and APK in parallel ==="
@@ -113,9 +113,26 @@ deploy-all:
     GRADLE_PID=$!
     wait $NIX_PID
     echo "--- server built, restarting service ---"
+    EXPECTED=$(readlink -f result/bin/eink-serve)
+    echo "expected exe: $EXPECTED"
     systemctl --user restart eink-serve
     direnv reload
     echo "service restarted, direnv reloaded"
+    echo "--- waiting for server to report correct exe ---"
+    RUNNING=""
+    for i in $(seq 1 20); do
+        RUNNING=$(curl -sf http://{{host}}/api/health 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('exe',''))" 2>/dev/null || true)
+        if [ "$RUNNING" = "$EXPECTED" ]; then
+            echo "server running $RUNNING — ok"
+            break
+        fi
+        echo "  attempt $i: got '$RUNNING', retrying..."
+        sleep 1
+    done
+    if [ "$RUNNING" != "$EXPECTED" ]; then
+        echo "ERROR: server exe '$RUNNING' != expected '$EXPECTED'" >&2
+        exit 1
+    fi
     wait $GRADLE_PID
     echo "--- APK built, installing via adb ---"
     adb install -r android/app/build/outputs/apk/debug/app-debug.apk

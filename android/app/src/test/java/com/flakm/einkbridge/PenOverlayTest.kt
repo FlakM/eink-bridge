@@ -539,19 +539,19 @@ class PenOverlayTest {
     // ── enable/disable ─────────────────────────────────────────────────────────
 
     @Test
-    fun disableDrawing_delegates_to_controller() {
+    fun onPaused_disables_controller() {
         val (overlay, _, mock) = buildOverlayWithInit()
         assertTrue(mock.drawingEnabled)
-        overlay.disableDrawing()
+        overlay.onPaused()
         assertFalse(mock.drawingEnabled)
     }
 
     @Test
-    fun enableDrawing_delegates_to_controller() {
+    fun onResumed_re_enables_controller() {
         val (overlay, _, mock) = buildOverlayWithInit()
-        overlay.disableDrawing()
+        overlay.onPaused()
         assertFalse(mock.drawingEnabled)
-        overlay.enableDrawing()
+        overlay.onResumed()
         assertTrue(mock.drawingEnabled)
     }
 
@@ -561,6 +561,99 @@ class PenOverlayTest {
         assertTrue(mock.isOpen)
         overlay.destroy()
         assertFalse("Controller must be closed after destroy", mock.isOpen)
+    }
+
+    // ── ToolMode / stuck-disabled drawing regression tests ────────────────────
+
+    @Test
+    fun enterBindMode_disables_drawing_exitBindMode_re_enables() {
+        val (overlay, _, mock) = buildOverlayWithInit()
+        assertTrue(mock.drawingEnabled)
+        overlay.setMode(ToolMode.TAG)
+        assertFalse("TAG mode must disable the SDK", mock.drawingEnabled)
+        overlay.setMode(ToolMode.DRAW)
+        assertTrue("Returning to DRAW must re-enable the SDK", mock.drawingEnabled)
+    }
+
+    @Test
+    fun rapid_mode_toggle_leaves_drawing_enabled_in_final_draw_state() {
+        val (overlay, _, mock) = buildOverlayWithInit()
+        repeat(20) {
+            overlay.setMode(ToolMode.TAG)
+            overlay.setMode(ToolMode.MOVE)
+            overlay.setMode(ToolMode.DRAW)
+        }
+        assertTrue(
+            "After rapid mode toggling, DRAW mode must leave the SDK enabled",
+            mock.drawingEnabled,
+        )
+        assertNotNull("Limit rect must still be set", mock.lastLimitRect)
+    }
+
+    @Test
+    fun onResume_while_in_bind_mode_keeps_drawing_disabled() {
+        val (overlay, _, mock) = buildOverlayWithInit()
+        overlay.setMode(ToolMode.TAG)
+        assertFalse(mock.drawingEnabled)
+        overlay.onPaused()
+        overlay.onResumed()
+        assertFalse(
+            "onResume must not force-enable drawing while a gesture mode is active",
+            mock.drawingEnabled,
+        )
+        overlay.setMode(ToolMode.DRAW)
+        assertTrue("Exit to DRAW must re-enable drawing", mock.drawingEnabled)
+    }
+
+    @Test
+    fun fingerDown_then_mode_change_then_up_does_not_leave_drawing_disabled() {
+        val buf = StrokeBuffer()
+        val mock = MockPenController(buf)
+        val webView = buildFakeWebView()
+        val overlay = PenOverlay(
+            webView = webView, buf = buf, controllerOverride = mock,
+            limitRectOverride = android.graphics.Rect(0, 0, 400, 600),
+            transformOverride = { ViewTransform() },
+        )
+        overlay.init()
+        webView.dispatchTouchEvent(buildFingerEvent(MotionEvent.ACTION_DOWN))
+        assertFalse(mock.drawingEnabled)
+        // User rapidly toggles Tag mode during the finger-down window.
+        overlay.setMode(ToolMode.TAG)
+        overlay.setMode(ToolMode.DRAW)
+        webView.dispatchTouchEvent(buildFingerEvent(MotionEvent.ACTION_UP))
+        assertTrue(
+            "Drawing must be re-enabled after finger UP once back in DRAW mode",
+            mock.drawingEnabled,
+        )
+    }
+
+    @Test
+    fun onResumed_does_not_reset_render_buffer_in_draw_mode() {
+        // Regression: lifecycle-driven re-enable must use setEnabled(true), not a full
+        // close+reopen. A close+reopen between pen strokes drops committed strokes from
+        // the Onyx visible layer, making new letters vanish in the pause between them.
+        val (overlay, _, mock) = buildOverlayWithInit()
+        val resetsBefore = mock.renderBufferResetCount
+        overlay.onPaused()
+        overlay.onResumed()
+        assertEquals(
+            "onResumed must not trigger resetRenderBuffer",
+            resetsBefore, mock.renderBufferResetCount,
+        )
+        assertTrue(mock.drawingEnabled)
+    }
+
+    @Test
+    fun resetRenderBuffer_replays_limit_rect_on_mock() {
+        val (_, _, mock) = buildOverlayWithInit()
+        val originalLimit = mock.lastLimitRect
+        assertNotNull(originalLimit)
+        mock.resetRenderBuffer()
+        assertEquals(
+            "MockPenController must preserve the limit rect across resetRenderBuffer",
+            originalLimit, mock.lastLimitRect,
+        )
     }
 
     // ── StrokeView ─────────────────────────────────────────────────────────────

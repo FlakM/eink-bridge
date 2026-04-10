@@ -43,7 +43,7 @@ async fn main() {
 
     // ── Sequential ────────────────────────────────────────────────────────────
     println!("=== Sequential OCR ({} samples) ===", SAMPLES.len());
-    println!("{:<22} {:>9}  {}", "sample", "wall ms", "recognized text");
+    println!("{:<22} {:>9}  recognized text", "sample", "wall ms");
     println!("{}", "─".repeat(70));
 
     let mut seq_times: Vec<u128> = Vec::new();
@@ -79,7 +79,7 @@ async fn main() {
         SAMPLES.len(),
         parallelism
     );
-    println!("{:<22} {:>9}  {}", "sample", "wall ms", "recognized text");
+    println!("{:<22} {:>9}  recognized text", "sample", "wall ms");
     println!("{}", "─".repeat(70));
 
     let sem = Arc::new(Semaphore::new(parallelism));

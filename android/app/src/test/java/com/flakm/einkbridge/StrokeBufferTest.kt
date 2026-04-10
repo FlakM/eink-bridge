@@ -125,31 +125,31 @@ class StrokeBufferTest {
     @Test fun eraseRemovesStrokeWithinRadius() {
         buf.begin(50f, 50f); buf.end(100f, 50f)
         val removed = buf.erase(listOf(55f to 50f), 10f)
-        assertTrue(removed)
+        assertTrue(removed.isNotEmpty())
         assertTrue(buf.isEmpty)
     }
 
     @Test fun eraseDoesNotRemoveStrokeOutsideRadius() {
         buf.begin(50f, 50f); buf.end(100f, 50f)
         val removed = buf.erase(listOf(200f to 200f), 10f)
-        assertFalse(removed)
+        assertTrue(removed.isEmpty())
         assertEquals(1, buf.size)
     }
 
     @Test fun eraseEmptyPathReturnsFalse() {
         buf.begin(0f, 0f); buf.end(10f, 10f)
-        assertFalse(buf.erase(emptyList(), 10f))
+        assertTrue(buf.erase(emptyList(), 10f).isEmpty())
         assertEquals(1, buf.size)
     }
 
     @Test fun eraseReturnsFalseWhenNothingMatched() {
         buf.begin(0f, 0f); buf.end(10f, 10f)
-        assertFalse(buf.erase(listOf(500f to 500f), 5f))
+        assertTrue(buf.erase(listOf(500f to 500f), 5f).isEmpty())
     }
 
     @Test fun eraseRemovesMultipleMatchingStrokes() {
         repeat(3) { buf.begin(50f, 50f); buf.end(100f, 50f) }
-        assertTrue(buf.erase(listOf(55f to 50f), 10f))
+        assertTrue(buf.erase(listOf(55f to 50f), 10f).isNotEmpty())
         assertTrue(buf.isEmpty)
     }
 

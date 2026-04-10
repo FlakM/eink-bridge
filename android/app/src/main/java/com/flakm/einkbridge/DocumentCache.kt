@@ -36,6 +36,8 @@ internal class DocumentCache(private val context: Context) {
                 put("status", s.status)
                 put("created_at", s.createdAt)
                 put("updated_at", s.updatedAt)
+                put("starred", s.starred)
+                s.originCwd?.let { put("origin_cwd", it) }
             })
         }
         prefs.edit().putString("sessions", arr.toString()).apply()
@@ -53,6 +55,8 @@ internal class DocumentCache(private val context: Context) {
                     status = o.getString("status"),
                     createdAt = o.getString("created_at"),
                     updatedAt = o.optString("updated_at", o.getString("created_at")),
+                    starred = o.optBoolean("starred", false),
+                    originCwd = if (o.has("origin_cwd")) o.getString("origin_cwd") else null,
                 )
             }
         } catch (_: Exception) { emptyList() }

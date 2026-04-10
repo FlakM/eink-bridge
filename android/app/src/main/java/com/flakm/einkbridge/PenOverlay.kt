@@ -19,6 +19,14 @@ import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 
 /**
+ * The high-level user-facing tool mode.
+ *
+ * Pen drawing is enabled only in [DRAW]; [TAG] and [MOVE] are gesture-driven modes
+ * that consume finger events and must keep the Onyx SDK disabled to avoid accidental strokes.
+ */
+enum class ToolMode { DRAW, TAG, MOVE }
+
+/**
  * Pure function — no Android framework dependency beyond integer constants.
  *
  * Returns:
@@ -55,6 +63,13 @@ internal class OnyxPenController(
     private val onEraseApplied: (Set<Int>) -> Unit = {},
     internal var onStrokeProgress: (() -> Unit)? = null,
     private val onStrokeCommitted: (() -> Unit)? = null,
+    internal var onErasePath: ((path: List<Pair<Float, Float>>, transform: ViewTransform) -> Unit)? = null,
+    /**
+     * Called after a stroke/erase ends to request the SDK be re-enabled.
+     * Routed through [PenOverlay.applyDrawingState] so a mode change during the
+     * 50 ms cooldown suppresses the re-enable instead of leaving the SDK on in bind/select mode.
+     */
+    internal var requestReEnable: (() -> Unit)? = null,
 ) : PenInputController {
     private var touchHelper: TouchHelper? = null
     private var penViewRef: java.lang.ref.WeakReference<View>? = null
@@ -63,10 +78,15 @@ internal class OnyxPenController(
     private var eraserPath = mutableListOf<Pair<Float, Float>>()
     private var currentWidth = 3f
     private var moveCount = 0
+    private var lastLimitRect: Rect? = null
+    private var lastExcludeRects: List<Rect> = emptyList()
+    private var currentStyle: Int = TouchHelper.STROKE_STYLE_PENCIL
+    private var pendingReEnable: Runnable? = null
 
     private val callback = object : RawInputCallback() {
         override fun onBeginRawDrawing(b: Boolean, tp: TouchPoint) {
             moveCount = 0
+            Log.d(DRAW_TAG, "onBeginRawDrawing eraseMode=$eraseMode tp=(${tp.x},${tp.y}) bufSize=${buf.size}")
             if (eraseMode) {
                 eraserPath = mutableListOf(tp.x to tp.y)
             } else {
@@ -80,21 +100,21 @@ internal class OnyxPenController(
             }
         }
         override fun onEndRawDrawing(b: Boolean, tp: TouchPoint) {
+            Log.d(DRAW_TAG, "onEndRawDrawing eraseMode=$eraseMode bufSize=${buf.size} movePoints=$moveCount")
             if (eraseMode) {
                 eraserPath.add(tp.x to tp.y)
-                val removed = buf.erase(eraserPath, ERASER_RADIUS, getTransform())
+                val t = getTransform()
+                val path = eraserPath.toList()
+                val removed = buf.erase(path, ERASER_RADIUS, t)
                 eraserPath.clear()
+                onErasePath?.invoke(path, t)
                 onEraseApplied(removed)
             } else {
                 buf.commit()
                 onStrokeProgress?.invoke()
                 onStrokeCommitted?.invoke()
             }
-            // Briefly disable raw drawing so pending finger taps on the
-            // toolbar aren't blocked, then re-enable for the next pen stroke.
-            val helper = touchHelper ?: return
-            helper.setRawDrawingEnabled(false)
-            penViewRef?.get()?.postDelayed({ helper.setRawDrawingEnabled(true) }, 50)
+            scheduleReEnableAfterCooldown()
         }
         override fun onRawDrawingTouchPointMoveReceived(tp: TouchPoint) {
             moveCount++
@@ -113,60 +133,110 @@ internal class OnyxPenController(
         override fun onRawErasingTouchPointListReceived(list: TouchPointList) {}
         override fun onEndRawErasing(b: Boolean, tp: TouchPoint) {
             eraserPath.add(tp.x to tp.y)
-            val removed = buf.erase(eraserPath, ERASER_RADIUS, getTransform())
+            val t = getTransform()
+            val path = eraserPath.toList()
+            val removed = buf.erase(path, ERASER_RADIUS, t)
             eraserPath.clear()
+            onErasePath?.invoke(path, t)
             onEraseApplied(removed)
-            val helper = touchHelper ?: return
-            helper.setRawDrawingEnabled(false)
-            penViewRef?.get()?.postDelayed({ helper.setRawDrawingEnabled(true) }, 50)
+            scheduleReEnableAfterCooldown()
         }
+    }
+
+    /**
+     * After a stroke or erase ends, disable raw drawing briefly so finger taps on
+     * the toolbar aren't blocked, then ask the overlay whether it should be re-enabled.
+     * Routing the re-enable through [requestReEnable] lets the overlay suppress it
+     * if a mode change happened during the cooldown.
+     */
+    private fun scheduleReEnableAfterCooldown() {
+        val helper = touchHelper ?: return
+        Log.d(DRAW_TAG, "scheduleReEnableAfterCooldown: setRawDrawingEnabled(false) + post 50ms")
+        helper.setRawDrawingEnabled(false)
+        val view = penViewRef?.get() ?: return
+        pendingReEnable?.let { view.removeCallbacks(it) }
+        val runnable = Runnable {
+            pendingReEnable = null
+            Log.d(DRAW_TAG, "cooldown runnable fired: invoking requestReEnable")
+            requestReEnable?.invoke() ?: touchHelper?.setRawDrawingEnabled(true)
+        }
+        pendingReEnable = runnable
+        view.postDelayed(runnable, 50)
     }
 
     override fun open(view: View, limitRect: Rect, excludeRects: List<Rect>) {
         val helper = TouchHelper.create(view, callback)
         touchHelper = helper
         penViewRef = java.lang.ref.WeakReference(view)
-        helper.setStrokeWidth(3.0f)
+        lastLimitRect = Rect(limitRect)
+        lastExcludeRects = excludeRects.toList()
+        currentStyle = TouchHelper.STROKE_STYLE_PENCIL
+        helper.setStrokeWidth(currentWidth)
             .setLimitRect(limitRect, excludeRects)
             .openRawDrawing()
         helper.setRawDrawingRenderEnabled(false)
-        helper.setStrokeStyle(TouchHelper.STROKE_STYLE_PENCIL)
+        helper.setStrokeStyle(currentStyle)
         helper.setRawDrawingEnabled(true)
     }
 
     override fun updateLimitRect(limitRect: Rect, excludeRects: List<Rect>) {
+        lastLimitRect = Rect(limitRect)
+        lastExcludeRects = excludeRects.toList()
         touchHelper?.setLimitRect(limitRect, excludeRects)
     }
 
-    override fun setEnabled(enabled: Boolean) { touchHelper?.setRawDrawingEnabled(enabled) }
-    override fun setStrokeWidth(width: Float) { pendingWidth = width }
+    override fun setEnabled(enabled: Boolean) {
+        Log.d(DRAW_TAG, "setEnabled($enabled)")
+        if (!enabled) cancelPendingReEnable()
+        touchHelper?.setRawDrawingEnabled(enabled)
+    }
+    override fun setStrokeWidth(width: Float) {
+        pendingWidth = width
+        currentWidth = width
+    }
     override fun setStylePencil() {
         eraseMode = false
-        touchHelper?.setStrokeStyle(TouchHelper.STROKE_STYLE_PENCIL)
+        currentStyle = TouchHelper.STROKE_STYLE_PENCIL
+        touchHelper?.setStrokeStyle(currentStyle)
     }
     override fun setStyleBrush() {
         eraseMode = false
-        touchHelper?.setStrokeStyle(TouchHelper.STROKE_STYLE_FOUNTAIN)
+        currentStyle = TouchHelper.STROKE_STYLE_FOUNTAIN
+        touchHelper?.setStrokeStyle(currentStyle)
     }
     override fun setStyleEraser() { eraseMode = true }
 
     override fun resetRenderBuffer() {
         val helper = touchHelper ?: return
+        Log.w(DRAW_TAG, "resetRenderBuffer: CLOSE+REOPEN raw drawing", Throwable("reset stacktrace"))
+        cancelPendingReEnable()
         helper.setRawDrawingEnabled(false)
         helper.closeRawDrawing()
+        // Re-apply all state that closeRawDrawing may have dropped.
+        lastLimitRect?.let { helper.setLimitRect(it, lastExcludeRects) }
+        helper.setStrokeWidth(currentWidth)
         helper.openRawDrawing()
         helper.setRawDrawingRenderEnabled(false)
+        helper.setStrokeStyle(currentStyle)
         helper.setRawDrawingEnabled(true)
     }
 
     override fun close() {
+        cancelPendingReEnable()
         touchHelper?.setRawDrawingEnabled(false)
         touchHelper?.closeRawDrawing()
         touchHelper = null
     }
 
+    private fun cancelPendingReEnable() {
+        val runnable = pendingReEnable ?: return
+        penViewRef?.get()?.removeCallbacks(runnable)
+        pendingReEnable = null
+    }
+
     companion object {
         const val ERASER_RADIUS = 30f
+        const val DRAW_TAG = "EinkDraw"
     }
 }
 
@@ -218,7 +288,10 @@ internal class PenOverlay(
             scheduleOcr()
         }, onStrokeProgress = { notifyStrokeViewLive() }, onStrokeCommitted = {
             lastStrokeEndMs = System.currentTimeMillis()
-            undoStack.add(UndoAction.StrokeAdded(buf.size - 1))
+            val newIdx = buf.size - 1
+            undoStack.add(UndoAction.StrokeAdded(newIdx))
+            tryAbsorbStrokeIntoGroup(newIdx)
+            notifyStrokeView()
             onStrokesChanged?.invoke()
             webView.post { refreshStrokeLinks() }
             scheduleOcr()
@@ -226,11 +299,19 @@ internal class PenOverlay(
         if (c is OnyxPenController && c.onStrokeProgress == null) {
             c.onStrokeProgress = { notifyStrokeViewLive() }
         }
+        if (c is OnyxPenController && c.onErasePath == null) {
+            c.onErasePath = { path, transform -> eraseBindGroupsNearPath(path, transform) }
+        }
+        if (c is OnyxPenController) {
+            c.requestReEnable = { applyDrawingState() }
+        }
         c
     }
     private var initialized = false
     private val ocrResults = mutableListOf<OcrResult>()
     private var lastStrokeEndMs = 0L
+    private var fingerDown = false
+    private var paused = false
 
     var annotationMode = false
         set(value) {
@@ -281,22 +362,30 @@ internal class PenOverlay(
     @SuppressLint("ClickableViewAccessibility")
     private val touchRouter = View.OnTouchListener { _, event ->
         val action = rawDrawingAction(event.pointerCount, event::getToolType, event.actionMasked)
+        val toolTypes = (0 until event.pointerCount).map { event.getToolType(it) }
         if (action != null) {
-            if (!isBindMode && !isSelectMode) {
-                if (!action) {
-                    notifyStrokeView()
-                    controller.setEnabled(false)
-                } else {
-                    controller.resetRenderBuffer()
-                    notifyStrokeView()
-                }
-            }
+            // action == false → finger DOWN, action == true → finger UP/CANCEL
+            fingerDown = !action
+            Log.d(
+                "EinkDraw",
+                "touchRouter FINGER actionMasked=${event.actionMasked} fingerDown=$fingerDown " +
+                    "pointerCount=${event.pointerCount} toolTypes=$toolTypes"
+            )
+            applyDrawingState()
+            notifyStrokeView()
             isBindMode || isSelectMode  // consume finger events to prevent WebView scroll
         } else {
             // Stylus/eraser event — consume it so the WebView doesn't scroll.
             val hasPen = (0 until event.pointerCount).any {
                 val t = event.getToolType(it)
                 t == MotionEvent.TOOL_TYPE_STYLUS || t == MotionEvent.TOOL_TYPE_ERASER
+            }
+            if (event.actionMasked == MotionEvent.ACTION_DOWN || event.actionMasked == MotionEvent.ACTION_UP) {
+                Log.d(
+                    "EinkDraw",
+                    "touchRouter STYLUS actionMasked=${event.actionMasked} hasPen=$hasPen " +
+                        "toolTypes=$toolTypes bufSize=${buf.size}"
+                )
             }
             hasPen
         }
@@ -398,13 +487,19 @@ internal class PenOverlay(
                         }
                     }
                     MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                        if (event.actionMasked == MotionEvent.ACTION_UP) {
+                            when {
+                                dragClusterIdx != null -> commitClusterOffset(dragClusterIdx!!)
+                                dragGroupId != null -> commitGroupOffset(dragGroupId!!)
+                            }
+                        }
                         dragLabel = null; dragGroupId = null; dragClusterIdx = null
                     }
                 }
                 isBindMode && event.pointerCount == 1 -> when (event.actionMasked) {
                     MotionEvent.ACTION_DOWN -> {
-                        val pts = bindHandler.onDown(event.x, event.y)
-                        strokeView?.setBindPath(pts)
+                        bindHandler.onDown(event.x, event.y)
+                        strokeView?.setBindPath(bindHandler.currentPoints())
                         strokeView?.bindDrawingActive = true
                         strokeView?.invalidate()
                         bridge.highlightAll()
@@ -472,12 +567,50 @@ internal class PenOverlay(
         return listOf(Rect(limit.left, limit.bottom - h, limit.right, limit.bottom))
     }
 
-    fun enableDrawing() {
+    /** Lifecycle hook — call from Activity.onResume. */
+    fun onResumed() {
+        paused = false
         if (!initialized) initController()
-        controller.setEnabled(true)
+        applyDrawingState()
     }
 
-    fun disableDrawing() { controller.setEnabled(false) }
+    /** Lifecycle hook — call from Activity.onPause. */
+    fun onPaused() {
+        paused = true
+        applyDrawingState()
+    }
+
+    /**
+     * Recomputes whether raw drawing should be enabled and pushes the result to the controller.
+     * Single source of truth: drawing is enabled iff we are in [ToolMode.DRAW], no finger is down,
+     * and the activity is resumed.
+     *
+     * [reset] = true does a full close+reopen of the raw drawing layer to clear any ghost
+     * stylus/finger paint. Only pass true on events that can leave stale marks on the SDK's
+     * render layer (finger UP, mode exit, undo, clear). The post-stroke cooldown MUST pass false
+     * — close+reopen between strokes causes the Onyx SDK to drop just-committed strokes from the
+     * visible layer, making new letters vanish mid-word.
+     */
+    private fun applyDrawingState(reset: Boolean = false) {
+        if (!initialized) {
+            Log.d("EinkDraw", "applyDrawingState SKIP initialized=false")
+            return
+        }
+        val shouldDraw = !isBindMode && !isSelectMode && !fingerDown && !paused
+        Log.d(
+            "EinkDraw",
+            "applyDrawingState reset=$reset shouldDraw=$shouldDraw " +
+                "isBindMode=$isBindMode isSelectMode=$isSelectMode fingerDown=$fingerDown paused=$paused " +
+                "bufSize=${buf.size}"
+        )
+        if (!shouldDraw) {
+            controller.setEnabled(false)
+        } else if (reset) {
+            controller.resetRenderBuffer()
+        } else {
+            controller.setEnabled(true)
+        }
+    }
 
     fun setStrokeWidth(width: Float) { controller.setStrokeWidth(width) }
     fun setStrokeColor(color: Int) { buf.setColor(color) }
@@ -526,9 +659,10 @@ internal class PenOverlay(
     }
 
     private fun notifyStrokeView() {
+        Log.d("EinkDraw", "notifyStrokeView commitedStrokes=${buf.strokes.size} bufSize=${buf.size}")
         strokeView?.update(
             buf.strokes, currentTransform(), _bindGroups, bindHandler.currentPoints(),
-            ocrResults.toList(), annotationMode,
+            ocrResults.toList(), annotationMode || isBindMode,
             groupLabelOffsets.toMap(), clusterLabelOffsets.toMap(),
             selectedLabel,
             groupStrokeOffsets.toMap(),
@@ -537,32 +671,184 @@ internal class PenOverlay(
     }
 
     private fun notifyStrokeViewLive() {
-        strokeView?.update(buf.allStrokes(), currentTransform())
+        val all = buf.allStrokes()
+        strokeView?.update(all, currentTransform())
     }
 
-    fun enterBindMode() {
-        isBindMode = true
-        controller.setEnabled(false)
-    }
-
-    fun exitBindMode() {
-        isBindMode = false
-        strokeView?.setBindPath(null)
-        controller.resetRenderBuffer()
-    }
-
-    fun enterSelectMode() {
-        isSelectMode = true
-        controller.setEnabled(false)
-    }
-
-    fun exitSelectMode() {
-        isSelectMode = false
-        dragLabel = null; dragGroupId = null; dragClusterIdx = null
-        selectedLabel = null
-        onGroupSelectionChanged?.invoke(null)
-        controller.resetRenderBuffer()
+    /**
+     * The only place [isBindMode] / [isSelectMode] should be mutated externally.
+     * Pushes the new mode to the SDK via [applyDrawingState] so drawing state and UI
+     * mode can never diverge.
+     */
+    fun setMode(mode: ToolMode) {
+        val wasBind = isBindMode
+        val wasSelect = isSelectMode
+        val modeChanged = (wasBind != (mode == ToolMode.TAG)) || (wasSelect != (mode == ToolMode.MOVE))
+        isBindMode = (mode == ToolMode.TAG)
+        isSelectMode = (mode == ToolMode.MOVE)
+        if (wasBind && !isBindMode) {
+            strokeView?.setBindPath(null)
+        }
+        if (wasSelect && !isSelectMode) {
+            dragLabel = null; dragGroupId = null; dragClusterIdx = null
+            selectedLabel = null
+            onGroupSelectionChanged?.invoke(null)
+        }
+        // Reset the render layer on mode transitions to clear any stale finger-drawn
+        // bind-mode lasso path or palm-touch artifacts.
+        applyDrawingState(reset = modeChanged)
         notifyStrokeView()
+    }
+
+    // Back-compat wrappers kept for existing tests; new code should use setMode().
+    fun enterBindMode() = setMode(ToolMode.TAG)
+    fun exitBindMode() = setMode(ToolMode.DRAW)
+    fun enterSelectMode() = setMode(ToolMode.MOVE)
+    fun exitSelectMode() = setMode(ToolMode.DRAW)
+
+    private fun eraseBindGroupsNearPath(screenPath: List<Pair<Float, Float>>, transform: ViewTransform) {
+        val docPath = screenPath.map { (x, y) -> transform.screenToDocX(x) to transform.screenToDocY(y) }
+        val docR = ERASER_BIND_RADIUS / transform.scale
+        fun eraserCrossesSegment(ax: Float, ay: Float, bx: Float, by: Float): Boolean =
+            docPath.any { (px, py) -> pointToSegmentDist(px, py, ax, ay, bx, by) <= docR }
+        val hitGroups = _bindGroups.filter { g ->
+            val strokes = g.strokeIndices.mapNotNull { buf.strokes.getOrNull(it) }
+            val sBounds = strokesBBox(strokes)
+            if (sBounds != null && g.elementDocCenters.isNotEmpty()) {
+                val (scx, scy) = sBounds
+                g.elementDocCenters.any { (ecx, ecy) -> eraserCrossesSegment(scx, scy, ecx, ecy) }
+            } else false
+        }
+        if (hitGroups.isNotEmpty()) {
+            hitGroups.forEach { removeBindGroup(it.id) }
+            notifyStrokeView()
+            onBindGroupsChanged?.invoke()
+        }
+    }
+
+    private fun strokesBBox(strokes: List<Stroke>): Pair<Float, Float>? {
+        var minX = Float.MAX_VALUE; var maxX = -Float.MAX_VALUE
+        var minY = Float.MAX_VALUE; var maxY = -Float.MAX_VALUE
+        for (s in strokes) for ((x, y) in s.points) {
+            if (x < minX) minX = x; if (x > maxX) maxX = x
+            if (y < minY) minY = y; if (y > maxY) maxY = y
+        }
+        return if (minX < maxX) (minX + maxX) / 2f to (minY + maxY) / 2f else null
+    }
+
+    private fun commitClusterOffset(clusterIdx: Int) {
+        val (dx, dy) = clusterStrokeOffsets.remove(clusterIdx) ?: return
+        clusterLabelOffsets.remove(clusterIdx)
+        if (dx == 0f && dy == 0f) return
+        val result = ocrResults.getOrNull(clusterIdx) ?: return
+        buf.shiftStrokes(result.strokeIndices, dx, dy)
+        ocrResults[clusterIdx] = result.copy(
+            docX = result.docX + dx, docY = result.docY + dy, minDocY = result.minDocY + dy,
+        )
+        notifyStrokeView()
+    }
+
+    private fun commitGroupOffset(groupId: Int) {
+        val (dx, dy) = groupStrokeOffsets.remove(groupId) ?: return
+        groupLabelOffsets.remove(groupId)
+        if (dx == 0f && dy == 0f) return
+        val idx = _bindGroups.indexOfFirst { it.id == groupId }
+        if (idx >= 0) {
+            val group = _bindGroups[idx]
+            buf.shiftStrokes(group.strokeIndices, dx, dy)
+            _bindGroups[idx] = group.copy(
+                markerDocX = group.markerDocX + dx,
+                markerDocY = group.markerDocY + dy,
+                strokeDocCenters = group.strokeDocCenters.map { (x, y) -> x + dx to y + dy },
+            )
+            tryMergeNearbyGroups(groupId)
+        }
+        notifyStrokeView()
+        syncBindGroupsToWebView()
+        onBindGroupsChanged?.invoke()
+    }
+
+    private fun findMergeTarget(cx: Float, cy: Float): BindGroup? {
+        for (group in _bindGroups) {
+            val gc = group.strokeIndices.mapNotNull { idx ->
+                buf.strokes.getOrNull(idx)?.let { strokeCentroid(it) }
+            }
+            if (gc.isEmpty()) continue
+            val gcx = gc.map { it.first }.average().toFloat()
+            val gcy = gc.map { it.second }.average().toFloat()
+            val dx = gcx - cx; val dy = gcy - cy
+            if (dx * dx + dy * dy <= MERGE_THRESHOLD_DOC * MERGE_THRESHOLD_DOC) return group
+        }
+        return null
+    }
+
+    private fun tryAbsorbStrokeIntoGroup(strokeIdx: Int) {
+        val stroke = buf.strokes.getOrNull(strokeIdx) ?: return
+        if (stroke.points.size < 3) return
+        val (scx, scy) = strokeCentroid(stroke)
+        val target = findMergeTarget(scx, scy) ?: return
+        val idx = _bindGroups.indexOfFirst { it.id == target.id }
+        if (idx < 0) return
+        val merged = target.strokeIndices + strokeIdx
+        val allCentroids = merged.mapNotNull { i -> buf.strokes.getOrNull(i)?.let { strokeCentroid(it) } }
+        val allC = allCentroids + target.elementDocCenters
+        _bindGroups[idx] = target.copy(
+            strokeIndices = merged,
+            markerDocX = allC.map { it.first }.average().toFloat(),
+            markerDocY = allC.map { it.second }.average().toFloat(),
+            strokeDocCenters = allCentroids,
+            recognizedText = null,
+        )
+        ocrResults.removeAll { r -> strokeIdx in r.strokeIndices }
+        ocrManager?.cancel()
+        val affectedStrokes = merged.mapNotNull { buf.strokes.getOrNull(it) }
+        ocrManager?.evictCacheFor(affectedStrokes)
+        onBindGroupsChanged?.invoke()
+        syncBindGroupsToWebView()
+    }
+
+    private fun tryMergeNearbyGroups(movedGroupId: Int) {
+        val moved = _bindGroups.firstOrNull { it.id == movedGroupId } ?: return
+        val movedCentroids = moved.strokeIndices.mapNotNull { buf.strokes.getOrNull(it)?.let { s -> strokeCentroid(s) } }
+        if (movedCentroids.isEmpty()) return
+        val mcx = movedCentroids.map { it.first }.average().toFloat()
+        val mcy = movedCentroids.map { it.second }.average().toFloat()
+        val neighbor = _bindGroups.firstOrNull { g ->
+            if (g.id == movedGroupId) return@firstOrNull false
+            val gc = g.strokeIndices.mapNotNull { buf.strokes.getOrNull(it)?.let { s -> strokeCentroid(s) } }
+            if (gc.isEmpty()) return@firstOrNull false
+            val gcx = gc.map { it.first }.average().toFloat()
+            val gcy = gc.map { it.second }.average().toFloat()
+            val dx = gcx - mcx; val dy = gcy - mcy
+            dx * dx + dy * dy <= MERGE_THRESHOLD_DOC * MERGE_THRESHOLD_DOC
+        } ?: return
+        // Merge moved into neighbor
+        val idx = _bindGroups.indexOfFirst { it.id == neighbor.id }
+        if (idx < 0) return
+        val merged = neighbor.strokeIndices + moved.strokeIndices
+        val mergedRefs = (neighbor.elementRefs + moved.elementRefs).distinctBy { Triple(it.sectionId, it.tag, it.text) }
+        val mergedElemIdx = (neighbor.elementIndices + moved.elementIndices).distinct()
+        val mergedElemCenters = (neighbor.elementDocCenters + moved.elementDocCenters).distinct()
+        val allCentroids = merged.mapNotNull { i -> buf.strokes.getOrNull(i)?.let { strokeCentroid(it) } }
+        val allC = allCentroids + mergedElemCenters
+        _bindGroups[idx] = neighbor.copy(
+            strokeIndices = merged,
+            elementIndices = mergedElemIdx,
+            elementRefs = mergedRefs,
+            elementDocCenters = mergedElemCenters,
+            markerDocX = allC.map { it.first }.average().toFloat(),
+            markerDocY = allC.map { it.second }.average().toFloat(),
+            strokeDocCenters = allCentroids,
+            recognizedText = null,
+        )
+        _bindGroups.removeAll { it.id == movedGroupId }
+        undoStack.removeAll { it is UndoAction.BindGroupAdded && it.groupId == movedGroupId }
+        groupLabelOffsets.remove(movedGroupId)
+        groupStrokeOffsets.remove(movedGroupId)
+        ocrManager?.cancel()
+        val affectedStrokes = merged.mapNotNull { buf.strokes.getOrNull(it) }
+        ocrManager?.evictCacheFor(affectedStrokes)
+        scheduleOcr()
     }
 
     fun scheduleReOcr(groupId: Int) {
@@ -805,6 +1091,8 @@ internal class PenOverlay(
 
     companion object {
         private const val SCROLL_BLOCK_MS = 500L
+        private const val MERGE_THRESHOLD_DOC = 200f
+        private const val ERASER_BIND_RADIUS = 40f
         private val GROUP_PALETTE = intArrayOf(
             0xFFe74c3c.toInt(), 0xFF2196f3.toInt(), 0xFF4caf50.toInt(),
             0xFFff9800.toInt(), 0xFF9c27b0.toInt(), 0xFF009688.toInt(),

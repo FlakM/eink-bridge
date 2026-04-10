@@ -25,8 +25,7 @@ const SAMPLES: &[(&str, &str)] = &[
 
 fn model_dir() -> std::path::PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    std::path::PathBuf::from(home)
-        .join(".local/share/eink-bridge/models")
+    std::path::PathBuf::from(home).join(".local/share/eink-bridge/models")
 }
 
 fn ocr_png(engine: &OcrEngine, png: &[u8]) -> anyhow::Result<String> {
@@ -54,8 +53,14 @@ fn main() -> anyhow::Result<()> {
     if !det_path.exists() || !rec_path.exists() {
         eprintln!("Models not found in {}", dir.display());
         eprintln!("Download with:");
-        eprintln!("  curl https://ocrs-models.s3-accelerate.amazonaws.com/text-detection.rten -o {}", det_path.display());
-        eprintln!("  curl https://ocrs-models.s3-accelerate.amazonaws.com/text-recognition.rten -o {}", rec_path.display());
+        eprintln!(
+            "  curl https://ocrs-models.s3-accelerate.amazonaws.com/text-detection.rten -o {}",
+            det_path.display()
+        );
+        eprintln!(
+            "  curl https://ocrs-models.s3-accelerate.amazonaws.com/text-recognition.rten -o {}",
+            rec_path.display()
+        );
         std::process::exit(1);
     }
 
@@ -68,7 +73,7 @@ fn main() -> anyhow::Result<()> {
     println!("models loaded in {}ms", t_load.elapsed().as_millis());
     println!();
     println!("=== ocrs OCR ({} samples) ===", SAMPLES.len());
-    println!("{:<22} {:>9}  {}", "sample", "wall ms", "recognized text");
+    println!("{:<22} {:>9}  recognized text", "sample", "wall ms");
     println!("{}", "─".repeat(70));
 
     let mut times: Vec<u128> = Vec::new();

@@ -19,6 +19,12 @@ internal object MetricsReporter {
     private val submitErr = AtomicLong(0)
     private val sessionsViewed = AtomicLong(0)
     private val wsConnections = AtomicLong(0)
+    private val ocrDurationSum = AtomicLong(0)
+    private val ocrDurationCount = AtomicLong(0)
+    private val ocrDurationMax = AtomicLong(0)
+    private val rtSum = AtomicLong(0)
+    private val rtCount = AtomicLong(0)
+    private val rtMax = AtomicLong(0)
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(3, TimeUnit.SECONDS)
@@ -39,6 +45,18 @@ internal object MetricsReporter {
 
     fun recordWsConnection() {
         wsConnections.incrementAndGet()
+    }
+
+    fun recordOcrDuration(ms: Long) {
+        ocrDurationSum.addAndGet(ms)
+        ocrDurationCount.incrementAndGet()
+        ocrDurationMax.updateAndGet { maxOf(it, ms) }
+    }
+
+    fun recordUpdateRoundTrip(ms: Long) {
+        rtSum.addAndGet(ms)
+        rtCount.incrementAndGet()
+        rtMax.updateAndGet { maxOf(it, ms) }
     }
 
     suspend fun push(pushgatewayUrl: String) {
@@ -74,5 +92,31 @@ internal object MetricsReporter {
         append("# HELP eink_android_ws_connections_total WebSocket connections initiated by Android\n")
         append("# TYPE eink_android_ws_connections_total counter\n")
         append("eink_android_ws_connections_total ${wsConnections.get()}\n")
+        val count = ocrDurationCount.get()
+        if (count > 0) {
+            val avg = ocrDurationSum.get() / count
+            append("# HELP eink_android_ocr_duration_ms_avg Average OCR duration in milliseconds\n")
+            append("# TYPE eink_android_ocr_duration_ms_avg gauge\n")
+            append("eink_android_ocr_duration_ms_avg $avg\n")
+            append("# HELP eink_android_ocr_duration_ms_max Max OCR duration in milliseconds\n")
+            append("# TYPE eink_android_ocr_duration_ms_max gauge\n")
+            append("eink_android_ocr_duration_ms_max ${ocrDurationMax.get()}\n")
+            append("# HELP eink_android_ocr_duration_count OCR calls measured\n")
+            append("# TYPE eink_android_ocr_duration_count counter\n")
+            append("eink_android_ocr_duration_count $count\n")
+        }
+        val rc = rtCount.get()
+        if (rc > 0) {
+            val avg = rtSum.get() / rc
+            append("# HELP eink_android_update_round_trip_ms_avg Avg annotation→version_updated round-trip ms\n")
+            append("# TYPE eink_android_update_round_trip_ms_avg gauge\n")
+            append("eink_android_update_round_trip_ms_avg $avg\n")
+            append("# HELP eink_android_update_round_trip_ms_max Max annotation→version_updated round-trip ms\n")
+            append("# TYPE eink_android_update_round_trip_ms_max gauge\n")
+            append("eink_android_update_round_trip_ms_max ${rtMax.get()}\n")
+            append("# HELP eink_android_update_round_trip_count Round-trip samples\n")
+            append("# TYPE eink_android_update_round_trip_count counter\n")
+            append("eink_android_update_round_trip_count $rc\n")
+        }
     }
 }

@@ -21,13 +21,30 @@ private const val TAG = "OcrClient"
 
 internal class OcrClient(private val getServerUrl: () -> String) {
     private val http = OkHttpClient.Builder()
-        .connectTimeout(5, TimeUnit.SECONDS)
-        .readTimeout(150, TimeUnit.SECONDS)
+        .connectTimeout(3, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
         .build()
 
     suspend fun recognize(strokes: List<Stroke>): String? {
         if (strokes.isEmpty()) return null
-        return recognizeViaServer(strokes) ?: recognizeLocally(strokes)
+        val pts = strokes.sumOf { it.points.size }
+        val t0 = System.currentTimeMillis()
+        val serverResult = recognizeViaServer(strokes)
+        val serverMs = System.currentTimeMillis() - t0
+        if (serverResult != null) {
+            Log.i(TAG, "server OCR ok ($pts pts, ${serverMs}ms): \"${serverResult.take(40)}\"")
+            return serverResult
+        }
+        Log.w(TAG, "server OCR failed ($pts pts, ${serverMs}ms), trying MLKit")
+        val t1 = System.currentTimeMillis()
+        val localResult = recognizeLocally(strokes)
+        val localMs = System.currentTimeMillis() - t1
+        if (localResult != null) {
+            Log.i(TAG, "MLKit OCR ok ($pts pts, ${localMs}ms): \"${localResult.take(40)}\"")
+        } else {
+            Log.w(TAG, "MLKit OCR failed ($pts pts, ${localMs}ms)")
+        }
+        return localResult
     }
 
     private suspend fun recognizeViaServer(strokes: List<Stroke>): String? =

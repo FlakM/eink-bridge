@@ -36,7 +36,8 @@ internal fun formatSessionTime(iso: String, now: LocalDateTime = LocalDateTime.n
 }
 
 class SessionAdapter(
-    private val onClick: (SessionInfo) -> Unit
+    private val onClick: (SessionInfo) -> Unit,
+    private val onStarToggle: ((SessionInfo) -> Unit)? = null,
 ) : ListAdapter<SessionInfo, SessionAdapter.ViewHolder>(DIFF) {
 
     private var pendingStrokeIds: Set<String> = emptySet()
@@ -71,14 +72,20 @@ class SessionAdapter(
         val hasPending = session.id in pendingStrokeIds
         val isCached = session.id in cachedSessionIds
         val icon = statusIcon(session.status)
+        val starMark = if (session.starred) "\u2605  " else ""  // ★
         val pendingMark = if (hasPending) "  \u270E" else ""
         val cachedMark = if (isCached) "  \u2B07" else ""
-        holder.title.text = "$icon  ${session.title}$pendingMark$cachedMark"
+        holder.title.text = "$starMark$icon  ${session.title}$pendingMark$cachedMark"
         val statusParts = mutableListOf(session.status)
         if (hasPending) statusParts.add("unsaved strokes")
         if (isCached) statusParts.add("cached")
-        holder.subtitle.text = "${statusParts.joinToString(" \u2014 ")} \u2014 ${formatSessionTime(session.updatedAt)}"
+        val timePart = "${statusParts.joinToString(" \u2014 ")} \u2014 ${formatSessionTime(session.updatedAt)}"
+        holder.subtitle.text = session.originCwd?.let { "$timePart\n$it" } ?: timePart
         holder.itemView.setOnClickListener { onClick(session) }
+        holder.itemView.setOnLongClickListener {
+            onStarToggle?.invoke(session)
+            onStarToggle != null
+        }
     }
 
     companion object {

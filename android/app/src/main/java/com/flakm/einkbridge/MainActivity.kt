@@ -2,10 +2,18 @@ package com.flakm.einkbridge
 
 import android.annotation.SuppressLint
 import android.app.AlertDialog
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
+import android.media.RingtoneManager
+import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.os.Vibrator
+import android.os.VibrationEffect
 import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
@@ -28,6 +36,8 @@ import java.util.concurrent.TimeUnit
 
 private const val TAG = "EinkMain"
 private const val INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000L
+private const val NOTIFICATION_ID_UPDATE = 1001
+private const val NOTIFICATION_CHANNEL_ID = "eink_updates"
 
 class MainActivity : AppCompatActivity() {
     internal lateinit var webView: WebView
@@ -61,6 +71,7 @@ class MainActivity : AppCompatActivity() {
     private var currentSessionId: String? = null
     private var inactivityJob: Job? = null
     private var wsInSleep = false
+    @Volatile private var annotationSentAt: Long = 0L
     private lateinit var drawControls: android.widget.LinearLayout
     private lateinit var contextBar: android.widget.LinearLayout
     private var currentContextGroupId: Int? = null
@@ -69,6 +80,11 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
+        createNotificationChannel()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), NOTIFICATION_ID_UPDATE)
+        }
         sessionRepo = SessionRepository(this)
         submissionManager = SubmissionManager(client)
         docCache = DocumentCache(this)
@@ -92,7 +108,18 @@ class MainActivity : AppCompatActivity() {
         metricsInput.setText(pushgatewayUrl)
         serverUrlText.text = if (serverUrl.isNotEmpty()) "Connected: $serverUrl" else "Not connected"
 
-        adapter = SessionAdapter { session -> openSession(session.id) }
+        adapter = SessionAdapter(
+            onClick = { session -> openSession(session.id) },
+            onStarToggle = { session ->
+                lifecycleScope.launch {
+                    val ok = sessionViewModel.toggleStar(session.id, !session.starred)
+                    val msg = if (ok) {
+                        if (!session.starred) "Starred" else "Unstarred"
+                    } else "Star toggle failed"
+                    Toast.makeText(this@MainActivity, msg, Toast.LENGTH_SHORT).show()
+                }
+            },
+        )
         sessionList.layoutManager = LinearLayoutManager(this)
         sessionList.adapter = adapter
 
@@ -236,9 +263,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnAnnotations: Button
     private lateinit var btnSelect: Button
     private var selectedStyleIndex = 0
-    internal var bindModeActive = false
+    internal var toolMode: ToolMode = ToolMode.DRAW
+        private set
+    internal val bindModeActive: Boolean get() = toolMode == ToolMode.TAG
+    internal val selectModeActive: Boolean get() = toolMode == ToolMode.MOVE
     private var annotationModeActive = false
-    private var selectModeActive = false
     private var currentStrokeColor = Color.BLACK
 
     private val styleDotIds = listOf(R.id.dotPencil, R.id.dotBrush, R.id.dotEraser)
@@ -280,25 +309,22 @@ class MainActivity : AppCompatActivity() {
         })
 
         btnPencil.setOnClickListener {
-            if (bindModeActive) exitBindMode()
-            if (selectModeActive) exitSelectMode()
+            setToolMode(ToolMode.DRAW)
             selectStyle(0)
             penOverlay?.setStylePencil()
         }
         btnBrush.setOnClickListener {
-            if (bindModeActive) exitBindMode()
-            if (selectModeActive) exitSelectMode()
+            setToolMode(ToolMode.DRAW)
             selectStyle(1)
             penOverlay?.setStyleBrush()
         }
         btnEraser.setOnClickListener {
-            if (bindModeActive) exitBindMode()
-            if (selectModeActive) exitSelectMode()
+            setToolMode(ToolMode.DRAW)
             selectStyle(2)
             penOverlay?.setStyleEraser()
         }
         btnSelect.setOnClickListener {
-            if (selectModeActive) exitSelectMode() else enterSelectMode()
+            setToolMode(if (toolMode == ToolMode.MOVE) ToolMode.DRAW else ToolMode.MOVE)
         }
         btnUndo.setOnClickListener { penOverlay?.undoLastStroke() }
         btnClear.setOnClickListener {
@@ -313,7 +339,7 @@ class MainActivity : AppCompatActivity() {
                 .show()
         }
         btnLink.setOnClickListener {
-            if (bindModeActive) exitBindMode() else enterBindMode()
+            setToolMode(if (toolMode == ToolMode.TAG) ToolMode.DRAW else ToolMode.TAG)
         }
         btnColor.setOnClickListener { showColorPicker() }
         btnAnnotations.setOnClickListener {
@@ -369,50 +395,38 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    internal fun enterBindMode() {
-        if (selectModeActive) exitSelectMode()
-        bindModeActive = true
-        setModeButtonActive(btnLink, R.id.dotLink, true)
-        drawControls.visibility = View.GONE
+    /**
+     * Single source of truth for tool mode switching. All toolbar buttons route through here.
+     * Updates UI indicators and pushes the new mode to [PenOverlay] atomically.
+     */
+    internal fun setToolMode(mode: ToolMode) {
+        if (toolMode == mode) return
+        toolMode = mode
+        setModeButtonActive(btnLink, R.id.dotLink, mode == ToolMode.TAG)
+        setModeButtonActive(btnSelect, R.id.dotSelect, mode == ToolMode.MOVE)
+        val drawMode = mode == ToolMode.DRAW
+        drawControls.visibility = if (drawMode) View.VISIBLE else View.GONE
         contextBar.visibility = View.GONE
-        styleDotIds.forEach { findViewById<View>(it).visibility = View.GONE }
-        styleButtons.forEach { it.isEnabled = false; it.alpha = 0.2f }
-        val overlay = penOverlay ?: return
-        overlay.onBindComplete = { exitBindMode() }
-        overlay.enterBindMode()
+        if (!drawMode) {
+            currentContextGroupId = null
+            styleDotIds.forEach { findViewById<View>(it).visibility = View.GONE }
+            styleButtons.forEach { it.isEnabled = false; it.alpha = 0.2f }
+        } else {
+            styleButtons.forEach { it.isEnabled = true }
+            selectStyle(selectedStyleIndex)
+        }
+        penOverlay?.let { overlay ->
+            overlay.onBindComplete = if (mode == ToolMode.TAG) {
+                { setToolMode(ToolMode.DRAW) }
+            } else null
+            overlay.setMode(mode)
+        }
     }
 
-    internal fun exitBindMode() {
-        bindModeActive = false
-        setModeButtonActive(btnLink, R.id.dotLink, false)
-        drawControls.visibility = View.VISIBLE
-        styleButtons.forEach { it.isEnabled = true }
-        selectStyle(selectedStyleIndex)
-        penOverlay?.exitBindMode()
-    }
-
-    internal fun enterSelectMode() {
-        if (bindModeActive) exitBindMode()
-        selectModeActive = true
-        setModeButtonActive(btnSelect, R.id.dotSelect, true)
-        drawControls.visibility = View.GONE
-        contextBar.visibility = View.GONE
-        currentContextGroupId = null
-        styleDotIds.forEach { findViewById<View>(it).visibility = View.GONE }
-        styleButtons.forEach { it.isEnabled = false; it.alpha = 0.2f }
-        penOverlay?.enterSelectMode()
-    }
-
-    internal fun exitSelectMode() {
-        selectModeActive = false
-        setModeButtonActive(btnSelect, R.id.dotSelect, false)
-        drawControls.visibility = View.VISIBLE
-        contextBar.visibility = View.GONE
-        currentContextGroupId = null
-        styleButtons.forEach { it.isEnabled = true }
-        selectStyle(selectedStyleIndex)
-        penOverlay?.exitSelectMode()
-    }
+    internal fun enterBindMode() = setToolMode(ToolMode.TAG)
+    internal fun exitBindMode() = setToolMode(ToolMode.DRAW)
+    internal fun enterSelectMode() = setToolMode(ToolMode.MOVE)
+    internal fun exitSelectMode() = setToolMode(ToolMode.DRAW)
 
     private fun showColorPicker() {
         val dm = resources.displayMetrics
@@ -473,18 +487,13 @@ class MainActivity : AppCompatActivity() {
         findViewById<View>(R.id.dotAnnotations).visibility = View.GONE
         currentContextGroupId = null
         contextBar.visibility = View.GONE
-        if (bindModeActive) {
-            bindModeActive = false
-            setModeButtonActive(btnLink, R.id.dotLink, false)
-            drawControls.visibility = View.VISIBLE
-            styleButtons.forEach { it.isEnabled = true }
-        }
-        if (selectModeActive) {
-            selectModeActive = false
-            setModeButtonActive(btnSelect, R.id.dotSelect, false)
-            drawControls.visibility = View.VISIBLE
-            styleButtons.forEach { it.isEnabled = true }
-        }
+        // Force the UI back to draw mode. setToolMode is a no-op if already DRAW.
+        toolMode = ToolMode.DRAW
+        setModeButtonActive(btnLink, R.id.dotLink, false)
+        setModeButtonActive(btnSelect, R.id.dotSelect, false)
+        drawControls.visibility = View.VISIBLE
+        styleButtons.forEach { it.isEnabled = true }
+        selectStyle(selectedStyleIndex)
         wsClient?.disconnect()
         loadedVersion = 0
         MetricsReporter.recordWsConnection()
@@ -492,7 +501,6 @@ class MainActivity : AppCompatActivity() {
             serverUrl = serverUrl,
             sessionId = sessionId,
             onMessage = { type, json -> handleWsMessage(type, json) },
-            onReconnected = { checkVersionAndReload(sessionId) },
             onClosed = { Log.w(TAG, "ws onClosed session=$sessionId") },
         ).also { it.connect() }
         sessionListContainer.visibility = View.GONE
@@ -521,16 +529,14 @@ class MainActivity : AppCompatActivity() {
                 throw e
             }
         }
-        val ocrManager = OcrManager(recognize = ocrRecognize, scope = scope)
-        scope.launch {
-            ocrManager.events.collect { event ->
-                when (event) {
-                    is OcrEvent.GroupRecognized -> overlay.onGroupOcrResult(event.groupId, event.text)
-                    is OcrEvent.UnboundResults -> overlay.onUnboundOcrResults(event.results)
-                    is OcrEvent.PendingChanged -> updateOcrProgress(event.remaining, event.total)
-                }
-            }
-        }
+        val ocrManager = OcrManager(
+            recognize = ocrRecognize,
+            scope = scope,
+            onGroupRecognized = { groupId, text -> overlay.onGroupOcrResult(groupId, text) },
+            onUnboundResults = { results -> overlay.onUnboundOcrResults(results) },
+            onPendingChanged = { remaining, total -> runOnUiThread { updateOcrProgress(remaining, total) } },
+            onError = { msg -> runOnUiThread { Toast.makeText(this@MainActivity, msg, Toast.LENGTH_SHORT).show() } },
+        )
         overlay.ocrManager = ocrManager
         overlay.init()
         overlay.setStrokeColor(currentStrokeColor)
@@ -577,7 +583,15 @@ class MainActivity : AppCompatActivity() {
         inactivityJob = null
         wsInSleep = false
         currentContextGroupId = null
-        penOverlay?.disableDrawing()
+        // Reset UI mode so a stale TAG/MOVE state doesn't leak into the next session.
+        toolMode = ToolMode.DRAW
+        setModeButtonActive(btnLink, R.id.dotLink, false)
+        setModeButtonActive(btnSelect, R.id.dotSelect, false)
+        drawControls.visibility = View.VISIBLE
+        contextBar.visibility = View.GONE
+        styleButtons.forEach { it.isEnabled = true }
+        selectStyle(selectedStyleIndex)
+        penOverlay?.onPaused()
         penOverlay?.destroy()
         penOverlay = null
         wsClient?.disconnect()
@@ -674,14 +688,17 @@ class MainActivity : AppCompatActivity() {
                     val annotationsJson = submissionManager.buildAnnotationsJson(
                         overlay.buf.strokes, overlay.bindGroups, elements
                     )
+                    annotationSentAt = SystemClock.elapsedRealtime()
                     val ok = withContext(Dispatchers.IO) {
                         submissionManager.requestUpdate(serverUrl, sessionId, annotationsJson)
                     }
                     if (!ok) {
+                        annotationSentAt = 0L
                         ocrOverlay.visibility = View.GONE
                         Toast.makeText(this@MainActivity, "Request failed", Toast.LENGTH_SHORT).show()
                     }
                 } catch (e: Exception) {
+                    annotationSentAt = 0L
                     Log.e(TAG, "requestUpdate: exception session=$sessionId", e)
                     ocrOverlay.visibility = View.GONE
                     Toast.makeText(this@MainActivity, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
@@ -730,12 +747,12 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         if (currentSessionId != null) {
-            penOverlay?.enableDrawing()
+            penOverlay?.onResumed()
         }
     }
 
     override fun onPause() {
-        penOverlay?.disableDrawing()
+        penOverlay?.onPaused()
         super.onPause()
     }
 
@@ -747,6 +764,34 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
     }
 
+    private fun createNotificationChannel() {
+        val channel = NotificationChannel(
+            NOTIFICATION_CHANNEL_ID,
+            "Document Updates",
+            NotificationManager.IMPORTANCE_HIGH,
+        ).apply { enableVibration(true) }
+        getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+    }
+
+    private fun notifyDocumentUpdated() {
+        RingtoneManager.getRingtone(
+            this,
+            RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION),
+        )?.play()
+        @Suppress("DEPRECATION")
+        (getSystemService(VIBRATOR_SERVICE) as? Vibrator)?.vibrate(
+            VibrationEffect.createOneShot(200, VibrationEffect.DEFAULT_AMPLITUDE),
+        )
+        val notification = Notification.Builder(this, NOTIFICATION_CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentTitle("Document updated")
+            .setContentText("Your e-ink document has been rewritten.")
+            .setAutoCancel(true)
+            .build()
+        getSystemService(NotificationManager::class.java)
+            .notify(NOTIFICATION_ID_UPDATE, notification)
+    }
+
     private fun handleWsMessage(type: String, json: JSONObject) {
         Log.d(TAG, "handleWsMessage type=$type session=$currentSessionId json=${json.toString().take(200)}")
         runOnUiThread {
@@ -754,12 +799,20 @@ class MainActivity : AppCompatActivity() {
                 "version_updated" -> {
                     val version = json.optInt("version")
                     val sid = currentSessionId ?: return@runOnUiThread
+                    val sentAt = annotationSentAt
+                    if (sentAt != 0L) {
+                        val roundTripMs = SystemClock.elapsedRealtime() - sentAt
+                        annotationSentAt = 0L
+                        MetricsReporter.recordUpdateRoundTrip(roundTripMs)
+                        Log.i(TAG, "version_updated: round-trip=${roundTripMs}ms")
+                    }
                     Log.i(TAG, "version_updated: version=$version — reloading webview")
                     loadedVersion = version
                     ocrOverlay.visibility = View.GONE
                     savedScrollY = webView.scrollY
                     webView.loadUrl("$serverUrl/session/$sid")
                     Toast.makeText(this, "Document updated ✓", Toast.LENGTH_SHORT).show()
+                    notifyDocumentUpdated()
                 }
                 "session_submitted" -> {
                     Log.i(TAG, "session_submitted: going back to session list")
@@ -767,9 +820,16 @@ class MainActivity : AppCompatActivity() {
                     showSessionList()
                     startPolling()
                 }
+                "annotation_result" -> {
+                    val version = json.optInt("version")
+                    Log.i(TAG, "annotation_result: version=$version — waiting for document update")
+                    ocrOverlay.visibility = View.GONE
+                    Toast.makeText(this, "Annotations sent ✓", Toast.LENGTH_SHORT).show()
+                }
                 "error" -> {
                     val errMsg = json.optString("message", "Unknown error")
                     Log.w(TAG, "server error: $errMsg")
+                    ocrOverlay.visibility = View.GONE
                     Toast.makeText(this, errMsg, Toast.LENGTH_LONG).show()
                 }
                 else -> Log.w(TAG, "unhandled ws message type=$type")
@@ -785,4 +845,6 @@ data class SessionInfo(
     val status: String,
     val createdAt: String,
     val updatedAt: String,
+    val starred: Boolean = false,
+    val originCwd: String? = null,
 )

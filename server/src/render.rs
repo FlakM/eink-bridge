@@ -1841,6 +1841,22 @@ mod tests {
     }
 
     #[test]
+    fn mermaid_sequence_diagram_source_survives_in_payload() {
+        // sequenceDiagram is NOT included in the bundled mermaid.min.js (only 2 occurrences
+        // vs 70+ for flowchart), so it falls back to raw source on the client.
+        // This test documents that the Rust side passes the source through correctly;
+        // the rendering limitation is in the JS bundle, not here.
+        let source = "sequenceDiagram\n  participant A\n  A->>B: hello";
+        let html = render(&format!("```mermaid\n{source}\n```"));
+        assert!(html.contains("data-kind=\"mermaid\""));
+        // source must be in the JSON payload verbatim
+        assert!(
+            html.contains("sequenceDiagram"),
+            "sequence diagram source must pass through to payload"
+        );
+    }
+
+    #[test]
     fn mindmap_block_renders_diagram_container() {
         let html = render("```mindmap\nroot: Plan\nnodes:\n  - label: Step\n```");
         assert!(html.contains("class=\"diagram-block\" data-kind=\"mindmap\""));

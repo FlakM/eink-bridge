@@ -134,10 +134,10 @@ fn save_debug_png(png: &[u8]) -> Result<String, std::io::Error> {
     Ok(path)
 }
 
-const BASE_SCALE: f64 = 3.0;
-const MAX_SIDE: u32 = 1024;
-const PADDING: u32 = 20;
-const MIN_DIM: u32 = 120;
+const BASE_SCALE: f64 = 2.0;
+const MAX_SIDE: u32 = 512;
+const PADDING: u32 = 15;
+const MIN_DIM: u32 = 80;
 
 fn render_strokes_to_png(strokes: &[Vec<[f64; 2]>]) -> Result<Vec<u8>, String> {
     let (mut min_x, mut min_y) = (f64::MAX, f64::MAX);
@@ -167,9 +167,9 @@ fn render_strokes_to_png(strokes: &[Vec<[f64; 2]>]) -> Result<Vec<u8>, String> {
     let stroke_width = 3.0 * scale;
 
     let w = ((max_x - min_x) * scale) as u32 + 2 * PADDING;
-    let w = w.max(MIN_DIM).min(MAX_SIDE);
+    let w = w.clamp(MIN_DIM, MAX_SIDE);
     let h = ((max_y - min_y) * scale) as u32 + 2 * PADDING;
-    let h = h.max(MIN_DIM).min(MAX_SIDE);
+    let h = h.clamp(MIN_DIM, MAX_SIDE);
 
     let mut img: RgbImage = ImageBuffer::from_pixel(w, h, Rgb([255, 255, 255]));
 

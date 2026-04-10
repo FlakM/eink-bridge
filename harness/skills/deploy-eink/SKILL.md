@@ -16,24 +16,29 @@ git add -p   # stage interactively, or stage specific files
 git commit -m "<message>"
 ```
 
-2. **Bump the flake input in nix_dots:**
+2. **Push to github** (required — flake uses `github:FlakM/eink-bridge`, all machines resolve from there):
+```bash
+git push
+```
+
+3. **Bump the flake input in nix_dots:**
 ```bash
 cd /home/flakm/programming/flakm/nix_dots
 nix flake update eink-bridge
 ```
 
-3. **Commit the lock update:**
+4. **Commit the lock update:**
 ```bash
 git add flake.lock
 git commit -m "bump eink-bridge: <short reason>"
 ```
 
-4. **Apply:**
+5. **Apply:**
 ```bash
 sudo nixos-rebuild switch --flake /home/flakm/programming/flakm/nix_dots#amd-pc
 ```
 
-5. **Verify** the installed skill updated:
+6. **Verify** the installed skill updated:
 ```bash
 head -5 /home/flakm/.claude/skills/eink/SKILL.md
 ```
@@ -43,3 +48,4 @@ head -5 /home/flakm/.claude/skills/eink/SKILL.md
 - `nix_dots` home-manager is wired into `nixos-rebuild switch` — no separate `home-manager switch` needed.
 - Skills from the harness are deployed as read-only symlinks into `~/.claude/skills/`.
 - If only server code changed (not harness/skills), also run `just deploy` in `eink-bridge` to restart the service.
+- The flake uses `github:FlakM/eink-bridge` so all machines (including work mac) can evaluate the flake. Always push before bumping the lock.

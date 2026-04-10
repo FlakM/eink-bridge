@@ -242,4 +242,46 @@ class MainActivityTest {
             assertEquals("contextBar must be GONE after exiting select mode", View.GONE, bar.visibility)
         }
     }
+
+    // ── ToolMode rapid-switching regression ───────────────────────────────────
+
+    @Test
+    fun rapid_mode_button_taps_end_in_draw_mode_with_drawControls_visible() {
+        scenario.onActivity { activity ->
+            val btnLink = activity.findViewById<android.widget.Button>(R.id.btnLink)
+            val btnSelect = activity.findViewById<android.widget.Button>(R.id.btnSelect)
+            val btnPencil = activity.findViewById<android.widget.Button>(R.id.btnPencil)
+            val drawControls = activity.findViewById<View>(R.id.drawControls)
+
+            repeat(10) {
+                btnLink.performClick()
+                btnSelect.performClick()
+                btnPencil.performClick()
+            }
+
+            assertEquals(ToolMode.DRAW, activity.toolMode)
+            assertFalse("bindModeActive must be false after tapping pencil", activity.bindModeActive)
+            assertFalse("selectModeActive must be false after tapping pencil", activity.selectModeActive)
+            assertEquals("drawControls must be VISIBLE in DRAW mode", View.VISIBLE, drawControls.visibility)
+        }
+    }
+
+    @Test
+    fun setToolMode_roundtrip_DRAW_TAG_MOVE_DRAW_matches_ui_state() {
+        scenario.onActivity { activity ->
+            val drawControls = activity.findViewById<View>(R.id.drawControls)
+
+            activity.enterBindMode()
+            assertEquals(ToolMode.TAG, activity.toolMode)
+            assertEquals(View.GONE, drawControls.visibility)
+
+            activity.enterSelectMode()
+            assertEquals(ToolMode.MOVE, activity.toolMode)
+            assertEquals(View.GONE, drawControls.visibility)
+
+            activity.exitSelectMode()
+            assertEquals(ToolMode.DRAW, activity.toolMode)
+            assertEquals(View.VISIBLE, drawControls.visibility)
+        }
+    }
 }

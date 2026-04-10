@@ -48,7 +48,13 @@ Requires the `eink-channel` MCP server to be running (start Claude Code with `--
 ### 1. Determine content
 
 - If the user provided a file path, use it directly.
-- Otherwise, write a context summary to `/tmp/eink-review-XXXXX.md`.
+- Otherwise, **ask the user** before writing anything:
+  1. What should the document cover? (topic and scope)
+  2. What structure do they want? (prose, bullet list, graph, mindmap, table, or mixed)
+  3. Any specific sections, requirements, or constraints?
+  4. Depth: overview vs. deep-dive?
+
+  Wait for their answers, then write the document to `/tmp/eink-review-XXXXX.md` based on that input.
 
 ### 2. Create session with channel callback URL
 

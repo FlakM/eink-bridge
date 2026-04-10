@@ -21,7 +21,7 @@ internal class StrokeView @JvmOverloads constructor(
     private var transform = ViewTransform()
     private var bindGroups: List<BindGroup> = emptyList()
     private var ocrResults: List<OcrResult> = emptyList()
-    private var bindPathPoints: List<PointF>? = null
+    private var bindPathPoints: List<Pair<Float, Float>>? = null
     private var expandedGroupIds = mutableSetOf<Int>()
     private var annotationMode = false
     var bindDrawingActive = false
@@ -88,9 +88,17 @@ internal class StrokeView @JvmOverloads constructor(
 
     private val linkLinePaint = Paint().apply {
         style = Paint.Style.STROKE
-        strokeWidth = 3f
+        strokeWidth = 4f
         isAntiAlias = true
         strokeCap = Paint.Cap.ROUND
+        pathEffect = DashPathEffect(floatArrayOf(14f, 8f), 0f)
+    }
+
+    private val enclosingPaint = Paint().apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 3f
+        isAntiAlias = true
+        pathEffect = DashPathEffect(floatArrayOf(10f, 6f), 0f)
     }
 
     private val selectionPaint = Paint().apply {
@@ -101,13 +109,14 @@ internal class StrokeView @JvmOverloads constructor(
         pathEffect = DashPathEffect(floatArrayOf(10f, 6f), 0f)
     }
 
+    private val curvePath = Path()
     private var cachedLabelRects: List<Pair<LabelId, RectF>> = emptyList()
 
     fun update(
         strokes: List<Stroke>,
         transform: ViewTransform = ViewTransform(),
         bindGroups: List<BindGroup> = emptyList(),
-        bindPath: List<PointF>? = null,
+        bindPath: List<Pair<Float, Float>>? = null,
         ocrResults: List<OcrResult> = emptyList(),
         annotationMode: Boolean = false,
         groupLabelOffsets: Map<Int, Pair<Float, Float>> = emptyMap(),
@@ -116,6 +125,7 @@ internal class StrokeView @JvmOverloads constructor(
         groupStrokeOffsets: Map<Int, Pair<Float, Float>> = emptyMap(),
         clusterStrokeOffsets: Map<Int, Pair<Float, Float>> = emptyMap(),
     ) {
+        android.util.Log.d("EinkDraw", "StrokeView.update strokesCount=${strokes.size} annotationMode=$annotationMode")
         this.strokes = strokes
         this.transform = transform
         this.bindGroups = bindGroups
@@ -135,7 +145,7 @@ internal class StrokeView @JvmOverloads constructor(
         invalidate()
     }
 
-    fun setBindPath(path: List<PointF>?) {
+    fun setBindPath(path: List<Pair<Float, Float>>?) {
         bindPathPoints = path
         invalidate()
     }
@@ -251,8 +261,8 @@ internal class StrokeView @JvmOverloads constructor(
         bindPathPoints?.let { pts ->
             if (pts.size >= 2) {
                 val path = Path().apply {
-                    moveTo(pts[0].x, pts[0].y)
-                    for (i in 1 until pts.size) lineTo(pts[i].x, pts[i].y)
+                    moveTo(pts[0].first, pts[0].second)
+                    for (i in 1 until pts.size) lineTo(pts[i].first, pts[i].second)
                 }
                 val fillPath = Path(path).apply { close() }
                 canvas.drawPath(fillPath, bindFillPaint)
@@ -268,16 +278,22 @@ internal class StrokeView @JvmOverloads constructor(
         for (group in bindGroups) {
             val strokeOff = groupStrokeOffsets[group.id] ?: (0f to 0f)
             val labelOff = groupLabelOffsets[group.id] ?: (0f to 0f)
-            val sx = t.docToScreenX(group.markerDocX + strokeOff.first) + labelOff.first * t.scale
-            val pillText = group.recognizedText ?: ""
-            val pillPad = 16f
-            val w = maxOf((if (pillText.isNotEmpty()) ocrLabelPaint.measureText(pillText) else 0f) + pillPad * 2, MARKER_RADIUS_PX * 2)
-            val h = if (pillText.isNotEmpty()) ocrLabelPaint.textSize + pillPad * 2 else MARKER_RADIUS_PX * 2
+            // Compute label position from actual stroke bounds (follows drag offset)
+            var minDocX = Float.MAX_VALUE; var maxDocX = -Float.MAX_VALUE
             var minDocY = Float.MAX_VALUE
             for (idx in group.strokeIndices) {
                 val stroke = strokes.getOrNull(idx) ?: continue
-                for ((_, y) in stroke.points) if (y < minDocY) minDocY = y
+                for ((x, y) in stroke.points) {
+                    if (x < minDocX) minDocX = x; if (x > maxDocX) maxDocX = x
+                    if (y < minDocY) minDocY = y
+                }
             }
+            val cx = if (minDocX < maxDocX) (minDocX + maxDocX) / 2f + strokeOff.first else group.markerDocX + strokeOff.first
+            val sx = t.docToScreenX(cx) + labelOff.first * t.scale
+            val pillText = group.recognizedText ?: ""
+            val pillPad = 16f
+            val w = if (pillText.isNotEmpty()) ocrLabelPaint.measureText(pillText) + pillPad * 2 else 0f
+            val h = if (pillText.isNotEmpty()) ocrLabelPaint.textSize + pillPad * 2 else 0f
             val minDocYAdj = if (minDocY < Float.MAX_VALUE) minDocY + strokeOff.second else group.markerDocY + strokeOff.second
             val anchorY = t.docToScreenY(minDocYAdj) + labelOff.second * t.scale
             labels.add(AnnotLabel.Group(sx, anchorY - LABEL_GAP - h, w, h, group))
@@ -299,7 +315,8 @@ internal class StrokeView @JvmOverloads constructor(
         for (label in labels.sortedByDescending { it.topY }) {
             var topY = label.topY
             var retry = true
-            while (retry) {
+            var iters = 0
+            while (retry && iters++ < 20) {
                 retry = false
                 for (p in placed) {
                     val lx1 = label.sx - label.w / 2; val lx2 = label.sx + label.w / 2
@@ -322,29 +339,56 @@ internal class StrokeView @JvmOverloads constructor(
             id to rect
         }
 
-        // --- Pass 3: draw lines first, then labels on top ---
+        // --- Pass 3a: draw enclosing ovals around group strokes ---
+        for (group in bindGroups) {
+            val totalPoints = group.strokeIndices.sumOf { idx -> strokes.getOrNull(idx)?.points?.size ?: 0 }
+            if (totalPoints < MIN_ANNOTATION_POINTS) continue
+            val strokeOff = groupStrokeOffsets[group.id] ?: (0f to 0f)
+            val dimColor = (group.color and 0x00FFFFFF) or 0xCC000000.toInt()
+            var sMinX = Float.MAX_VALUE; var sMaxX = -Float.MAX_VALUE
+            var sMinY = Float.MAX_VALUE; var sMaxY = -Float.MAX_VALUE
+            for (idx in group.strokeIndices) {
+                val stroke = strokes.getOrNull(idx) ?: continue
+                for ((px, py) in stroke.points) {
+                    val sx = t.docToScreenX(px + strokeOff.first)
+                    val sy = t.docToScreenY(py + strokeOff.second)
+                    if (sx < sMinX) sMinX = sx; if (sx > sMaxX) sMaxX = sx
+                    if (sy < sMinY) sMinY = sy; if (sy > sMaxY) sMaxY = sy
+                }
+            }
+            if (sMinX < sMaxX) {
+                val pad = 14f
+                enclosingPaint.color = dimColor
+                canvas.drawOval(sMinX - pad, sMinY - pad, sMaxX + pad, sMaxY + pad, enclosingPaint)
+            }
+            // Curved dotted lines from stroke center to each linked element center
+            if (group.elementDocCenters.isNotEmpty() && sMinX < sMaxX) {
+                val fromX = (sMinX + sMaxX) / 2f
+                val fromY = (sMinY + sMaxY) / 2f
+                linkLinePaint.color = dimColor; linkLinePaint.strokeWidth = 4f
+                for ((cx, cy) in group.elementDocCenters) {
+                    val esx = t.docToScreenX(cx)
+                    val esy = t.docToScreenY(cy)
+                    curvePath.reset()
+                    curvePath.moveTo(fromX, fromY)
+                    val midX = (fromX + esx) / 2f
+                    curvePath.cubicTo(midX, fromY + (esy - fromY) * 0.3f,
+                        midX, fromY + (esy - fromY) * 0.7f, esx, esy)
+                    canvas.drawPath(curvePath, linkLinePaint)
+                }
+            }
+        }
+
+        // --- Pass 3b: draw cluster connector lines ---
         for (label in labels) {
-            val centerY = label.topY + label.h / 2
-            when (label) {
-                is AnnotLabel.Group -> {
-                    val strokeOff = groupStrokeOffsets[label.group.id] ?: (0f to 0f)
-                    val dimColor = (label.group.color and 0x00FFFFFF) or 0x66000000
-                    dashPaint.color = dimColor; dashPaint.strokeWidth = 2f
-                    for ((cx, cy) in label.group.strokeDocCenters)
-                        canvas.drawLine(label.sx, centerY,
-                            t.docToScreenX(cx + strokeOff.first), t.docToScreenY(cy + strokeOff.second), dashPaint)
-                    linkLinePaint.color = dimColor; linkLinePaint.strokeWidth = 2f
-                    for ((cx, cy) in label.group.elementDocCenters)
-                        canvas.drawLine(label.sx, centerY, t.docToScreenX(cx), t.docToScreenY(cy), linkLinePaint)
-                }
-                is AnnotLabel.Cluster -> {
-                    val result = ocrResults.getOrNull(label.clusterIdx) ?: continue
-                    val strokeOff = clusterStrokeOffsets[label.clusterIdx] ?: (0f to 0f)
-                    dashPaint.color = 0x66555555.toInt(); dashPaint.strokeWidth = 2f
-                    canvas.drawLine(label.sx, centerY,
-                        t.docToScreenX(result.docX + strokeOff.first),
-                        t.docToScreenY(result.docY + strokeOff.second), dashPaint)
-                }
+            if (label is AnnotLabel.Cluster) {
+                val result = ocrResults.getOrNull(label.clusterIdx) ?: continue
+                val strokeOff = clusterStrokeOffsets[label.clusterIdx] ?: (0f to 0f)
+                val centerY = label.topY + label.h / 2
+                dashPaint.color = 0x66555555.toInt(); dashPaint.strokeWidth = 2f
+                canvas.drawLine(label.sx, centerY,
+                    t.docToScreenX(result.docX + strokeOff.first),
+                    t.docToScreenY(result.docY + strokeOff.second), dashPaint)
             }
         }
 
@@ -353,15 +397,16 @@ internal class StrokeView @JvmOverloads constructor(
             val centerY = label.topY + label.h / 2
             when (label) {
                 is AnnotLabel.Group -> {
-                    val cornerR = label.h / 2
-                    markerPaint.color = Color.WHITE; markerPaint.style = Paint.Style.FILL
-                    canvas.drawRoundRect(rect, cornerR, cornerR, markerPaint)
-                    markerPaint.color = label.group.color; markerPaint.style = Paint.Style.STROKE; markerPaint.strokeWidth = 5f
-                    canvas.drawRoundRect(rect, cornerR, cornerR, markerPaint)
-                    markerPaint.style = Paint.Style.FILL
                     val text = label.group.recognizedText
-                    if (!text.isNullOrEmpty())
+                    if (!text.isNullOrEmpty()) {
+                        val cornerR = label.h / 2
+                        markerPaint.color = Color.WHITE; markerPaint.style = Paint.Style.FILL
+                        canvas.drawRoundRect(rect, cornerR, cornerR, markerPaint)
+                        markerPaint.color = label.group.color; markerPaint.style = Paint.Style.STROKE; markerPaint.strokeWidth = 5f
+                        canvas.drawRoundRect(rect, cornerR, cornerR, markerPaint)
+                        markerPaint.style = Paint.Style.FILL
                         canvas.drawText(text, label.sx, centerY + ocrLabelPaint.textSize * 0.35f, ocrLabelPaint)
+                    }
                 }
                 is AnnotLabel.Cluster -> {
                     canvas.drawRoundRect(rect, 6f, 6f, ocrBoxBgPaint)
@@ -400,6 +445,7 @@ internal class StrokeView @JvmOverloads constructor(
         const val BADGE_RADIUS_PX = 18f
         const val SHOW_DURATION_MS = 3000L
         const val MIN_OCR_DIAGONAL_PX = 80f
+        const val MIN_ANNOTATION_POINTS = 5
 
         fun groupScreenDiagonal(group: BindGroup, strokes: List<Stroke>, t: ViewTransform): Float {
             var minX = Float.MAX_VALUE; var maxX = Float.MIN_VALUE

@@ -91,10 +91,55 @@ The caching layer seems overengineered. Start with simple TTL.
 ### Claude Code
 
 ```
-/eink [file]  — push to Boox, block until notes come back
+/eink [file]  — push to Boox, iterative review with live annotation events
 ```
 
-Mid-conversation: push an explanation to the Boox, read with a pen, scribble thoughts, tap Done. Claude sees the typed notes and handwritten annotations and continues informed by your feedback.
+Mid-conversation: push an explanation to the Boox, read with a pen, scribble thoughts, tap "Request Update". Claude receives the annotations via the `eink-channel` MCP server, rewrites the document, and the tablet reloads — without you leaving the conversation.
+
+#### Starting Claude Code with channel support
+
+```bash
+claude --dangerously-load-development-channels server:eink-channel
+```
+
+**Why `--dangerously-load-development-channels server:eink-channel`**
+Channels are an experimental Claude Code extension that lets an MCP server push unsolicited events into the model's context. The `eink-channel` server (`harness/channels/eink-channel/channel.ts`) declares the `claude/channel` experimental capability, which is what makes this flag meaningful. Without it, Claude has no way to receive tablet events asynchronously — it would have to poll or block.
+
+#### How skill ↔ model communication works
+
+```
+/eink invoked
+      │
+      ▼  eink-review push --async --callback-url http://127.0.0.1:8789/ doc.md
+  eink-serve (port 3333)
+      │
+      │  user annotates on Boox, taps "Request Update"
+      │
+      ▼  POST http://127.0.0.1:8789/   (webhook body = annotation JSON)
+  eink-channel HTTP server (port 8789)
+      │
+      │  mcp.notification("notifications/claude/channel", { event_type, session_id, content })
+      ▼
+  Claude Code session  ←  receives <channel source="eink-channel" event_type="annotation_result" session_id="...">
+      │
+      │  reads annotations[].recognized_text + anchor.elements
+      │  rewrites document markdown
+      │
+      ▼  update_session(session_id, content)   ← MCP tool registered in eink-channel
+  eink-channel → PUT /api/sessions/{id}/content → eink-serve
+      │
+      ▼
+  Tablet reloads, user sees updated document
+```
+
+The `update_session` tool is registered in the same MCP server — so the same process that receives webhook events from the tablet also forwards `update_session` calls back to `eink-serve`. Claude is never blocked waiting; annotation events arrive as context injections and can be interleaved with other conversation turns.
+
+**Environment variables**
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `EINK_CHANNEL_PORT` | `8789` | Port the channel HTTP server listens on (must match `--callback-url`) |
+| `EINK_SERVER_URL` | `http://localhost:3333` | eink-serve base URL used by `update_session` |
 
 ## Document Syntax
 
@@ -369,8 +414,11 @@ docs/document-style.md                 visual language and document structure
     |
 ~/.claude/output-styles/eink-review.md how Claude writes review documents
     |
-~/.claude/skills/eink/SKILL.md         /eink workflow (push, wait, read annotations)
+~/.claude/skills/eink/SKILL.md         /eink workflow (push, receive events, rewrite)
 ~/.claude/skills/coverage/SKILL.md     /coverage workflow (llvm-cov + JaCoCo)
+    |
+harness/channels/eink-channel/         MCP channel server (tablet → Claude events)
+  channel.ts                           HTTP webhook receiver + MCP stdio server
 ```
 
 ### Document style (`docs/document-style.md`)
@@ -391,8 +439,17 @@ A compact derivative of the style guide that modifies Claude's system prompt. Ac
 
 | Skill | Trigger | What it does |
 |-------|---------|-------------|
-| `/eink [file]` | Push content for review | Sends markdown to the Boox, blocks until pen annotations come back |
+| `/eink [file]` | Push content for review | Sends markdown to the Boox, receives live annotation events via `eink-channel`, rewrites document iteratively |
 | `/coverage [component]` | Measure test coverage | Runs `cargo llvm-cov` (Rust) or JaCoCo (Android), reports gaps |
+
+### Channels (`harness/channels/eink-channel/`)
+
+The `eink-channel` is an MCP server with two roles running in the same process:
+
+- **HTTP server** (default port 8789) — receives webhook POSTs from `eink-serve` when the tablet submits or requests an update
+- **MCP server over stdio** — connected to Claude Code; forwards those events as `notifications/claude/channel` injections and exposes the `update_session` tool
+
+Claude Code must be started with `--dangerously-load-development-channels server:eink-channel` for channel events to reach the model. See the [Claude Code section](#claude-code) for the full invocation and flag explanations.
 
 ### Agent guidance (`AGENTS.md`)
 
