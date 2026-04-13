@@ -11,11 +11,12 @@ import android.graphics.drawable.GradientDrawable
 import android.media.RingtoneManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.os.Vibrator
 import android.os.VibrationEffect
 import android.util.Log
-import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.webkit.*
@@ -31,6 +32,8 @@ import kotlinx.coroutines.flow.collect
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
+import com.onyx.android.sdk.api.device.epd.EpdController
+import com.onyx.android.sdk.api.device.epd.UpdateMode
 import org.json.JSONTokener
 import java.util.concurrent.TimeUnit
 
@@ -70,6 +73,7 @@ class MainActivity : AppCompatActivity() {
     private var pushgatewayUrl = ""
     private var currentSessionId: String? = null
     private var inactivityJob: Job? = null
+    private var metricsJob: Job? = null
     private var wsInSleep = false
     @Volatile private var annotationSentAt: Long = 0L
     private lateinit var drawControls: android.widget.LinearLayout
@@ -103,6 +107,7 @@ class MainActivity : AppCompatActivity() {
         strokeView = findViewById(R.id.strokeView)
         ocrOverlay = findViewById(R.id.processingOverlay)
         ocrStatus = findViewById(R.id.processingStatus)
+        findViewById<Button>(R.id.btnCancelProcessing).setOnClickListener { cancelProcessing() }
 
         serverInput.setText(serverUrl)
         metricsInput.setText(pushgatewayUrl)
@@ -260,6 +265,8 @@ class MainActivity : AppCompatActivity() {
     internal lateinit var strokeSlider: SeekBar
     private lateinit var btnLink: Button
     private lateinit var btnColor: Button
+    private lateinit var colorDrawer: LinearLayout
+    private val colorDots = mutableListOf<View>()
     private lateinit var btnAnnotations: Button
     private lateinit var btnSelect: Button
     private var selectedStyleIndex = 0
@@ -269,6 +276,9 @@ class MainActivity : AppCompatActivity() {
     internal val selectModeActive: Boolean get() = toolMode == ToolMode.MOVE
     private var annotationModeActive = false
     private var currentStrokeColor = Color.BLACK
+    private val epdHandler = Handler(Looper.getMainLooper())
+    private var epdRestoreRunnable: Runnable? = null
+    private var processingJob: Job? = null
 
     private val styleDotIds = listOf(R.id.dotPencil, R.id.dotBrush, R.id.dotEraser)
 
@@ -294,6 +304,10 @@ class MainActivity : AppCompatActivity() {
         val btnClear = findViewById<Button>(R.id.btnClear)
         btnLink = findViewById(R.id.btnLink)
         btnColor = findViewById(R.id.btnColor)
+        colorDrawer = findViewById(R.id.colorDrawer)
+        buildColorDrawer()
+        btnColor.setTextColor(currentStrokeColor)
+        btnColor.setOnClickListener { toggleColorDrawer() }
         btnAnnotations = findViewById(R.id.btnAnnotations)
         btnSelect = findViewById(R.id.btnSelect)
 
@@ -341,7 +355,6 @@ class MainActivity : AppCompatActivity() {
         btnLink.setOnClickListener {
             setToolMode(if (toolMode == ToolMode.TAG) ToolMode.DRAW else ToolMode.TAG)
         }
-        btnColor.setOnClickListener { showColorPicker() }
         btnAnnotations.setOnClickListener {
             annotationModeActive = !annotationModeActive
             btnAnnotations.alpha = if (annotationModeActive) 1.0f else 0.35f
@@ -402,6 +415,7 @@ class MainActivity : AppCompatActivity() {
     internal fun setToolMode(mode: ToolMode) {
         if (toolMode == mode) return
         toolMode = mode
+        colorDrawer.visibility = View.GONE
         setModeButtonActive(btnLink, R.id.dotLink, mode == ToolMode.TAG)
         setModeButtonActive(btnSelect, R.id.dotSelect, mode == ToolMode.MOVE)
         val drawMode = mode == ToolMode.DRAW
@@ -428,50 +442,65 @@ class MainActivity : AppCompatActivity() {
     internal fun enterSelectMode() = setToolMode(ToolMode.MOVE)
     internal fun exitSelectMode() = setToolMode(ToolMode.DRAW)
 
-    private fun showColorPicker() {
+    private fun buildColorDrawer() {
+        colorDrawer.removeAllViews()
+        colorDots.clear()
         val dm = resources.displayMetrics
-        val dotPx = (44 * dm.density).toInt()
-        val marginPx = (8 * dm.density).toInt()
-        val paddingPx = (20 * dm.density).toInt()
-
-        val container = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(paddingPx, paddingPx, paddingPx, paddingPx)
-        }
-        val dialog = AlertDialog.Builder(this).setView(container).create()
-
-        for (row in colorPalette.toList().chunked(4)) {
-            val rowLayout = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER
-            }
-            for (color in row) {
-                val isSelected = color == currentStrokeColor
-                val dot = View(this).apply {
-                    background = GradientDrawable().apply {
-                        shape = GradientDrawable.OVAL
-                        setColor(color)
-                        setStroke(
-                            if (isSelected) (5 * dm.density).toInt() else (2 * dm.density).toInt(),
-                            if (isSelected) Color.BLACK else Color.argb(80, 0, 0, 0),
-                        )
-                    }
-                    layoutParams = LinearLayout.LayoutParams(dotPx, dotPx).apply {
-                        setMargins(marginPx, marginPx, marginPx, marginPx)
-                    }
-                    setOnClickListener {
-                        currentStrokeColor = color
-                        penOverlay?.setStrokeColor(color)
-                        btnColor.setTextColor(color)
-                        dialog.dismiss()
-                    }
+        val dotPx = (32 * dm.density).toInt()
+        val marginPx = (4 * dm.density).toInt()
+        for (color in colorPalette) {
+            val isSelected = color == currentStrokeColor
+            val dot = View(this).apply {
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    setColor(color)
+                    setStroke(
+                        if (isSelected) (4 * dm.density).toInt() else (1 * dm.density).toInt(),
+                        if (isSelected) Color.BLACK else Color.argb(60, 0, 0, 0),
+                    )
                 }
-                rowLayout.addView(dot)
+                layoutParams = LinearLayout.LayoutParams(dotPx, dotPx).apply {
+                    setMargins(marginPx, marginPx, marginPx, marginPx)
+                }
+                setOnClickListener {
+                    currentStrokeColor = color
+                    penOverlay?.setStrokeColor(color)
+                    btnColor.setTextColor(color)
+                    updateColorDotSelection()
+                    colorDrawer.visibility = View.GONE
+                }
             }
-            container.addView(rowLayout)
+            colorDrawer.addView(dot)
+            colorDots.add(dot)
         }
+    }
 
-        dialog.show()
+    private fun toggleColorDrawer() {
+        colorDrawer.visibility =
+            if (colorDrawer.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+    }
+
+    private fun updateColorDotSelection() {
+        val dm = resources.displayMetrics
+        for ((i, dot) in colorDots.withIndex()) {
+            val c = colorPalette[i]
+            val isSelected = c == currentStrokeColor
+            (dot.background as? GradientDrawable)?.setStroke(
+                if (isSelected) (4 * dm.density).toInt() else (1 * dm.density).toInt(),
+                if (isSelected) Color.BLACK else Color.argb(60, 0, 0, 0),
+            )
+        }
+    }
+
+    private fun setEpdMode(mode: UpdateMode) {
+        try { EpdController.setViewDefaultUpdateMode(webView, mode) }
+        catch (_: Exception) {}
+    }
+
+    private fun scheduleEpdRestore(delayMs: Long = 500) {
+        epdRestoreRunnable?.let { epdHandler.removeCallbacks(it) }
+        epdRestoreRunnable = Runnable { setEpdMode(UpdateMode.GC) }
+        epdHandler.postDelayed(epdRestoreRunnable!!, delayMs)
     }
 
     private fun openSession(sessionId: String) {
@@ -565,7 +594,13 @@ class MainActivity : AppCompatActivity() {
         val savedOcrResults = sessionRepo.loadOcrResults(sessionId)
         if (savedOcrResults.isNotEmpty()) overlay.loadOcrResults(savedOcrResults)
         penOverlay = overlay
+        setEpdMode(UpdateMode.GC)
+        webView.setOnScrollChangeListener { _, _, _, _, _ ->
+            setEpdMode(UpdateMode.REGAL)
+            scheduleEpdRestore(800)
+        }
         resetInactivityTimer()
+        startPeriodicMetrics()
     }
 
     private fun updateOcrProgress(remaining: Int, total: Int) {
@@ -577,13 +612,25 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun startPeriodicMetrics() {
+        metricsJob?.cancel()
+        metricsJob = scope.launch {
+            while (true) {
+                delay(60_000L)
+                MetricsReporter.push(pushgatewayUrl)
+            }
+        }
+    }
+
     private fun showSessionList() {
         Log.i(TAG, "showSessionList: leaving session=$currentSessionId")
         inactivityJob?.cancel()
         inactivityJob = null
+        metricsJob?.cancel()
+        metricsJob = null
         wsInSleep = false
         currentContextGroupId = null
-        // Reset UI mode so a stale TAG/MOVE state doesn't leak into the next session.
+        colorDrawer.visibility = View.GONE
         toolMode = ToolMode.DRAW
         setModeButtonActive(btnLink, R.id.dotLink, false)
         setModeButtonActive(btnSelect, R.id.dotSelect, false)
@@ -614,16 +661,22 @@ class MainActivity : AppCompatActivity() {
         }
         Log.i(TAG, "submitAndGoBack: starting session=$sessionId strokes=${overlay.buf.strokes.size}")
         overlay.queryElementMap { elements ->
-            scope.launch {
+            processingJob?.cancel()
+            processingJob = scope.launch {
                 try {
+                    ocrStatus.text = "Submitting..."
+                    ocrOverlay.visibility = View.VISIBLE
                     val pngData = overlay.exportToPng()
                     val strokeJson = overlay.exportStrokeJson()
                     val annotationsJson = submissionManager.buildAnnotationsJson(
                         overlay.buf.strokes, overlay.bindGroups, elements
                     )
-                    val result = withContext(Dispatchers.IO) {
-                        submissionManager.submit(serverUrl, sessionId, annotationsJson, pngData, strokeJson)
+                    val result = withTimeout(30_000) {
+                        withContext(Dispatchers.IO) {
+                            submissionManager.submit(serverUrl, sessionId, annotationsJson, pngData, strokeJson)
+                        }
                     }
+                    ocrOverlay.visibility = View.GONE
                     when {
                         result.isSuccessful -> {
                             MetricsReporter.recordSubmission(true)
@@ -648,8 +701,15 @@ class MainActivity : AppCompatActivity() {
                             Toast.makeText(this@MainActivity, "Error: ${result.exception.message}", Toast.LENGTH_SHORT).show()
                         }
                     }
+                } catch (e: TimeoutCancellationException) {
+                    Log.w(TAG, "submitAndGoBack: timed out session=$sessionId")
+                    ocrOverlay.visibility = View.GONE
+                    Toast.makeText(this@MainActivity, "Submit timed out", Toast.LENGTH_SHORT).show()
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (e: Exception) {
                     Log.e(TAG, "submitAndGoBack: exception session=$sessionId", e)
+                    ocrOverlay.visibility = View.GONE
                     Toast.makeText(this@MainActivity, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
                 }
             }
@@ -677,26 +737,54 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun cancelProcessing() {
+        processingJob?.cancel()
+        processingJob = null
+        annotationSentAt = 0L
+        ocrOverlay.visibility = View.GONE
+        Toast.makeText(this, "Cancelled", Toast.LENGTH_SHORT).show()
+    }
+
     private fun requestUpdate() {
-        val sessionId = currentSessionId ?: return
-        val overlay = penOverlay ?: return
+        val sessionId = currentSessionId ?: run {
+            Log.w(TAG, "requestUpdate: no currentSessionId — skipping")
+            return
+        }
+        val overlay = penOverlay ?: run {
+            Log.w(TAG, "requestUpdate: penOverlay is null — skipping")
+            return
+        }
+        Log.i(TAG, "requestUpdate: querying element map session=$sessionId strokes=${overlay.buf.strokes.size}")
         overlay.queryElementMap { elements ->
-            scope.launch {
+            Log.i(TAG, "requestUpdate: callback elements=${elements.size} session=$sessionId")
+            processingJob?.cancel()
+            processingJob = scope.launch {
                 try {
                     ocrStatus.text = "Sending annotations..."
                     ocrOverlay.visibility = View.VISIBLE
                     val annotationsJson = submissionManager.buildAnnotationsJson(
                         overlay.buf.strokes, overlay.bindGroups, elements
                     )
+                    Log.i(TAG, "requestUpdate: sending to server session=$sessionId")
                     annotationSentAt = SystemClock.elapsedRealtime()
-                    val ok = withContext(Dispatchers.IO) {
-                        submissionManager.requestUpdate(serverUrl, sessionId, annotationsJson)
+                    val ok = withTimeout(30_000) {
+                        withContext(Dispatchers.IO) {
+                            submissionManager.requestUpdate(serverUrl, sessionId, annotationsJson)
+                        }
                     }
+                    Log.i(TAG, "requestUpdate: server response ok=$ok session=$sessionId")
                     if (!ok) {
                         annotationSentAt = 0L
                         ocrOverlay.visibility = View.GONE
                         Toast.makeText(this@MainActivity, "Request failed", Toast.LENGTH_SHORT).show()
                     }
+                } catch (e: TimeoutCancellationException) {
+                    annotationSentAt = 0L
+                    Log.w(TAG, "requestUpdate: timed out session=$sessionId")
+                    ocrOverlay.visibility = View.GONE
+                    Toast.makeText(this@MainActivity, "Request timed out", Toast.LENGTH_SHORT).show()
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (e: Exception) {
                     annotationSentAt = 0L
                     Log.e(TAG, "requestUpdate: exception session=$sessionId", e)
@@ -805,6 +893,16 @@ class MainActivity : AppCompatActivity() {
                         annotationSentAt = 0L
                         MetricsReporter.recordUpdateRoundTrip(roundTripMs)
                         Log.i(TAG, "version_updated: round-trip=${roundTripMs}ms")
+                        scope.launch { MetricsReporter.push(pushgatewayUrl) }
+                    }
+                    val consumed = json.optJSONArray("consumed_annotations")
+                    if (consumed != null && consumed.length() > 0) {
+                        val ids = (0 until consumed.length()).map { consumed.getInt(it) }
+                        Log.i(TAG, "version_updated: clearing bind groups $ids")
+                        penOverlay?.also { overlay ->
+                            ids.forEach { overlay.removeBindGroup(it) }
+                            sessionRepo.saveBindGroups(sid, overlay.bindGroups)
+                        }
                     }
                     Log.i(TAG, "version_updated: version=$version — reloading webview")
                     loadedVersion = version

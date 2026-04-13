@@ -47,6 +47,8 @@ pub struct AnnotationGroup {
     pub strokes: Vec<Vec<[f64; 2]>>,
     #[serde(default)]
     pub recognized_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -493,6 +495,10 @@ pub fn openapi_spec() -> serde_json::Value {
                         },
                         "recognized_text": {
                             "type": ["string", "null"]
+                        },
+                        "color": {
+                            "type": ["string", "null"],
+                            "description": "Hex color of the annotation stroke (e.g. #CC0000)"
                         }
                     }
                 },

@@ -298,6 +298,14 @@ hr { border: none; border-top: 1px solid #333; margin: 24px 0; }
     text-anchor: middle;
     text-transform: uppercase;
 }
+.graph-node-kind {
+    fill: #888;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-anchor: middle;
+    text-transform: uppercase;
+}
 .mindmap-node.is-active rect {
     stroke-width: 3;
 }
@@ -623,17 +631,12 @@ const BOOTSTRAP_JS: &str = r#"
     return palette[(node.color || '').toLowerCase()] || '#f5f5f5';
   }
 
-  function einkStrokePattern(value) {
-    const patterns = {
-      blue: '',
-      green: '10 4',
-      red: '4 4',
-      amber: '14 4 4 4',
-      purple: '2 4',
-      slate: '18 4',
-      gray: ''
-    };
-    return patterns[(value || '').toLowerCase()] || '';
+  function darkenColor(hex, factor) {
+    var r = parseInt(hex.slice(1,3), 16);
+    var g = parseInt(hex.slice(3,5), 16);
+    var b = parseInt(hex.slice(5,7), 16);
+    r = Math.round(r * factor); g = Math.round(g * factor); b = Math.round(b * factor);
+    return '#' + ((1<<24)|(r<<16)|(g<<8)|b).toString(16).slice(1);
   }
 
   function edgePattern(kind) {
@@ -716,12 +719,15 @@ const BOOTSTRAP_JS: &str = r#"
       item.className = 'diagram-legend-item';
       const swatch = document.createElement('span');
       swatch.className = 'diagram-legend-swatch';
-      swatch.style.background = entry.fill || '#fff';
-      swatch.style.borderStyle = entry.dash ? 'dashed' : 'solid';
-      if (entry.dash) swatch.style.borderImage = 'none';
-      if (entry.dash) swatch.style.borderWidth = '2px';
-      if (entry.dash) swatch.style.borderColor = '#111';
-      if (entry.dash) swatch.style.backgroundImage = 'linear-gradient(135deg, rgba(0,0,0,0.08) 25%, transparent 25%, transparent 50%, rgba(0,0,0,0.08) 50%, rgba(0,0,0,0.08) 75%, transparent 75%, transparent)';
+      var fill = entry.fill || '#ffffff';
+      swatch.style.background = fill;
+      if (entry.dash) {
+        swatch.style.borderStyle = 'dashed';
+        swatch.style.borderWidth = '2px';
+        swatch.style.borderColor = '#111';
+      } else {
+        swatch.style.border = '2px solid ' + darkenColor(fill, 0.65);
+      }
       const text = document.createElement('span');
       text.textContent = entry.label;
       item.appendChild(swatch);
@@ -845,11 +851,11 @@ const BOOTSTRAP_JS: &str = r#"
       const indexButtons = new Map();
 
       main.appendChild(buildLegend('Legend', [
-        { label: 'Blue — info', fill: colorForNode({ color: 'blue' }), dash: einkStrokePattern('blue') },
-        { label: 'Green — done', fill: colorForNode({ color: 'green' }), dash: einkStrokePattern('green') },
-        { label: 'Red — blocker', fill: colorForNode({ color: 'red' }), dash: einkStrokePattern('red') },
-        { label: 'Amber — in progress', fill: colorForNode({ color: 'amber' }), dash: einkStrokePattern('amber') },
-        { label: 'Purple — decision', fill: colorForNode({ color: 'purple' }), dash: einkStrokePattern('purple') }
+        { label: 'Blue — info', fill: colorForNode({ color: 'blue' }) },
+        { label: 'Green — done', fill: colorForNode({ color: 'green' }) },
+        { label: 'Red — blocker', fill: colorForNode({ color: 'red' }) },
+        { label: 'Amber — in progress', fill: colorForNode({ color: 'amber' }) },
+        { label: 'Purple — decision', fill: colorForNode({ color: 'purple' }) }
       ]));
 
       function renderEdges(parent) {
@@ -862,8 +868,7 @@ const BOOTSTRAP_JS: &str = r#"
           const controlX = startX + (endX - startX) * 0.45;
           path.setAttribute('class', 'mindmap-edge');
           path.setAttribute('d', 'M ' + startX + ' ' + startY + ' C ' + controlX + ' ' + startY + ', ' + (endX - 40) + ' ' + endY + ', ' + endX + ' ' + endY);
-          const dash = einkStrokePattern(child.color);
-          if (dash) path.setAttribute('stroke-dasharray', dash);
+          path.style.stroke = darkenColor(colorForNode(child), 0.65);
           svg.appendChild(path);
           renderEdges(child);
         });
@@ -880,10 +885,10 @@ const BOOTSTRAP_JS: &str = r#"
         rect.setAttribute('ry', '12');
         rect.setAttribute('width', String(node.width));
         rect.setAttribute('height', String(node.height));
-        rect.style.fill = colorForNode(node);
+        var mmNodeColor = colorForNode(node);
+        rect.style.fill = mmNodeColor;
+        rect.style.stroke = darkenColor(mmNodeColor, 0.65);
         rect.setAttribute('filter', 'url(#mm-node-shadow)');
-        const dash = einkStrokePattern(node.color);
-        if (dash) rect.setAttribute('stroke-dasharray', dash);
         const mmLines = node.lines || splitLabel(node.label);
         const mmTextY = Math.round(node.y + node.height / 2 + 7 - (mmLines.length - 1) * 11);
         const text = renderLabelText(svg, mmLines, node.x + node.width / 2, mmTextY, 22);
@@ -1034,10 +1039,12 @@ const BOOTSTRAP_JS: &str = r#"
       },
       children: nodes.map((node) => {
         const sz = nodeSize(node.label || node.id || 'Untitled');
+        var h = sz.height;
+        if (node.kind) h += 20;
         return {
         id: node.id,
         width: sz.width,
-        height: sz.height,
+        height: h,
         labels: [{ text: node.label || node.id || 'Untitled' }],
         data: node
         };
@@ -1099,10 +1106,10 @@ const BOOTSTRAP_JS: &str = r#"
     const sourceNodeMap = new Map(nodes.map((node) => [node.id, node]));
 
     shell.appendChild(buildLegend('Legend', [
-      { label: 'Tool', fill: graphFill('tool'), dash: '' },
-      { label: 'Backend', fill: graphFill('backend'), dash: einkStrokePattern('green') },
-      { label: 'Client', fill: graphFill('client'), dash: einkStrokePattern('red') },
-      { label: 'Service', fill: graphFill('service'), dash: einkStrokePattern('amber') },
+      { label: 'Tool', fill: graphFill('tool') },
+      { label: 'Backend', fill: graphFill('backend') },
+      { label: 'Client', fill: graphFill('client') },
+      { label: 'Service', fill: graphFill('service') },
       { label: 'Dashed edge — semantic', fill: '#f5f5f5', dash: edgePattern('invokes') }
     ]));
 
@@ -1160,32 +1167,22 @@ const BOOTSTRAP_JS: &str = r#"
       rect.setAttribute('rx', '12');
       rect.setAttribute('ry', '12');
       const sourceNode = sourceNodeMap.get(node.id) || {};
-      rect.style.fill = sourceNode.color ? colorForNode(sourceNode) : graphFill(sourceNode.kind);
+      var nodeColor = sourceNode.color ? colorForNode(sourceNode) : graphFill(sourceNode.kind);
+      rect.style.fill = nodeColor;
+      rect.style.stroke = darkenColor(nodeColor, 0.65);
       rect.setAttribute('filter', 'url(#g-node-shadow)');
-      const nodeDash = einkStrokePattern(sourceNode.color || (sourceNode.kind === 'backend' ? 'green' : sourceNode.kind === 'client' ? 'red' : sourceNode.kind === 'service' ? 'amber' : 'blue'));
-      if (nodeDash) rect.setAttribute('stroke-dasharray', nodeDash);
       const gLines = splitLabel(sourceNode.label || node.id);
-      const gTextY = Math.round(node.y + node.height / 2 + 7 - (gLines.length - 1) * 11);
+      const badgeOffset = sourceNode.kind ? 10 : 0;
+      const gTextY = Math.round(node.y + node.height / 2 + 7 + badgeOffset - (gLines.length - 1) * 11);
       const text = renderLabelText(svg, gLines, node.x + node.width / 2, gTextY, 22);
       group.appendChild(rect);
       if (sourceNode.kind) {
-        const badge = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-        badge.setAttribute('class', 'graph-node-badge');
-        const badgeRect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-        const badgeWidth = 18 + badgeText(sourceNode.kind).length * 7;
-        badgeRect.setAttribute('x', String(node.x + node.width - badgeWidth - 12));
-        badgeRect.setAttribute('y', String(node.y + 8));
-        badgeRect.setAttribute('width', String(badgeWidth));
-        badgeRect.setAttribute('height', '16');
-        badgeRect.setAttribute('rx', '8');
-        badgeRect.setAttribute('ry', '8');
         const badgeLabel = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-        badgeLabel.setAttribute('x', String(node.x + node.width - badgeWidth / 2 - 12));
-        badgeLabel.setAttribute('y', String(node.y + 20));
+        badgeLabel.setAttribute('class', 'graph-node-kind');
+        badgeLabel.setAttribute('x', String(node.x + node.width / 2));
+        badgeLabel.setAttribute('y', String(node.y + 18));
         badgeLabel.textContent = badgeText(sourceNode.kind);
-        badge.appendChild(badgeRect);
-        badge.appendChild(badgeLabel);
-        group.appendChild(badge);
+        group.appendChild(badgeLabel);
       }
       group.appendChild(text);
       group.addEventListener('click', () => focusNode(node.id));
@@ -1359,20 +1356,20 @@ const ELEMENT_MAP_JS: &str = r#"
     if (sc) applyStrokeStyle(el, sc);
   }
 
-  // --- Stroke-link styling (dashed outline) ---
+  // --- Stroke-link styling (left border) ---
 
   function applyStrokeStyle(el, color) {
-    if (el.dataset.linkGroupId) return;  // tap-link takes priority
-    el.style.outline = '4px dashed ' + color;
-    el.style.outlineOffset = '3px';
-    el.style.backgroundColor = hexToRgba(color, 0.05);
+    if (el.dataset.linkGroupId) return;
+    el.style.borderLeft = '6px solid ' + color;
+    el.style.paddingLeft = '8px';
+    el.style.backgroundColor = hexToRgba(color, 0.08);
     el.style.position = 'relative';
     var badge = el.querySelector('.eink-stroke-badge');
     if (!badge) {
       badge = document.createElement('span');
       badge.className = 'eink-link-badge eink-stroke-badge';
       badge.style.background = color;
-      badge.style.borderStyle = 'dashed';
+      badge.style.borderStyle = 'solid';
       badge.textContent = '\u270f';
       el.appendChild(badge);
     } else {
@@ -1381,9 +1378,9 @@ const ELEMENT_MAP_JS: &str = r#"
   }
 
   function clearStrokeStyle(el) {
-    if (el.dataset.linkGroupId) return;  // tap-link owns this element
-    el.style.outline = '';
-    el.style.outlineOffset = '';
+    if (el.dataset.linkGroupId) return;
+    el.style.borderLeft = '';
+    el.style.paddingLeft = '';
     el.style.backgroundColor = '';
     var badge = el.querySelector('.eink-stroke-badge');
     if (badge) badge.parentNode.removeChild(badge);

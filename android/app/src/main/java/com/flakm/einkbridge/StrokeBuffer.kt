@@ -36,6 +36,7 @@ internal data class StrokeGroup(
     val anchor: Anchor?,
     val strokes: List<Stroke>,
     val recognizedText: String? = null,
+    val color: String? = null,
 )
 
 internal data class FoundElement(val i: Int, val tag: String, val id: String?, val section: String?, val text: String, val cx: Float = 0f, val cy: Float = 0f)
@@ -376,6 +377,7 @@ internal fun annotationsToJson(groups: List<StrokeGroup>, unanchored: List<Strok
         }
         obj.put("strokes", strokesToPointArrays(group.strokes))
         group.recognizedText?.let { obj.put("recognized_text", it) }
+        group.color?.let { obj.put("color", it) }
         arr.put(obj)
     }
     if (unanchored.isNotEmpty()) {
@@ -398,6 +400,7 @@ internal fun bindGroupsToAnnotations(
             anchor = Anchor.Explicit(bg.elementRefs),
             strokes = groupStrokes,
             recognizedText = bg.recognizedText,
+            color = "#%06X".format(bg.color and 0xFFFFFF),
         )
     }
     val unanchored = strokes.filterIndexed { idx, _ -> idx !in usedIndices }

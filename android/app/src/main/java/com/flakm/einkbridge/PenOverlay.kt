@@ -9,6 +9,7 @@ import android.view.MotionEvent
 import android.view.View
 import android.webkit.WebView
 import com.onyx.android.sdk.api.device.epd.EpdController
+import com.onyx.android.sdk.api.device.epd.UpdateMode
 import com.onyx.android.sdk.data.note.TouchPoint
 import com.onyx.android.sdk.pen.RawInputCallback
 import com.onyx.android.sdk.pen.TouchHelper
@@ -83,9 +84,19 @@ internal class OnyxPenController(
     private var currentStyle: Int = TouchHelper.STROKE_STYLE_PENCIL
     private var pendingReEnable: Runnable? = null
 
+    private fun setEpdFastDraw() {
+        val v = penViewRef?.get() ?: return
+        try { EpdController.setViewDefaultUpdateMode(v, UpdateMode.DU) } catch (_: Exception) {}
+    }
+    private fun setEpdFullColor() {
+        val v = penViewRef?.get() ?: return
+        try { EpdController.setViewDefaultUpdateMode(v, UpdateMode.GC) } catch (_: Exception) {}
+    }
+
     private val callback = object : RawInputCallback() {
         override fun onBeginRawDrawing(b: Boolean, tp: TouchPoint) {
             moveCount = 0
+            setEpdFastDraw()
             Log.d(DRAW_TAG, "onBeginRawDrawing eraseMode=$eraseMode tp=(${tp.x},${tp.y}) bufSize=${buf.size}")
             if (eraseMode) {
                 eraserPath = mutableListOf(tp.x to tp.y)
@@ -115,6 +126,7 @@ internal class OnyxPenController(
                 onStrokeCommitted?.invoke()
             }
             scheduleReEnableAfterCooldown()
+            setEpdFullColor()
         }
         override fun onRawDrawingTouchPointMoveReceived(tp: TouchPoint) {
             moveCount++
@@ -125,6 +137,7 @@ internal class OnyxPenController(
             // Ignored: points already delivered individually via move callback
         }
         override fun onBeginRawErasing(b: Boolean, tp: TouchPoint) {
+            setEpdFastDraw()
             eraserPath = mutableListOf(tp.x to tp.y)
         }
         override fun onRawErasingTouchPointMoveReceived(tp: TouchPoint) {
@@ -140,6 +153,7 @@ internal class OnyxPenController(
             onErasePath?.invoke(path, t)
             onEraseApplied(removed)
             scheduleReEnableAfterCooldown()
+            setEpdFullColor()
         }
     }
 

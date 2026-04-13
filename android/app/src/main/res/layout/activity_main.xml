@@ -108,8 +108,7 @@
                 android:layout_width="wrap_content"
                 android:layout_height="40dp"
                 android:text="Save"
-                android:textSize="13sp"
-                style="?android:attr/buttonBarButtonStyle" />
+                android:textSize="13sp" />
         </LinearLayout>
     </LinearLayout>
 
@@ -126,6 +125,22 @@
         android:layout_height="match_parent"
         android:clickable="false"
         android:focusable="false"
+        android:visibility="gone" />
+
+    <!-- Color drawer: sits above toolbar, hidden by default -->
+    <LinearLayout
+        android:id="@+id/colorDrawer"
+        android:layout_width="wrap_content"
+        android:layout_height="48dp"
+        android:layout_gravity="bottom|start"
+        android:layout_marginBottom="72dp"
+        android:layout_marginStart="8dp"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:background="#FFFFFF"
+        android:elevation="6dp"
+        android:paddingStart="8dp"
+        android:paddingEnd="8dp"
         android:visibility="gone" />
 
     <!-- Toolbar -->
@@ -428,12 +443,24 @@
 
         <TextView
             android:id="@+id/processingStatus"
-            android:layout_width="wrap_content"
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
+            android:layout_weight="1"
             android:text="Processing..."
             android:textColor="#FFFFFF"
             android:textSize="16sp"
             android:layout_marginStart="8dp" />
+
+        <Button
+            android:id="@+id/btnCancelProcessing"
+            style="?android:attr/buttonBarButtonStyle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="✕"
+            android:textColor="#FFFFFF"
+            android:textSize="20sp"
+            android:minWidth="44dp"
+            android:minHeight="44dp" />
     </LinearLayout>
 
 </FrameLayout>

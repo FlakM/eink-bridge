@@ -400,7 +400,9 @@ internal class StrokeView @JvmOverloads constructor(
                     val text = label.group.recognizedText
                     if (!text.isNullOrEmpty()) {
                         val cornerR = label.h / 2
-                        markerPaint.color = Color.WHITE; markerPaint.style = Paint.Style.FILL
+                        markerPaint.color = 0xE0FFFFFF.toInt(); markerPaint.style = Paint.Style.FILL
+                        canvas.drawRoundRect(rect, cornerR, cornerR, markerPaint)
+                        markerPaint.color = (label.group.color and 0x00FFFFFF) or 0x20000000
                         canvas.drawRoundRect(rect, cornerR, cornerR, markerPaint)
                         markerPaint.color = label.group.color; markerPaint.style = Paint.Style.STROKE; markerPaint.strokeWidth = 5f
                         canvas.drawRoundRect(rect, cornerR, cornerR, markerPaint)
