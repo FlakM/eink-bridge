@@ -298,13 +298,14 @@ hr { border: none; border-top: 1px solid #333; margin: 24px 0; }
     text-anchor: middle;
     text-transform: uppercase;
 }
-.graph-node-kind {
+.graph-node-kind,
+.mindmap-node-kind {
     fill: #888;
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: 0.08em;
+    font-size: 9px;
+    font-weight: 400;
+    letter-spacing: 0.04em;
     text-anchor: middle;
-    text-transform: uppercase;
+    font-style: italic;
 }
 .mindmap-node.is-active rect {
     stroke-width: 3;
@@ -366,8 +367,9 @@ hr { border: none; border-top: 1px solid #333; margin: 24px 0; }
     stroke-width: 2;
 }
 .graph-edge-label {
-    font-size: 13px;
-    fill: #555;
+    font-size: 14px;
+    fill: #444;
+    font-style: italic;
     text-anchor: middle;
 }
 .eink-muted {
@@ -895,23 +897,12 @@ const BOOTSTRAP_JS: &str = r#"
         text.setAttribute('class', 'mindmap-node-text');
         group.appendChild(rect);
         if (node.kind) {
-          const badge = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-          badge.setAttribute('class', 'mindmap-node-badge');
-          const badgeRect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-          const badgeWidth = 18 + badgeText(node.kind).length * 7;
-          badgeRect.setAttribute('x', String(node.x + node.width - badgeWidth - 12));
-          badgeRect.setAttribute('y', String(node.y + 8));
-          badgeRect.setAttribute('width', String(badgeWidth));
-          badgeRect.setAttribute('height', '16');
-          badgeRect.setAttribute('rx', '8');
-          badgeRect.setAttribute('ry', '8');
-          const badgeLabel = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-          badgeLabel.setAttribute('x', String(node.x + node.width - badgeWidth / 2 - 12));
-          badgeLabel.setAttribute('y', String(node.y + 20));
-          badgeLabel.textContent = badgeText(node.kind);
-          badge.appendChild(badgeRect);
-          badge.appendChild(badgeLabel);
-          group.appendChild(badge);
+          const kindLabel = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+          kindLabel.setAttribute('class', 'mindmap-node-kind');
+          kindLabel.setAttribute('x', String(node.x + node.width / 2));
+          kindLabel.setAttribute('y', String(node.y + node.height - 6));
+          kindLabel.textContent = node.kind;
+          group.appendChild(kindLabel);
         }
         group.appendChild(text);
         group.addEventListener('click', () => focusNode(node.id));
@@ -1039,12 +1030,10 @@ const BOOTSTRAP_JS: &str = r#"
       },
       children: nodes.map((node) => {
         const sz = nodeSize(node.label || node.id || 'Untitled');
-        var h = sz.height;
-        if (node.kind) h += 20;
         return {
         id: node.id,
         width: sz.width,
-        height: h,
+        height: sz.height,
         labels: [{ text: node.label || node.id || 'Untitled' }],
         data: node
         };
@@ -1172,16 +1161,15 @@ const BOOTSTRAP_JS: &str = r#"
       rect.style.stroke = darkenColor(nodeColor, 0.65);
       rect.setAttribute('filter', 'url(#g-node-shadow)');
       const gLines = splitLabel(sourceNode.label || node.id);
-      const badgeOffset = sourceNode.kind ? 10 : 0;
-      const gTextY = Math.round(node.y + node.height / 2 + 7 + badgeOffset - (gLines.length - 1) * 11);
+      const gTextY = Math.round(node.y + node.height / 2 + 7 - (gLines.length - 1) * 11);
       const text = renderLabelText(svg, gLines, node.x + node.width / 2, gTextY, 22);
       group.appendChild(rect);
       if (sourceNode.kind) {
         const badgeLabel = document.createElementNS('http://www.w3.org/2000/svg', 'text');
         badgeLabel.setAttribute('class', 'graph-node-kind');
         badgeLabel.setAttribute('x', String(node.x + node.width / 2));
-        badgeLabel.setAttribute('y', String(node.y + 18));
-        badgeLabel.textContent = badgeText(sourceNode.kind);
+        badgeLabel.setAttribute('y', String(node.y + node.height - 8));
+        badgeLabel.textContent = sourceNode.kind;
         group.appendChild(badgeLabel);
       }
       group.appendChild(text);
