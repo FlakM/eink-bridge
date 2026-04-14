@@ -22,19 +22,18 @@ const EINK_CSS: &str = r#"
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body {
     font-family: Georgia, 'Times New Roman', serif;
-    font-size: 28px;
+    font-size: 18px;
     line-height: 1.6;
     color: #000;
     background: #fff;
-    width: 1860px;
-    min-height: 4000px;
+    min-height: 100vh;
     padding: 0;
     margin: 0;
 }
 #content {
-    max-width: 1740px;
-    margin: 24px 0 1500px 60px;
-    padding: 0 32px;
+    max-width: 100%;
+    margin: 16px 0 800px 0;
+    padding: 0 20px;
 }
 #toc {
     border: 2px solid #111;
@@ -72,16 +71,16 @@ body {
 #toc a.toc-h2 { padding-left: 12px; font-weight: 600; }
 #toc a.toc-h3 { padding-left: 28px; font-weight: normal; color: #444; }
 #toc a:active { background: #e0e0e0; }
-h1 { font-size: 42px; margin: 36px 0 16px; border-bottom: 2px solid #000; padding-bottom: 8px; }
-h2 { font-size: 34px; margin: 28px 0 12px; }
-h3 { font-size: 28px; font-weight: bold; margin: 20px 0 8px; }
-p { margin: 12px 0; }
+h1 { font-size: 28px; margin: 24px 0 12px; border-bottom: 2px solid #000; padding-bottom: 6px; }
+h2 { font-size: 24px; margin: 20px 0 10px; }
+h3 { font-size: 20px; font-weight: bold; margin: 16px 0 6px; }
+p { margin: 10px 0; }
 code {
     font-family: 'Courier New', monospace;
-    font-size: 24px;
+    font-size: 16px;
     background: #f4f4f4;
-    padding: 3px 7px;
-    border: 2px solid #999;
+    padding: 2px 5px;
+    border: 1px solid #888;
     border-radius: 3px;
 }
 pre {
@@ -603,6 +602,17 @@ const BOOTSTRAP_JS: &str = r#"
     const height = 44 + lines.length * 22;
     return { lines, width, height };
   }
+  function edgeLabelDims(text) {
+    // Edge labels render at 22px italic bold. Reserve enough box for ELK so
+    // labels don't overlap each other or their host edges.
+    const lines = String(text || '').split('\n');
+    const maxLen = Math.max(1, ...lines.map((l) => l.length));
+    return {
+      text: String(text || ''),
+      width: Math.max(48, maxLen * 13 + 16),
+      height: lines.length * 28 + 12
+    };
+  }
   function renderLabelText(svg, lines, x, y, lineHeight) {
     const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
     lines.forEach((line, i) => {
@@ -621,10 +631,6 @@ const BOOTSTRAP_JS: &str = r#"
     const body = block.querySelector('.diagram-body');
     if (!body) return;
     body.innerHTML = '<pre class="diagram-error">' + escapeHtml(message + (details ? '\n\n' + details : '')) + '</pre>';
-  }
-
-  function renderSource(body, source) {
-    body.innerHTML = '<pre class="diagram-source">' + escapeHtml(source) + '</pre>';
   }
 
   function loadMermaid() {
@@ -672,8 +678,27 @@ const BOOTSTRAP_JS: &str = r#"
       body.innerHTML = rendered.svg;
       if (rendered.bindFunctions) rendered.bindFunctions(body);
     } catch (error) {
-      renderSource(body, payload.source || '');
+      const hint = mermaidHint(String(error), payload.source || '');
+      renderError(block, 'Mermaid render failed', String(error) + (hint ? '\n\nHint: ' + hint : '') + '\n\nSource:\n' + (payload.source || ''));
     }
+  }
+
+  function mermaidHint(errorMessage, source) {
+    // Catch reserved-keyword aliases in sequenceDiagram (case-insensitive).
+    // Mermaid's parser treats `and`, `as`, `end`, `loop`, `alt`, `opt`, `par`,
+    // `note`, `rect`, `link`, `box`, `par_over`, `critical`, `break`,
+    // `activate`, `deactivate` as keywords — using them as participant aliases
+    // produces `Expecting ..., got 'and'`-style errors.
+    if (!/got '[a-z_]+'/.test(errorMessage)) return '';
+    const match = errorMessage.match(/got '([a-z_]+)'/);
+    if (!match) return '';
+    const token = match[1];
+    const reserved = ['and','as','end','loop','alt','opt','par','par_over','note','rect','link','box','critical','break','activate','deactivate','create','destroy','autonumber','title'];
+    if (!reserved.includes(token)) return '';
+    // Only suggest a rename if that token actually appears as a participant alias.
+    const aliasRe = new RegExp('participant\\s+' + token + '\\b', 'i');
+    if (!aliasRe.test(source)) return '';
+    return "'" + token.toUpperCase() + "' is a reserved mermaid keyword. Rename the participant (try CLI, SRV, TAB, AGT, DB, API, UI, WEB, SVC).";
   }
 
   function buildMindmapTree(data) {
@@ -1108,7 +1133,15 @@ const BOOTSTRAP_JS: &str = r#"
         'elk.algorithm': layout.algorithm || 'layered',
         'elk.direction': layout.direction || 'RIGHT',
         'elk.spacing.nodeNode': String(layout.node_spacing || 48),
-        'elk.layered.spacing.nodeNodeBetweenLayers': String(layout.layer_spacing || 80)
+        'elk.spacing.edgeNode': String(layout.edge_node_spacing || 36),
+        'elk.spacing.edgeEdge': String(layout.edge_edge_spacing || 24),
+        'elk.spacing.edgeLabel': String(layout.edge_label_spacing || 16),
+        'elk.spacing.labelLabel': '12',
+        'elk.layered.spacing.nodeNodeBetweenLayers': String(layout.layer_spacing || 96),
+        'elk.layered.spacing.edgeNodeBetweenLayers': String(layout.edge_node_layer_spacing || 48),
+        'elk.layered.spacing.edgeEdgeBetweenLayers': String(layout.edge_edge_layer_spacing || 32),
+        'elk.layered.edgeLabels.sideSelection': 'SMART_DOWN',
+        'elk.edgeLabels.inline': 'false'
       },
       children: nodes.map((node) => {
         const sz = nodeSize(node.label || node.id || 'Untitled');
@@ -1124,7 +1157,7 @@ const BOOTSTRAP_JS: &str = r#"
         id: edge.id || 'edge-' + index,
         sources: [edge.from],
         targets: [edge.to],
-        labels: edge.label ? [{ text: edge.label }] : []
+        labels: edge.label ? [edgeLabelDims(edge.label)] : []
       }))
     };
 
@@ -1843,7 +1876,7 @@ pub fn to_eink_html(markdown: &str, session_id: &str) -> String {
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=1860, initial-scale=1.0, minimum-scale=0.3, maximum-scale=3.0, user-scalable=yes">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=0.3, maximum-scale=3.0, user-scalable=yes">
 <title>E-Ink Review</title>
 <style>{css}</style>
 </head>
@@ -1892,33 +1925,33 @@ mod tests {
     }
 
     #[test]
-    fn body_font_size_is_28px() {
+    fn body_font_size_is_18px() {
         assert!(
-            css_rule("body {").contains("font-size: 28px"),
-            "body rule must have font-size: 28px"
+            css_rule("body {").contains("font-size: 18px"),
+            "body rule must have font-size: 18px"
         );
     }
 
     #[test]
     fn heading_sizes_are_correct() {
         assert!(
-            css_rule("h1 {").contains("font-size: 42px"),
-            "h1 must be 42px"
+            css_rule("h1 {").contains("font-size: 28px"),
+            "h1 must be 28px"
         );
         assert!(
-            css_rule("h2 {").contains("font-size: 34px"),
-            "h2 must be 34px"
+            css_rule("h2 {").contains("font-size: 24px"),
+            "h2 must be 24px"
         );
         assert!(
-            css_rule("h3 {").contains("font-size: 28px"),
-            "h3 must be 28px"
+            css_rule("h3 {").contains("font-size: 20px"),
+            "h3 must be 20px"
         );
     }
 
     #[test]
     fn inline_code_has_strong_border() {
         assert!(
-            css_rule("code {").contains("border: 2px solid #999"),
+            css_rule("code {").contains("border: 1px solid #888"),
             "inline code needs a visible border"
         );
     }
@@ -1926,8 +1959,8 @@ mod tests {
     #[test]
     fn inline_code_font_size_matches_body() {
         assert!(
-            css_rule("code {").contains("font-size: 24px"),
-            "inline code should be 24px"
+            css_rule("code {").contains("font-size: 16px"),
+            "inline code should be 16px"
         );
     }
 
@@ -1982,14 +2015,9 @@ mod tests {
 
     #[test]
     fn mermaid_sequence_diagram_source_survives_in_payload() {
-        // sequenceDiagram is NOT included in the bundled mermaid.min.js (only 2 occurrences
-        // vs 70+ for flowchart), so it falls back to raw source on the client.
-        // This test documents that the Rust side passes the source through correctly;
-        // the rendering limitation is in the JS bundle, not here.
         let source = "sequenceDiagram\n  participant A\n  A->>B: hello";
         let html = render(&format!("```mermaid\n{source}\n```"));
         assert!(html.contains("data-kind=\"mermaid\""));
-        // source must be in the JSON payload verbatim
         assert!(
             html.contains("sequenceDiagram"),
             "sequence diagram source must pass through to payload"

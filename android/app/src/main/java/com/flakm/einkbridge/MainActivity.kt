@@ -89,6 +89,7 @@ class MainActivity : AppCompatActivity() {
             checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), NOTIFICATION_ID_UPDATE)
         }
+        WebView.setWebContentsDebuggingEnabled(true)
         sessionRepo = SessionRepository(this)
         submissionManager = SubmissionManager(client)
         docCache = DocumentCache(this)
@@ -536,12 +537,7 @@ class MainActivity : AppCompatActivity() {
         webView.visibility = View.VISIBLE
         strokeView.visibility = View.VISIBLE
         penToolbar.visibility = View.VISIBLE
-        val cachedHtml = docCache.loadHtml(sessionId)
-        if (cachedHtml != null) {
-            webView.loadDataWithBaseURL("$serverUrl/session/$sessionId", cachedHtml, "text/html", "utf-8", null)
-        } else {
-            webView.loadUrl("$serverUrl/session/$sessionId")
-        }
+        webView.loadUrl("$serverUrl/session/$sessionId")
         val buf = StrokeBuffer()
         sessionRepo.loadStrokes(sessionId, buf)
         val ocrClient = OcrClient { serverUrl }
