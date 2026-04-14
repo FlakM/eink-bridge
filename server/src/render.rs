@@ -31,7 +31,7 @@ body {
     line-height: 1.6;
     color: #000;
     background: #ededed;
-    width: 1400px;
+    width: 2400px;
     min-height: 100vh;
     padding: 0;
     margin: 0;
