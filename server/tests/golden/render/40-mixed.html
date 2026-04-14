@@ -21,10 +21,10 @@
 <div class="diagram-body"><div class="diagram-placeholder">Rendering Diagram...</div></div>
 <script type="application/json" class="diagram-payload">{"kind":"mermaid","source":"sequenceDiagram\n  participant C as CLI\n  participant S as Server\n  participant A as App\n  C->>S: POST /api/sessions\n  A->>S: GET /session/{id}\n  A->>S: POST /submit\n  S-->>C: 200 result"}</script>
 </section><h2>Key Code</h2>
-<pre style="background-color:#fdf6e3;">
-<span style="color:#586e75;">pub </span><span style="color:#268bd2;">fn </span><span style="color:#b58900;">render</span><span style="color:#657b83;">(</span><span style="color:#268bd2;">markdown</span><span style="color:#657b83;">: </span><span style="color:#859900;">&amp;</span><span style="color:#268bd2;">str</span><span style="color:#657b83;">) -&gt; String {
-</span><span style="color:#657b83;">    </span><span style="color:#859900;">to_eink_html</span><span style="color:#657b83;">(markdown, </span><span style="color:#839496;">&quot;</span><span style="color:#2aa198;">preview</span><span style="color:#839496;">&quot;</span><span style="color:#657b83;">)
-</span><span style="color:#657b83;">}
+<pre style="background-color:#ffffff;">
+<span style="font-weight:bold;color:#0028b8;">pub fn </span><span style="font-weight:bold;color:#000000;">render</span><span style="color:#000000;">(markdown: </span><span style="font-weight:bold;color:#000000;">&amp;</span><span style="font-weight:bold;color:#0028b8;">str</span><span style="color:#000000;">) -&gt; String {
+</span><span style="color:#000000;">    </span><span style="font-weight:bold;color:#000000;">to_eink_html</span><span style="color:#000000;">(markdown, &quot;</span><span style="color:#b00018;">preview</span><span style="color:#000000;">&quot;)
+</span><span style="color:#000000;">}
 </span></pre>
 <blockquote>
 <p>Note: The renderer handles mermaid, mindmap, and graph blocks natively.</p>

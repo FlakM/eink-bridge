@@ -1,4 +1,5 @@
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd, html};
+use std::io::Cursor;
 use std::sync::LazyLock;
 use syntect::highlighting::ThemeSet;
 use syntect::html::highlighted_html_for_string;
@@ -8,8 +9,9 @@ use super::html_utils::escape_html;
 
 static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
 static THEME: LazyLock<syntect::highlighting::Theme> = LazyLock::new(|| {
-    let ts = ThemeSet::load_defaults();
-    ts.themes["Solarized (light)"].clone()
+    const EINK_THEME: &str = include_str!("../../assets/eink-theme.tmTheme");
+    ThemeSet::load_from_reader(&mut Cursor::new(EINK_THEME.as_bytes()))
+        .expect("eink-theme.tmTheme is bundled and must parse")
 });
 
 pub(crate) fn render_markdown(markdown: &str) -> String {
