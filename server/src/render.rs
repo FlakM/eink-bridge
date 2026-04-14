@@ -31,18 +31,17 @@ body {
     line-height: 1.6;
     color: #000;
     background: #ededed;
-    width: 100%;
+    width: 1400px;
     min-height: 100vh;
     padding: 0;
     margin: 0;
 }
 #content {
     background: #fff;
-    max-width: 880px;
+    width: 992px;
+    max-width: 992px;
     margin: 0 auto 800px auto;
-    padding: 24px 28px;
-    border-left: 1px solid #c8c8c8;
-    border-right: 1px solid #c8c8c8;
+    padding: 24px 56px;
     min-height: 100vh;
 }
 #toc {
