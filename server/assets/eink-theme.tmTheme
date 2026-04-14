@@ -3,7 +3,10 @@
 <plist version="1.0">
 <dict>
   <key>name</key>
-  <string>Eink High Contrast</string>
+  <string>Eink Sunlight</string>
+  <!-- Inspired by the `sunlight.lua` Neovim colourscheme (also in this repo).
+       Same 17-hue palette, mapped to Sublime Text / syntect scopes. Background
+       is pure white for e-ink; fg is near-black. -->
   <key>settings</key>
   <array>
 
@@ -13,295 +16,412 @@
         <key>background</key>
         <string>#ffffff</string>
         <key>foreground</key>
-        <string>#000000</string>
+        <string>#1c1c1c</string>
         <key>caret</key>
-        <string>#000000</string>
+        <string>#1c1c1c</string>
         <key>lineHighlight</key>
         <string>#00000000</string>
         <key>selection</key>
-        <string>#b0b0b0</string>
+        <string>#b3d4f0</string>
+        <key>invisibles</key>
+        <string>#d4cfc7</string>
       </dict>
     </dict>
 
+    <!-- ── Comments (slate italic, much darker than a grey would be) ───── -->
     <dict>
-      <key>name</key>
-      <string>Comment</string>
+      <key>name</key><string>Comment</string>
       <key>scope</key>
       <string>comment, punctuation.definition.comment</string>
       <key>settings</key>
       <dict>
-        <key>foreground</key>
-        <string>#006e00</string>
-        <key>fontStyle</key>
-        <string>italic</string>
+        <key>foreground</key><string>#3a5f82</string>
+        <key>fontStyle</key><string>italic</string>
       </dict>
     </dict>
-
     <dict>
-      <key>name</key>
-      <string>String</string>
+      <key>name</key><string>Doc comment</string>
       <key>scope</key>
-      <string>string, string.quoted, string.regexp, string.other</string>
+      <string>comment.block.documentation, comment.line.documentation</string>
       <key>settings</key>
       <dict>
-        <key>foreground</key>
-        <string>#b00018</string>
+        <key>foreground</key><string>#1a4fa0</string>
+        <key>fontStyle</key><string>italic</string>
       </dict>
     </dict>
 
+    <!-- ── Strings (lime green, regex in red) ────────────────────────── -->
     <dict>
-      <key>name</key>
-      <string>String escape</string>
+      <key>name</key><string>String</string>
       <key>scope</key>
-      <string>constant.character.escape, string.regexp constant.character.escape</string>
+      <string>string, string.quoted, string.other, string.unquoted</string>
+      <key>settings</key>
+      <dict><key>foreground</key><string>#00a020</string></dict>
+    </dict>
+    <dict>
+      <key>name</key><string>Regex</string>
+      <key>scope</key>
+      <string>string.regexp</string>
+      <key>settings</key>
+      <dict><key>foreground</key><string>#cc0000</string></dict>
+    </dict>
+    <dict>
+      <key>name</key><string>String escape</string>
+      <key>scope</key>
+      <string>constant.character.escape, string constant.character.escape</string>
       <key>settings</key>
       <dict>
-        <key>foreground</key>
-        <string>#6a00c0</string>
-        <key>fontStyle</key>
-        <string>bold</string>
+        <key>foreground</key><string>#c04400</string>
+        <key>fontStyle</key><string>bold</string>
       </dict>
     </dict>
 
+    <!-- ── Numbers ─────────────────────────────────────────────────────── -->
     <dict>
-      <key>name</key>
-      <string>Number</string>
+      <key>name</key><string>Number</string>
       <key>scope</key>
       <string>constant.numeric</string>
       <key>settings</key>
-      <dict>
-        <key>foreground</key>
-        <string>#6a00c0</string>
-      </dict>
+      <dict><key>foreground</key><string>#c06000</string></dict>
     </dict>
 
+    <!-- ── Language constants (true/false/null/None/Some/Ok/Err) ──────── -->
     <dict>
-      <key>name</key>
-      <string>Language constant</string>
+      <key>name</key><string>Boolean / language constant</string>
       <key>scope</key>
       <string>constant.language, constant.language.boolean, constant.language.null, constant.language.self</string>
       <key>settings</key>
       <dict>
-        <key>foreground</key>
-        <string>#0028b8</string>
-        <key>fontStyle</key>
-        <string>bold</string>
+        <key>foreground</key><string>#7700cc</string>
+        <key>fontStyle</key><string>bold</string>
       </dict>
     </dict>
-
     <dict>
-      <key>name</key>
-      <string>Keyword</string>
+      <key>name</key><string>Enum variant / user constant</string>
       <key>scope</key>
-      <string>keyword, keyword.control, keyword.other</string>
+      <string>constant.other, constant.other.caps, constant.other.rust</string>
       <key>settings</key>
       <dict>
-        <key>foreground</key>
-        <string>#0028b8</string>
-        <key>fontStyle</key>
-        <string>bold</string>
+        <key>foreground</key><string>#5500aa</string>
+        <key>fontStyle</key><string>bold</string>
       </dict>
     </dict>
 
+    <!-- ── Keywords (general = blue; control flow = orange) ──────────── -->
     <dict>
-      <key>name</key>
-      <string>Keyword operator</string>
+      <key>name</key><string>Keyword</string>
+      <key>scope</key>
+      <string>keyword, keyword.other</string>
+      <key>settings</key>
+      <dict>
+        <key>foreground</key><string>#0060c0</string>
+        <key>fontStyle</key><string>bold</string>
+      </dict>
+    </dict>
+    <dict>
+      <key>name</key><string>Control flow</string>
+      <key>scope</key>
+      <string>keyword.control, keyword.control.conditional, keyword.control.loop, keyword.control.flow, keyword.control.import</string>
+      <key>settings</key>
+      <dict>
+        <key>foreground</key><string>#c04400</string>
+        <key>fontStyle</key><string>bold</string>
+      </dict>
+    </dict>
+    <dict>
+      <key>name</key><string>Async / await</string>
+      <key>scope</key>
+      <string>keyword.other.async, storage.modifier.async, keyword.control.async</string>
+      <key>settings</key>
+      <dict>
+        <key>foreground</key><string>#7700cc</string>
+        <key>fontStyle</key><string>bold italic</string>
+      </dict>
+    </dict>
+    <dict>
+      <key>name</key><string>Keyword operator (as, in, is, etc.)</string>
+      <key>scope</key>
+      <string>keyword.operator.word, keyword.operator.new, keyword.operator.logical.python</string>
+      <key>settings</key>
+      <dict>
+        <key>foreground</key><string>#0060c0</string>
+        <key>fontStyle</key><string>bold</string>
+      </dict>
+    </dict>
+    <dict>
+      <key>name</key><string>Operator</string>
       <key>scope</key>
       <string>keyword.operator</string>
       <key>settings</key>
-      <dict>
-        <key>foreground</key>
-        <string>#000000</string>
-      </dict>
+      <dict><key>foreground</key><string>#2d2d2d</string></dict>
     </dict>
 
+    <!-- ── Storage: fn, let, struct, enum, trait, impl, class ─────────── -->
     <dict>
-      <key>name</key>
-      <string>Storage</string>
+      <key>name</key><string>Storage type keyword</string>
       <key>scope</key>
-      <string>storage, storage.type, storage.modifier</string>
+      <string>storage.type, storage.type.function, storage.type.struct, storage.type.enum, storage.type.trait, storage.type.impl, storage.type.class, storage.type.rust</string>
       <key>settings</key>
       <dict>
-        <key>foreground</key>
-        <string>#0028b8</string>
-        <key>fontStyle</key>
-        <string>bold</string>
+        <key>foreground</key><string>#0060c0</string>
+        <key>fontStyle</key><string>bold</string>
       </dict>
     </dict>
-
     <dict>
-      <key>name</key>
-      <string>Primitive type</string>
+      <key>name</key><string>Storage modifier (pub, mut, const, static, ref)</string>
       <key>scope</key>
-      <string>storage.type.primitive, support.type, support.type.primitive, support.class</string>
+      <string>storage.modifier, storage.modifier.visibility, storage.modifier.mut, storage.modifier.const, storage.modifier.static, storage.modifier.ref, storage.modifier.rust</string>
       <key>settings</key>
       <dict>
-        <key>foreground</key>
-        <string>#a64a00</string>
+        <key>foreground</key><string>#006400</string>
+        <key>fontStyle</key><string>bold</string>
       </dict>
     </dict>
-
     <dict>
-      <key>name</key>
-      <string>Type name</string>
+      <key>name</key><string>Unsafe modifier</string>
       <key>scope</key>
-      <string>entity.name.type, entity.name.class, entity.name.namespace, entity.name.struct, entity.name.enum, entity.name.trait, entity.name.interface</string>
+      <string>storage.modifier.unsafe, keyword.other.unsafe</string>
       <key>settings</key>
       <dict>
-        <key>foreground</key>
-        <string>#a64a00</string>
-        <key>fontStyle</key>
-        <string>bold</string>
+        <key>foreground</key><string>#cc0000</string>
+        <key>fontStyle</key><string>bold italic</string>
       </dict>
     </dict>
-
     <dict>
-      <key>name</key>
-      <string>Function name</string>
+      <key>name</key><string>Lifetime</string>
       <key>scope</key>
-      <string>entity.name.function, support.function, meta.function-call entity.name.function</string>
+      <string>storage.modifier.lifetime, entity.name.lifetime, meta.lifetime, punctuation.definition.lifetime</string>
       <key>settings</key>
       <dict>
-        <key>foreground</key>
-        <string>#000000</string>
-        <key>fontStyle</key>
-        <string>bold</string>
+        <key>foreground</key><string>#9b7800</string>
+        <key>fontStyle</key><string>italic</string>
       </dict>
     </dict>
 
+    <!-- ── Primitive / builtin types ───────────────────────────────────── -->
     <dict>
-      <key>name</key>
-      <string>Macro / annotation</string>
+      <key>name</key><string>Builtin type</string>
       <key>scope</key>
-      <string>entity.name.function.macro, meta.attribute, meta.annotation, support.function.macro, entity.name.function.preprocessor</string>
+      <string>support.type, support.type.primitive, support.type.builtin, support.type.rust</string>
       <key>settings</key>
       <dict>
-        <key>foreground</key>
-        <string>#6a00c0</string>
-        <key>fontStyle</key>
-        <string>bold</string>
+        <key>foreground</key><string>#0060c0</string>
+        <key>fontStyle</key><string>bold</string>
+      </dict>
+    </dict>
+    <dict>
+      <key>name</key><string>Builtin class</string>
+      <key>scope</key>
+      <string>support.class</string>
+      <key>settings</key>
+      <dict>
+        <key>foreground</key><string>#4400a0</string>
+        <key>fontStyle</key><string>bold</string>
+      </dict>
+    </dict>
+    <dict>
+      <key>name</key><string>Builtin function</string>
+      <key>scope</key>
+      <string>support.function, support.function.builtin</string>
+      <key>settings</key>
+      <dict>
+        <key>foreground</key><string>#007878</string>
+        <key>fontStyle</key><string>bold</string>
+      </dict>
+    </dict>
+    <dict>
+      <key>name</key><string>Builtin constant</string>
+      <key>scope</key>
+      <string>support.constant</string>
+      <key>settings</key>
+      <dict>
+        <key>foreground</key><string>#5500aa</string>
+        <key>fontStyle</key><string>bold</string>
       </dict>
     </dict>
 
+    <!-- ── User-defined types & names ──────────────────────────────────── -->
     <dict>
-      <key>name</key>
-      <string>Attribute name</string>
+      <key>name</key><string>Type name</string>
+      <key>scope</key>
+      <string>entity.name.type, entity.name.class, entity.name.struct, entity.name.enum, entity.name.trait, entity.name.interface, entity.name.union, entity.other.inherited-class</string>
+      <key>settings</key>
+      <dict>
+        <key>foreground</key><string>#4400a0</string>
+        <key>fontStyle</key><string>bold</string>
+      </dict>
+    </dict>
+    <dict>
+      <key>name</key><string>Function definition</string>
+      <key>scope</key>
+      <string>entity.name.function, meta.function entity.name.function, meta.function.declaration entity.name.function</string>
+      <key>settings</key>
+      <dict>
+        <key>foreground</key><string>#007878</string>
+        <key>fontStyle</key><string>bold</string>
+      </dict>
+    </dict>
+    <dict>
+      <key>name</key><string>Method call</string>
+      <key>scope</key>
+      <string>meta.function-call entity.name.function, variable.function, meta.method-call entity.name.function</string>
+      <key>settings</key>
+      <dict><key>foreground</key><string>#009090</string></dict>
+    </dict>
+    <dict>
+      <key>name</key><string>Macro name</string>
+      <key>scope</key>
+      <string>entity.name.function.macro, support.function.macro, meta.macro entity.name.function, meta.attribute.rust entity.name.function</string>
+      <key>settings</key>
+      <dict>
+        <key>foreground</key><string>#bb00bb</string>
+        <key>fontStyle</key><string>bold</string>
+      </dict>
+    </dict>
+    <dict>
+      <key>name</key><string>Macro punctuation (! in println!)</string>
+      <key>scope</key>
+      <string>entity.name.function.macro punctuation.definition.macro, meta.macro punctuation.definition.macro</string>
+      <key>settings</key>
+      <dict>
+        <key>foreground</key><string>#bb00bb</string>
+        <key>fontStyle</key><string>bold</string>
+      </dict>
+    </dict>
+    <dict>
+      <key>name</key><string>Namespace / module</string>
+      <key>scope</key>
+      <string>entity.name.namespace, entity.name.module, meta.path entity.name, support.other.namespace, support.other.module</string>
+      <key>settings</key>
+      <dict><key>foreground</key><string>#1a4fa0</string></dict>
+    </dict>
+    <dict>
+      <key>name</key><string>Tag</string>
+      <key>scope</key>
+      <string>entity.name.tag, entity.name.tag.html, entity.name.tag.xml</string>
+      <key>settings</key>
+      <dict>
+        <key>foreground</key><string>#0060c0</string>
+        <key>fontStyle</key><string>bold</string>
+      </dict>
+    </dict>
+    <dict>
+      <key>name</key><string>Attribute name</string>
       <key>scope</key>
       <string>entity.other.attribute-name</string>
       <key>settings</key>
-      <dict>
-        <key>foreground</key>
-        <string>#6a00c0</string>
-      </dict>
+      <dict><key>foreground</key><string>#9b7800</string></dict>
     </dict>
 
+    <!-- ── Variables & parameters ──────────────────────────────────────── -->
     <dict>
-      <key>name</key>
-      <string>Tag name</string>
+      <key>name</key><string>Variable</string>
       <key>scope</key>
-      <string>entity.name.tag</string>
+      <string>variable, variable.other, variable.other.readwrite</string>
+      <key>settings</key>
+      <dict><key>foreground</key><string>#dd1111</string></dict>
+    </dict>
+    <dict>
+      <key>name</key><string>Parameter</string>
+      <key>scope</key>
+      <string>variable.parameter, meta.function.parameters variable</string>
       <key>settings</key>
       <dict>
-        <key>foreground</key>
-        <string>#0028b8</string>
-        <key>fontStyle</key>
-        <string>bold</string>
+        <key>foreground</key><string>#dd1111</string>
+        <key>fontStyle</key><string>italic</string>
       </dict>
     </dict>
-
     <dict>
-      <key>name</key>
-      <string>Variable / parameter</string>
+      <key>name</key><string>Self / this</string>
       <key>scope</key>
-      <string>variable, variable.parameter, variable.other</string>
+      <string>variable.language, variable.language.self, variable.language.this</string>
       <key>settings</key>
       <dict>
-        <key>foreground</key>
-        <string>#000000</string>
+        <key>foreground</key><string>#c04400</string>
+        <key>fontStyle</key><string>bold italic</string>
       </dict>
     </dict>
-
     <dict>
-      <key>name</key>
-      <string>Variable function</string>
+      <key>name</key><string>Struct / enum member (field access)</string>
       <key>scope</key>
-      <string>variable.function</string>
+      <string>variable.other.member, variable.other.property, variable.other.object.property, meta.field entity.name</string>
+      <key>settings</key>
+      <dict><key>foreground</key><string>#009090</string></dict>
+    </dict>
+
+    <!-- ── Attributes / annotations / decorators ───────────────────────── -->
+    <dict>
+      <key>name</key><string>Attribute / annotation</string>
+      <key>scope</key>
+      <string>meta.attribute, meta.annotation, meta.decorator, punctuation.definition.annotation, punctuation.definition.attribute</string>
       <key>settings</key>
       <dict>
-        <key>foreground</key>
-        <string>#000000</string>
-        <key>fontStyle</key>
-        <string>bold</string>
+        <key>foreground</key><string>#bb00bb</string>
+        <key>fontStyle</key><string>bold</string>
       </dict>
     </dict>
 
+    <!-- ── Punctuation (darker grey, still readable) ───────────────────── -->
     <dict>
-      <key>name</key>
-      <string>Punctuation</string>
+      <key>name</key><string>Punctuation</string>
       <key>scope</key>
-      <string>punctuation, punctuation.definition, punctuation.section, punctuation.separator, punctuation.terminator</string>
+      <string>punctuation, punctuation.definition, punctuation.section, punctuation.separator, punctuation.terminator, punctuation.accessor</string>
       <key>settings</key>
-      <dict>
-        <key>foreground</key>
-        <string>#000000</string>
-      </dict>
+      <dict><key>foreground</key><string>#5a5a5a</string></dict>
     </dict>
 
+    <!-- ── Invalid / deprecated ────────────────────────────────────────── -->
     <dict>
-      <key>name</key>
-      <string>Invalid</string>
+      <key>name</key><string>Invalid</string>
       <key>scope</key>
       <string>invalid, invalid.illegal</string>
       <key>settings</key>
       <dict>
-        <key>foreground</key>
-        <string>#ffffff</string>
-        <key>background</key>
-        <string>#b00018</string>
-        <key>fontStyle</key>
-        <string>bold</string>
+        <key>foreground</key><string>#ffffff</string>
+        <key>background</key><string>#cc0000</string>
+        <key>fontStyle</key><string>bold</string>
+      </dict>
+    </dict>
+    <dict>
+      <key>name</key><string>Deprecated</string>
+      <key>scope</key>
+      <string>invalid.deprecated</string>
+      <key>settings</key>
+      <dict>
+        <key>foreground</key><string>#c06000</string>
+        <key>fontStyle</key><string>italic</string>
       </dict>
     </dict>
 
+    <!-- ── Markup (heading/bold/italic for markdown fallback) ──────────── -->
     <dict>
-      <key>name</key>
-      <string>Markup heading</string>
+      <key>name</key><string>Markup heading</string>
       <key>scope</key>
       <string>markup.heading, entity.name.section</string>
       <key>settings</key>
       <dict>
-        <key>foreground</key>
-        <string>#0028b8</string>
-        <key>fontStyle</key>
-        <string>bold</string>
+        <key>foreground</key><string>#0060c0</string>
+        <key>fontStyle</key><string>bold</string>
       </dict>
     </dict>
-
     <dict>
-      <key>name</key>
-      <string>Markup bold</string>
+      <key>name</key><string>Markup bold</string>
       <key>scope</key>
       <string>markup.bold</string>
       <key>settings</key>
       <dict>
-        <key>foreground</key>
-        <string>#000000</string>
-        <key>fontStyle</key>
-        <string>bold</string>
+        <key>foreground</key><string>#1c1c1c</string>
+        <key>fontStyle</key><string>bold</string>
       </dict>
     </dict>
-
     <dict>
-      <key>name</key>
-      <string>Markup italic</string>
+      <key>name</key><string>Markup italic</string>
       <key>scope</key>
       <string>markup.italic</string>
       <key>settings</key>
       <dict>
-        <key>foreground</key>
-        <string>#000000</string>
-        <key>fontStyle</key>
-        <string>italic</string>
+        <key>foreground</key><string>#1c1c1c</string>
+        <key>fontStyle</key><string>italic</string>
       </dict>
     </dict>
 

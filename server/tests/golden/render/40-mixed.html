@@ -22,9 +22,9 @@
 <script type="application/json" class="diagram-payload">{"kind":"mermaid","source":"sequenceDiagram\n  participant C as CLI\n  participant S as Server\n  participant A as App\n  C->>S: POST /api/sessions\n  A->>S: GET /session/{id}\n  A->>S: POST /submit\n  S-->>C: 200 result"}</script>
 </section><h2>Key Code</h2>
 <pre style="background-color:#ffffff;">
-<span style="font-weight:bold;color:#0028b8;">pub fn </span><span style="font-weight:bold;color:#000000;">render</span><span style="color:#000000;">(markdown: </span><span style="font-weight:bold;color:#000000;">&amp;</span><span style="font-weight:bold;color:#0028b8;">str</span><span style="color:#000000;">) -&gt; String {
-</span><span style="color:#000000;">    </span><span style="font-weight:bold;color:#000000;">to_eink_html</span><span style="color:#000000;">(markdown, &quot;</span><span style="color:#b00018;">preview</span><span style="color:#000000;">&quot;)
-</span><span style="color:#000000;">}
+<span style="font-weight:bold;color:#006400;">pub </span><span style="font-weight:bold;color:#0060c0;">fn </span><span style="font-weight:bold;color:#007878;">render</span><span style="color:#5a5a5a;">(</span><span style="font-style:italic;color:#dd1111;">markdown</span><span style="color:#5a5a5a;">: </span><span style="font-weight:bold;color:#2d2d2d;">&amp;</span><span style="font-weight:bold;color:#0060c0;">str</span><span style="color:#5a5a5a;">) -&gt;</span><span style="color:#1c1c1c;"> String </span><span style="color:#5a5a5a;">{
+</span><span style="color:#1c1c1c;">    </span><span style="font-weight:bold;color:#007878;">to_eink_html</span><span style="color:#5a5a5a;">(</span><span style="color:#1c1c1c;">markdown</span><span style="color:#5a5a5a;">, &quot;</span><span style="color:#00a020;">preview</span><span style="color:#5a5a5a;">&quot;)
+</span><span style="color:#5a5a5a;">}
 </span></pre>
 <blockquote>
 <p>Note: The renderer handles mermaid, mindmap, and graph blocks natively.</p>
