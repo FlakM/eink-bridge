@@ -30,16 +30,20 @@ body {
     font-size: 18px;
     line-height: 1.6;
     color: #000;
-    background: #fff;
-    width: 1400px;
+    background: #ededed;
+    width: 100%;
     min-height: 100vh;
     padding: 0;
     margin: 0;
 }
 #content {
+    background: #fff;
     max-width: 880px;
-    margin: 16px auto 800px auto;
-    padding: 0 20px;
+    margin: 0 auto 800px auto;
+    padding: 24px 28px;
+    border-left: 1px solid #c8c8c8;
+    border-right: 1px solid #c8c8c8;
+    min-height: 100vh;
 }
 #toc {
     border: 2px solid #111;
