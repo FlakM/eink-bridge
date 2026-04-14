@@ -40,6 +40,8 @@ pub(crate) struct MindMapNode {
     pub line: Option<u32>,
     #[serde(default)]
     pub notes: Option<String>,
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub notes_html: Option<String>,
     #[serde(default)]
     pub children: Vec<MindMapNode>,
 }

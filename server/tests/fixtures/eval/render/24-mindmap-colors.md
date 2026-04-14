@@ -7,6 +7,13 @@ nodes:
     label: Preparation
     color: blue
     kind: todo
+    notes: |
+      Run the **full** test suite before tagging.
+
+      Checklist:
+      - `just test`
+      - `just lint`
+      - Verify staging smoke test
     children:
       - label: Run tests
       - label: Update changelog
@@ -22,5 +29,13 @@ nodes:
     label: Risk
     color: red
     kind: risk
-    notes: Database migration could fail
+    notes: |
+      Database migration could fail.
+
+      **Rollback plan:**
+      1. Revert the service to `previous-stable`.
+      2. Run `just db-rollback` on the primary.
+      3. Page the on-call via `#eink-oncall`.
+
+      See the runbook for `migrations/0042` for details.
 ```

@@ -1,7 +1,17 @@
 use serde_json::{Value, json};
 
 use super::html_utils::escape_html;
-use super::models::{DiagramPayload, GraphDoc, MindMapDoc};
+use super::markdown::render_markdown;
+use super::models::{DiagramPayload, GraphDoc, MindMapDoc, MindMapNode};
+
+fn populate_notes_html(node: &mut MindMapNode) {
+    if let Some(notes) = node.notes.as_deref() {
+        node.notes_html = Some(render_markdown(notes));
+    }
+    for child in &mut node.children {
+        populate_notes_html(child);
+    }
+}
 
 pub(crate) fn render_diff(source: &str) -> String {
     let lines: String = source
@@ -28,7 +38,12 @@ pub(crate) fn render_diagram(kind: &str, source: &str) -> String {
     }
     let data = match kind {
         "mindmap" => match serde_yaml::from_str::<MindMapDoc>(source) {
-            Ok(doc) => Some(serde_json::to_value(doc).unwrap_or(Value::Null)),
+            Ok(mut doc) => {
+                for node in &mut doc.nodes {
+                    populate_notes_html(node);
+                }
+                Some(serde_json::to_value(doc).unwrap_or(Value::Null))
+            }
             Err(error) => {
                 return format!(
                     r#"<section class="diagram-block" data-kind="{kind}">

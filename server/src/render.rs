@@ -26,14 +26,14 @@ body {
     line-height: 1.6;
     color: #000;
     background: #fff;
-    width: 2800px;
+    width: 1860px;
     min-height: 4000px;
     padding: 0;
     margin: 0;
 }
 #content {
-    max-width: 1800px;
-    margin: 24px 0 1500px 80px;
+    max-width: 1740px;
+    margin: 24px 0 1500px 60px;
     padding: 0 32px;
 }
 #toc {
@@ -108,10 +108,9 @@ a { color: #000; text-decoration: underline; }
 hr { border: none; border-top: 1px solid #333; margin: 24px 0; }
 .diagram-block {
     margin: 28px 0;
-    border: 1.5px solid #ccc;
+    border: 2px solid #888;
     border-radius: 10px;
     background: #fff;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.09);
     overflow: hidden;
 }
 .diagram-header {
@@ -120,14 +119,14 @@ hr { border: none; border-top: 1px solid #333; margin: 24px 0; }
     align-items: center;
     gap: 16px;
     padding: 11px 16px;
-    border-bottom: 1px solid #e0e0e0;
-    background: #f8f8f8;
-    font-size: 14px;
+    border-bottom: 1px solid #c0c0c0;
+    background: #f0f0f0;
+    font-size: 17px;
     font-weight: 700;
     line-height: 1.4;
     text-transform: uppercase;
     letter-spacing: 0.12em;
-    color: #555;
+    color: #222;
 }
 .diagram-body {
     min-height: 200px;
@@ -141,61 +140,65 @@ hr { border: none; border-top: 1px solid #333; margin: 24px 0; }
 .diagram-toolbar,
 .diagram-legend,
 .diagram-details {
-    border: 1px solid #e0e0e0;
-    background: #fafafa;
+    border: 1px solid #b0b0b0;
+    background: #f6f6f6;
     border-radius: 6px;
-    padding: 12px;
+    padding: 14px;
 }
 .diagram-toolbar {
     display: flex;
     flex-wrap: wrap;
-    gap: 8px;
+    gap: 10px;
     align-items: center;
 }
 .diagram-toolbar button {
-    border: 1.5px solid #999;
+    border: 2px solid #444;
     border-radius: 6px;
     background: #fff;
-    color: #333;
-    padding: 6px 12px;
-    font-size: 14px;
+    color: #111;
+    padding: 8px 14px;
+    font-size: 18px;
     cursor: pointer;
 }
 .diagram-toolbar-label {
-    font-size: 15px;
+    font-size: 18px;
     font-weight: 700;
     letter-spacing: 0.04em;
     text-transform: uppercase;
+    color: #111;
 }
 .diagram-legend {
     display: flex;
     flex-wrap: wrap;
-    gap: 8px 12px;
+    gap: 10px 16px;
     align-items: center;
 }
 .diagram-legend-item {
     display: inline-flex;
     align-items: center;
-    gap: 8px;
-    font-size: 14px;
+    gap: 10px;
+    font-size: 18px;
+    color: #111;
 }
 .diagram-legend-swatch {
-    width: 32px;
-    height: 16px;
-    border: 1.5px solid #888;
+    width: 38px;
+    height: 20px;
+    border: 2px solid #333;
     border-radius: 4px;
     background: #fff;
 }
 .diagram-details-title {
-    font-size: 18px;
+    font-size: 22px;
     font-weight: 700;
-    margin-bottom: 8px;
+    margin-bottom: 10px;
+    color: #111;
 }
 .diagram-details-grid {
     display: grid;
-    grid-template-columns: 110px 1fr;
-    gap: 6px 10px;
-    font-size: 15px;
+    grid-template-columns: 130px 1fr;
+    gap: 8px 14px;
+    font-size: 18px;
+    color: #111;
 }
 .diagram-details-grid dt {
     font-weight: 700;
@@ -203,6 +206,50 @@ hr { border: none; border-top: 1px solid #333; margin: 24px 0; }
 .diagram-details-grid dd {
     margin: 0;
     word-break: break-word;
+}
+.diagram-details-notes {
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px solid #b0b0b0;
+    font-size: 20px;
+    line-height: 1.5;
+    color: #111;
+}
+.diagram-details-notes > *:first-child {
+    margin-top: 0;
+}
+.diagram-details-notes > *:last-child {
+    margin-bottom: 0;
+}
+.diagram-details-notes code {
+    font-family: 'Courier New', monospace;
+    font-size: 18px;
+    background: #ececec;
+    border: 1px solid #888;
+    padding: 1px 6px;
+    border-radius: 3px;
+    color: #111;
+}
+.diagram-details-notes pre {
+    background: #ececec;
+    border: 1px solid #888;
+    padding: 10px;
+    margin: 10px 0;
+    border-radius: 4px;
+    overflow-x: auto;
+}
+.diagram-details-notes pre code {
+    font-size: 18px;
+    background: none;
+    border: none;
+    padding: 0;
+}
+.diagram-details-notes p {
+    margin: 6px 0;
+}
+.diagram-details-notes ul,
+.diagram-details-notes ol {
+    padding-left: 22px;
 }
 .diagram-source,
 .diagram-error {
@@ -231,9 +278,9 @@ hr { border: none; border-top: 1px solid #333; margin: 24px 0; }
     gap: 12px;
 }
 .mindmap-index {
-    width: 280px;
-    max-width: 280px;
-    border-right: 1px solid #e0e0e0;
+    width: 300px;
+    max-width: 300px;
+    border-right: 1px solid #888;
     padding-right: 12px;
 }
 .mindmap-index[hidden] {
@@ -244,29 +291,38 @@ hr { border: none; border-top: 1px solid #333; margin: 24px 0; }
     width: 100%;
     text-align: left;
     background: transparent;
-    border: 1.5px solid transparent;
+    border: 2px solid transparent;
     border-radius: 8px;
-    padding: 7px 10px;
-    margin: 3px 0;
-    color: #222;
-    font-size: 15px;
+    padding: 10px 12px;
+    margin: 4px 0;
+    color: #111;
+    font-size: 19px;
     cursor: pointer;
 }
 .mindmap-index-item.is-active {
-    border-color: #666;
-    background: #f0f0f0;
+    border-color: #222;
+    background: #e8e8e8;
     font-weight: 700;
 }
 .mindmap-viewport {
     flex: 1;
     min-height: 520px;
     overflow: auto;
-    border: 1px solid #ddd;
+    border: 1px solid #888;
     border-radius: 6px;
     background: #fdfdfd;
 }
 .mindmap-canvas {
     display: block;
+    width: 100%;
+    height: auto;
+    max-height: 1400px;
+}
+.graph-canvas {
+    display: block;
+    width: 100%;
+    height: auto;
+    max-height: 1400px;
 }
 .mindmap-node {
     cursor: pointer;
@@ -274,25 +330,25 @@ hr { border: none; border-top: 1px solid #333; margin: 24px 0; }
 .mindmap-node rect {
     fill: #fff;
     stroke: #111;
-    stroke-width: 2;
+    stroke-width: 3;
 }
 .mindmap-node text, .mindmap-node-text {
     fill: #111;
     font-family: Georgia, 'Times New Roman', serif;
-    font-size: 18px;
+    font-size: 20px;
     font-weight: 600;
     text-anchor: middle;
 }
 .mindmap-node-badge rect,
 .graph-node-badge rect {
-    fill: #555;
-    stroke: #555;
+    fill: #222;
+    stroke: #222;
     stroke-width: 1;
 }
 .mindmap-node-badge text,
 .graph-node-badge text {
     fill: #fff;
-    font-size: 11px;
+    font-size: 14px;
     font-weight: 700;
     letter-spacing: 0.06em;
     text-anchor: middle;
@@ -300,44 +356,54 @@ hr { border: none; border-top: 1px solid #333; margin: 24px 0; }
 }
 .graph-node-kind,
 .mindmap-node-kind {
-    fill: #888;
-    font-size: 9px;
-    font-weight: 400;
+    fill: #444;
+    font-size: 14px;
+    font-weight: 600;
     letter-spacing: 0.04em;
     text-anchor: middle;
     font-style: italic;
 }
 .mindmap-node.is-active rect {
-    stroke-width: 3;
+    stroke-width: 5;
 }
 .mindmap-node-toggle {
     cursor: pointer;
 }
 .mindmap-node-toggle rect {
-    fill: #555;
-    stroke: #555;
+    fill: #222;
+    stroke: #222;
     stroke-width: 1;
 }
 .mindmap-node-toggle text {
     fill: #fff;
-    font-size: 16px;
+    font-size: 22px;
     font-weight: bold;
+    text-anchor: middle;
+}
+.mindmap-node-info circle {
+    fill: #1a4d8f;
+    stroke: #fff;
+    stroke-width: 2;
+}
+.mindmap-node-info text {
+    fill: #fff;
+    font-family: Georgia, 'Times New Roman', serif;
+    font-size: 20px;
+    font-weight: 700;
+    font-style: italic;
     text-anchor: middle;
 }
 .mindmap-edge {
     fill: none;
-    stroke: #888;
-    stroke-width: 2;
+    stroke: #333;
+    stroke-width: 3;
 }
 .graph-viewport {
     min-height: 540px;
     overflow: auto;
-    border: 1px solid #ddd;
+    border: 1px solid #888;
     border-radius: 6px;
     background: #fdfdfd;
-}
-.graph-canvas {
-    display: block;
 }
 .graph-shell {
     display: flex;
@@ -347,37 +413,42 @@ hr { border: none; border-top: 1px solid #333; margin: 24px 0; }
 .graph-node rect {
     fill: #fff;
     stroke: #111;
-    stroke-width: 2;
+    stroke-width: 3;
     rx: 12;
     ry: 12;
 }
 .graph-node text {
     fill: #111;
     font-family: Georgia, 'Times New Roman', serif;
-    font-size: 18px;
+    font-size: 20px;
     font-weight: 600;
     text-anchor: middle;
 }
 .graph-node.is-active rect {
-    stroke-width: 3;
+    stroke-width: 5;
 }
 .graph-edge {
     fill: none;
-    stroke: #666;
-    stroke-width: 2;
+    stroke: #222;
+    stroke-width: 3;
 }
 .graph-edge-label {
-    font-size: 14px;
-    fill: #444;
+    font-size: 22px;
+    fill: #111;
     font-style: italic;
+    font-weight: 700;
     text-anchor: middle;
+    paint-order: stroke;
+    stroke: #fff;
+    stroke-width: 7px;
+    stroke-linejoin: round;
 }
 .eink-muted {
-    color: #444;
+    color: #333;
 }
 .diagram-unsupported {
-    font-size: 18px;
-    color: #444;
+    font-size: 20px;
+    color: #222;
 }
 .diff-block {
     font-family: monospace;
@@ -399,10 +470,10 @@ hr { border: none; border-top: 1px solid #333; margin: 24px 0; }
     background: #fff6f6;
 }
 .diff-hunk {
-    color: #555;
+    color: #333;
     font-style: italic;
     padding-left: 8px;
-    border-left: 6px solid #aaa;
+    border-left: 6px solid #777;
 }
 .diff-ctx {
     padding-left: 14px;
@@ -424,37 +495,32 @@ hr { border: none; border-top: 1px solid #333; margin: 24px 0; }
     }
 }
 .eink-anchored {
-    border-left: 4px dashed #4a6fa5;
-    background: #f0f4f8;
+    border-left: 4px dashed #1a4d8f;
+    background: #ebf0f6;
     padding-left: 12px;
-    transition: background 0.2s, border-color 0.2s;
 }
 .eink-link-badge {
     position: absolute;
-    top: -11px;
-    right: -11px;
-    min-width: 24px;
-    height: 24px;
-    border-radius: 12px;
+    top: -14px;
+    right: -14px;
+    min-width: 30px;
+    height: 30px;
+    border-radius: 15px;
     border: 2px solid #fff;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    font-size: 13px;
+    font-size: 16px;
     font-weight: 700;
     font-family: 'Courier New', monospace;
     color: #fff;
     z-index: 100;
-    padding: 0 5px;
+    padding: 0 7px;
     pointer-events: none;
-    box-shadow: 0 1px 4px rgba(0,0,0,0.25);
-}
-@keyframes eink-link-pulse {
-    0%, 100% { outline-width: 4px; }
-    50% { outline-width: 8px; }
 }
 .eink-link-pulse {
-    animation: eink-link-pulse 0.85s ease-in-out infinite;
+    outline: 4px solid #1a4d8f;
+    outline-offset: 2px;
 }
 .eink-link-popup {
     position: absolute;
@@ -463,10 +529,9 @@ hr { border: none; border-top: 1px solid #333; margin: 24px 0; }
     border: 2px solid #111;
     padding: 10px 14px;
     font-family: Georgia, 'Times New Roman', serif;
-    font-size: 18px;
+    font-size: 20px;
     line-height: 1.5;
-    max-width: 500px;
-    box-shadow: 0 4px 16px rgba(0,0,0,0.2);
+    max-width: 600px;
     pointer-events: none;
 }
 "#;
@@ -672,36 +737,43 @@ const BOOTSTRAP_JS: &str = r#"
       ['file', node.file || null],
       ['symbol', node.symbol || null],
       ['line', node.line != null ? String(node.line) : null],
-      ['href', node.href || null],
-      ['notes', node.notes || null]
+      ['href', node.href || null]
     ].filter(([, value]) => value);
   }
 
-  function buildDetailsPanel(title, entries) {
+  function buildDetailsPanel(title, entries, notesHtml) {
     const panel = document.createElement('section');
     panel.className = 'diagram-details';
     const heading = document.createElement('div');
     heading.className = 'diagram-details-title';
     heading.textContent = title;
     panel.appendChild(heading);
-    if (!entries.length) {
+    if (!entries.length && !notesHtml) {
       const empty = document.createElement('div');
       empty.className = 'eink-muted';
       empty.textContent = 'No metadata for the selected element.';
       panel.appendChild(empty);
       return panel;
     }
-    const list = document.createElement('dl');
-    list.className = 'diagram-details-grid';
-    entries.forEach(([label, value]) => {
-      const dt = document.createElement('dt');
-      dt.textContent = label;
-      const dd = document.createElement('dd');
-      dd.textContent = value;
-      list.appendChild(dt);
-      list.appendChild(dd);
-    });
-    panel.appendChild(list);
+    if (entries.length) {
+      const list = document.createElement('dl');
+      list.className = 'diagram-details-grid';
+      entries.forEach(([label, value]) => {
+        const dt = document.createElement('dt');
+        dt.textContent = label;
+        const dd = document.createElement('dd');
+        dd.textContent = value;
+        list.appendChild(dt);
+        list.appendChild(dd);
+      });
+      panel.appendChild(list);
+    }
+    if (notesHtml) {
+      const notes = document.createElement('div');
+      notes.className = 'diagram-details-notes';
+      notes.innerHTML = notesHtml;
+      panel.appendChild(notes);
+    }
     return panel;
   }
 
@@ -754,7 +826,7 @@ const BOOTSTRAP_JS: &str = r#"
       file: node.file || null,
       symbol: node.symbol || null,
       line: node.line || null,
-      notes: node.notes || null,
+      notes_html: node.notes_html || null,
       collapsed: Boolean(node.collapsed),
       children: children.map((child, index) => cloneNode(child, depth + 1, id + '-' + index))
     };
@@ -838,16 +910,9 @@ const BOOTSTRAP_JS: &str = r#"
       svg.setAttribute('width', String(maxRight));
       svg.setAttribute('height', String(maxBottom));
       svg.setAttribute('viewBox', '0 0 ' + maxRight + ' ' + maxBottom);
-      const mmDefs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
-      const mmFilter = document.createElementNS('http://www.w3.org/2000/svg', 'filter');
-      mmFilter.setAttribute('id', 'mm-node-shadow');
-      mmFilter.setAttribute('x', '-10%'); mmFilter.setAttribute('y', '-20%');
-      mmFilter.setAttribute('width', '120%'); mmFilter.setAttribute('height', '140%');
-      const mmShadow = document.createElementNS('http://www.w3.org/2000/svg', 'feDropShadow');
-      mmShadow.setAttribute('dx', '1'); mmShadow.setAttribute('dy', '2');
-      mmShadow.setAttribute('stdDeviation', '2');
-      mmShadow.setAttribute('flood-color', '#000'); mmShadow.setAttribute('flood-opacity', '0.1');
-      mmFilter.appendChild(mmShadow); mmDefs.appendChild(mmFilter); svg.appendChild(mmDefs);
+      svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+      svg.removeAttribute('width');
+      svg.removeAttribute('height');
 
       const nodeElements = new Map();
       const indexButtons = new Map();
@@ -890,7 +955,6 @@ const BOOTSTRAP_JS: &str = r#"
         var mmNodeColor = colorForNode(node);
         rect.style.fill = mmNodeColor;
         rect.style.stroke = darkenColor(mmNodeColor, 0.65);
-        rect.setAttribute('filter', 'url(#mm-node-shadow)');
         const mmLines = node.lines || splitLabel(node.label);
         const mmTextY = Math.round(node.y + node.height / 2 + 7 - (mmLines.length - 1) * 11);
         const text = renderLabelText(svg, mmLines, node.x + node.width / 2, mmTextY, 22);
@@ -905,6 +969,23 @@ const BOOTSTRAP_JS: &str = r#"
           group.appendChild(kindLabel);
         }
         group.appendChild(text);
+        if (node.notes_html) {
+          const info = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+          info.setAttribute('class', 'mindmap-node-info');
+          const infoCircle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+          const infoCx = node.x + 4;
+          const infoCy = node.y;
+          infoCircle.setAttribute('cx', String(infoCx));
+          infoCircle.setAttribute('cy', String(infoCy));
+          infoCircle.setAttribute('r', '16');
+          const infoText = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+          infoText.setAttribute('x', String(infoCx));
+          infoText.setAttribute('y', String(infoCy + 7));
+          infoText.textContent = 'i';
+          info.appendChild(infoCircle);
+          info.appendChild(infoText);
+          group.appendChild(info);
+        }
         group.addEventListener('click', () => focusNode(node.id));
         svg.appendChild(group);
         nodeElements.set(node.id, { element: group, node });
@@ -912,17 +993,18 @@ const BOOTSTRAP_JS: &str = r#"
           const toggle = document.createElementNS('http://www.w3.org/2000/svg', 'g');
           toggle.setAttribute('class', 'mindmap-node-toggle');
           const toggleRect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-          const toggleX = node.x + node.width - 20;
-          const toggleY = node.y - 8;
+          const toggleSize = 32;
+          const toggleX = node.x + node.width - toggleSize / 2 - 4;
+          const toggleY = node.y - toggleSize / 2;
           toggleRect.setAttribute('x', String(toggleX));
           toggleRect.setAttribute('y', String(toggleY));
-          toggleRect.setAttribute('width', '18');
-          toggleRect.setAttribute('height', '18');
-          toggleRect.setAttribute('rx', '4');
-          toggleRect.setAttribute('ry', '4');
+          toggleRect.setAttribute('width', String(toggleSize));
+          toggleRect.setAttribute('height', String(toggleSize));
+          toggleRect.setAttribute('rx', '6');
+          toggleRect.setAttribute('ry', '6');
           const toggleText = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-          toggleText.setAttribute('x', String(toggleX + 9));
-          toggleText.setAttribute('y', String(toggleY + 14));
+          toggleText.setAttribute('x', String(toggleX + toggleSize / 2));
+          toggleText.setAttribute('y', String(toggleY + toggleSize / 2 + 8));
           toggleText.textContent = node.collapsed ? '+' : '−';
           toggle.appendChild(toggleRect);
           toggle.appendChild(toggleText);
@@ -952,10 +1034,10 @@ const BOOTSTRAP_JS: &str = r#"
         viewport.scrollTo({
           left: Math.max(centerX - viewport.clientWidth / 2, 0),
           top: Math.max(centerY - viewport.clientHeight / 2, 0),
-          behavior: 'smooth'
+          behavior: 'instant'
         });
         detailsHost.innerHTML = '';
-        detailsHost.appendChild(buildDetailsPanel(entry.node.label, metadataEntries(entry.node)));
+        detailsHost.appendChild(buildDetailsPanel(entry.node.label, metadataEntries(entry.node), entry.node.notes_html));
         if (entry.node.href) {
           window.location.href = entry.node.href;
         } else if (window.location.hash !== '#' + entry.node.id) {
@@ -967,7 +1049,7 @@ const BOOTSTRAP_JS: &str = r#"
         const button = document.createElement('button');
         button.type = 'button';
         button.className = 'mindmap-index-item';
-        button.textContent = node.label;
+        button.textContent = node.notes_html ? node.label + ' ⓘ' : node.label;
         button.style.paddingLeft = (10 + node.depth * 18) + 'px';
         button.addEventListener('click', () => focusNode(node.id));
         index.appendChild(button);
@@ -1062,11 +1144,74 @@ const BOOTSTRAP_JS: &str = r#"
     const detailsHost = document.createElement('div');
     const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     svg.setAttribute('class', 'graph-canvas');
-    const width = Math.max((laidOut.width || 0) + 96, 800);
-    const height = Math.max((laidOut.height || 0) + 96, 520);
-    svg.setAttribute('width', String(width));
-    svg.setAttribute('height', String(height));
-    svg.setAttribute('viewBox', '0 0 ' + width + ' ' + height);
+
+    const childById = new Map((laidOut.children || []).map((n) => [n.id, n]));
+    const selfLoops = new Map();
+    (laidOut.edges || []).forEach((edge) => {
+      if (!edge.sources || !edge.targets) return;
+      if (edge.sources[0] !== edge.targets[0]) return;
+      const target = childById.get(edge.sources[0]);
+      if (!target) return;
+      const cx = target.x + target.width / 2;
+      const top = target.y;
+      const span = Math.max(60, target.width * 0.4);
+      const arcLeft = cx - span / 2;
+      const arcRight = cx + span / 2;
+      const arcTop = top - 64;
+      const labelText = edge.labels && edge.labels[0] ? edge.labels[0].text : null;
+      selfLoops.set(edge.id, {
+        d: 'M ' + arcLeft + ' ' + top + ' C ' + (cx - span) + ' ' + arcTop + ', ' + (cx + span) + ' ' + arcTop + ', ' + arcRight + ' ' + top,
+        labelText,
+        labelX: cx,
+        labelY: arcTop + 18,
+        boundLeft: cx - span,
+        boundRight: cx + span,
+        boundTop: arcTop - 8,
+        boundBottom: top
+      });
+    });
+
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    (laidOut.children || []).forEach((n) => {
+      minX = Math.min(minX, n.x);
+      minY = Math.min(minY, n.y);
+      maxX = Math.max(maxX, n.x + n.width);
+      maxY = Math.max(maxY, n.y + n.height);
+    });
+    (laidOut.edges || []).forEach((edge) => {
+      if (selfLoops.has(edge.id)) return;
+      (edge.sections || []).forEach((sec) => {
+        const pts = [sec.startPoint].concat(sec.bendPoints || [], [sec.endPoint]);
+        pts.forEach((p) => {
+          if (!p) return;
+          minX = Math.min(minX, p.x);
+          minY = Math.min(minY, p.y);
+          maxX = Math.max(maxX, p.x);
+          maxY = Math.max(maxY, p.y);
+        });
+      });
+      (edge.labels || []).forEach((lbl) => {
+        if (lbl.x == null || lbl.y == null) return;
+        minX = Math.min(minX, lbl.x);
+        minY = Math.min(minY, lbl.y);
+        maxX = Math.max(maxX, lbl.x + (lbl.width || 0));
+        maxY = Math.max(maxY, lbl.y + (lbl.height || 0));
+      });
+    });
+    selfLoops.forEach((loop) => {
+      minX = Math.min(minX, loop.boundLeft);
+      minY = Math.min(minY, loop.boundTop);
+      maxX = Math.max(maxX, loop.boundRight);
+      maxY = Math.max(maxY, loop.boundBottom);
+    });
+    if (!isFinite(minX)) { minX = 0; minY = 0; maxX = 0; maxY = 0; }
+    const pad = 48;
+    const vbX = minX - pad;
+    const vbY = minY - pad;
+    const vbW = Math.max(maxX - minX + pad * 2, 800);
+    const vbH = Math.max(maxY - minY + pad * 2, 520);
+    svg.setAttribute('viewBox', vbX + ' ' + vbY + ' ' + vbW + ' ' + vbH);
+    svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
     const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
     const marker = document.createElementNS('http://www.w3.org/2000/svg', 'marker');
     marker.setAttribute('id', 'graph-arrow');
@@ -1077,18 +1222,9 @@ const BOOTSTRAP_JS: &str = r#"
     marker.setAttribute('orient', 'auto');
     const arrow = document.createElementNS('http://www.w3.org/2000/svg', 'path');
     arrow.setAttribute('d', 'M0,0 L0,6 L9,3 z');
-    arrow.setAttribute('fill', '#666');
+    arrow.setAttribute('fill', '#222');
     marker.appendChild(arrow);
     defs.appendChild(marker);
-    const gFilter = document.createElementNS('http://www.w3.org/2000/svg', 'filter');
-    gFilter.setAttribute('id', 'g-node-shadow');
-    gFilter.setAttribute('x', '-10%'); gFilter.setAttribute('y', '-20%');
-    gFilter.setAttribute('width', '120%'); gFilter.setAttribute('height', '140%');
-    const gShadow = document.createElementNS('http://www.w3.org/2000/svg', 'feDropShadow');
-    gShadow.setAttribute('dx', '1'); gShadow.setAttribute('dy', '2');
-    gShadow.setAttribute('stdDeviation', '2');
-    gShadow.setAttribute('flood-color', '#000'); gShadow.setAttribute('flood-opacity', '0.1');
-    gFilter.appendChild(gShadow); defs.appendChild(gFilter);
     svg.appendChild(defs);
     const nodeMap = new Map();
     const active = { id: null };
@@ -1111,16 +1247,37 @@ const BOOTSTRAP_JS: &str = r#"
       if (!node) return;
       const metadata = sourceNodeMap.get(nodeId) || {};
       detailsHost.innerHTML = '';
-      detailsHost.appendChild(buildDetailsPanel(metadata.label || nodeId, metadataEntries({ id: nodeId, ...metadata })));
+      detailsHost.appendChild(buildDetailsPanel(metadata.label || nodeId, metadataEntries({ id: nodeId, ...metadata }), metadata.notes_html || null));
       viewport.scrollTo({
-        left: Math.max(node.x + node.width / 2 - viewport.clientWidth / 2, 0),
-        top: Math.max(node.y + node.height / 2 - viewport.clientHeight / 2, 0),
+        left: Math.max(node.x - vbX + node.width / 2 - viewport.clientWidth / 2, 0),
+        top: Math.max(node.y - vbY + node.height / 2 - viewport.clientHeight / 2, 0),
         behavior: 'smooth'
       });
       history.replaceState(null, '', '#' + nodeId);
     }
 
     (laidOut.edges || []).forEach((edge) => {
+      const sourceEdge = edges.find((item, index) => (item.id || 'edge-' + index) === edge.id);
+      const loop = selfLoops.get(edge.id);
+      if (loop) {
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        path.setAttribute('class', 'graph-edge');
+        path.setAttribute('d', loop.d);
+        path.setAttribute('fill', 'none');
+        path.setAttribute('marker-end', 'url(#graph-arrow)');
+        const edgeDash = edgePattern(sourceEdge && sourceEdge.kind ? sourceEdge.kind : loop.labelText || '');
+        if (edgeDash) path.setAttribute('stroke-dasharray', edgeDash);
+        svg.appendChild(path);
+        if (loop.labelText) {
+          const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+          text.setAttribute('class', 'graph-edge-label');
+          text.setAttribute('x', String(loop.labelX));
+          text.setAttribute('y', String(loop.labelY));
+          text.textContent = loop.labelText;
+          svg.appendChild(text);
+        }
+        return;
+      }
       const section = edge.sections && edge.sections[0];
       if (!section) return;
       const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
@@ -1129,7 +1286,6 @@ const BOOTSTRAP_JS: &str = r#"
       path.setAttribute('class', 'graph-edge');
       path.setAttribute('d', d);
       path.setAttribute('marker-end', 'url(#graph-arrow)');
-      const sourceEdge = edges.find((item, index) => (item.id || 'edge-' + index) === edge.id);
       const edgeDash = edgePattern(sourceEdge && sourceEdge.kind ? sourceEdge.kind : edge.labels && edge.labels[0] ? edge.labels[0].text : '');
       if (edgeDash) path.setAttribute('stroke-dasharray', edgeDash);
       svg.appendChild(path);
@@ -1159,7 +1315,6 @@ const BOOTSTRAP_JS: &str = r#"
       var nodeColor = sourceNode.color ? colorForNode(sourceNode) : graphFill(sourceNode.kind);
       rect.style.fill = nodeColor;
       rect.style.stroke = darkenColor(nodeColor, 0.65);
-      rect.setAttribute('filter', 'url(#g-node-shadow)');
       const gLines = splitLabel(sourceNode.label || node.id);
       const gTextY = Math.round(node.y + node.height / 2 + 7 - (gLines.length - 1) * 11);
       const text = renderLabelText(svg, gLines, node.x + node.width / 2, gTextY, 22);
@@ -1688,7 +1843,7 @@ pub fn to_eink_html(markdown: &str, session_id: &str) -> String {
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=2800, initial-scale=1.0, minimum-scale=0.3, maximum-scale=3.0, user-scalable=yes">
+<meta name="viewport" content="width=1860, initial-scale=1.0, minimum-scale=0.3, maximum-scale=3.0, user-scalable=yes">
 <title>E-Ink Review</title>
 <style>{css}</style>
 </head>
