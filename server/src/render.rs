@@ -460,7 +460,7 @@ hr { border: none; border-top: 1px solid #333; margin: 24px 0; }
 }
 .diff-block {
     font-family: monospace;
-    font-size: 22px;
+    font-size: 16px;
     line-height: 1.5;
     border: 1px solid #ccc;
     border-radius: 4px;
