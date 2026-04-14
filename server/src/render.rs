@@ -20,19 +20,25 @@ use html_utils::escape_html;
 
 const EINK_CSS: &str = r#"
 * { margin: 0; padding: 0; box-sizing: border-box; }
+html {
+    background: #ededed;
+    margin: 0;
+    padding: 0;
+}
 body {
     font-family: Georgia, 'Times New Roman', serif;
     font-size: 18px;
     line-height: 1.6;
     color: #000;
     background: #fff;
+    width: 1400px;
     min-height: 100vh;
     padding: 0;
     margin: 0;
 }
 #content {
-    max-width: 100%;
-    margin: 16px 0 800px 0;
+    max-width: 880px;
+    margin: 16px auto 800px auto;
     padding: 0 20px;
 }
 #toc {
