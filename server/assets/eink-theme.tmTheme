@@ -3,10 +3,27 @@
 <plist version="1.0">
 <dict>
   <key>name</key>
-  <string>Eink Sunlight</string>
-  <!-- Inspired by the `sunlight.lua` Neovim colourscheme (also in this repo).
-       Same 17-hue palette, mapped to Sublime Text / syntect scopes. Background
-       is pure white for e-ink; fg is near-black. -->
+  <string>Eink Kaleido 3</string>
+  <!-- Palette inspired by the `sunlight.lua` Neovim colourscheme, then tuned
+       for the Boox Kaleido 3 RGB color filter array:
+
+       * 16 levels per channel (4-bit quantisation), so every hex value snaps
+         to the 0x00 / 0x11 / 0x22 / ... / 0xFF grid — off-grid values just
+         get rounded by the panel and may land in awkward places.
+       * ~75% sRGB gamut, ~40% NTSC. Pastels and subtle hues wash out; go
+         deep + saturated.
+       * The most frequent scopes (keywords, strings, variables) are assigned
+         near-primary colours so they use mostly a single CFA sub-pixel and
+         dither less.
+       * Middle-lightness saturated colours (~#cc values) give the best
+         readability against a #fff background. Brighter (#ff...) has too
+         little contrast, darker (#33...) loses chroma.
+
+       Sources:
+         https://www.eink.com/brand/detail/Kaleido3
+         https://shop.boox.com/blogs/news/kaleido-3-color-epaper
+         https://goodereader.com/blog/e-paper/everything-you-need-to-know-about-e-ink-kaleido-3-color-e-paper
+  -->
   <key>settings</key>
   <array>
 
@@ -16,26 +33,26 @@
         <key>background</key>
         <string>#ffffff</string>
         <key>foreground</key>
-        <string>#1c1c1c</string>
+        <string>#222222</string>
         <key>caret</key>
-        <string>#1c1c1c</string>
+        <string>#222222</string>
         <key>lineHighlight</key>
         <string>#00000000</string>
         <key>selection</key>
-        <string>#b3d4f0</string>
+        <string>#bbddff</string>
         <key>invisibles</key>
-        <string>#d4cfc7</string>
+        <string>#cccccc</string>
       </dict>
     </dict>
 
-    <!-- ── Comments (slate italic, much darker than a grey would be) ───── -->
+    <!-- ── Comments (slate italic, grid-snapped) ─────────────────────── -->
     <dict>
       <key>name</key><string>Comment</string>
       <key>scope</key>
       <string>comment, punctuation.definition.comment</string>
       <key>settings</key>
       <dict>
-        <key>foreground</key><string>#3a5f82</string>
+        <key>foreground</key><string>#336688</string>
         <key>fontStyle</key><string>italic</string>
       </dict>
     </dict>
@@ -45,18 +62,18 @@
       <string>comment.block.documentation, comment.line.documentation</string>
       <key>settings</key>
       <dict>
-        <key>foreground</key><string>#1a4fa0</string>
+        <key>foreground</key><string>#2255aa</string>
         <key>fontStyle</key><string>italic</string>
       </dict>
     </dict>
 
-    <!-- ── Strings (lime green, regex in red) ────────────────────────── -->
+    <!-- ── Strings (deep green — cleaner than lime on CFA) ────────────── -->
     <dict>
       <key>name</key><string>String</string>
       <key>scope</key>
       <string>string, string.quoted, string.other, string.unquoted</string>
       <key>settings</key>
-      <dict><key>foreground</key><string>#00a020</string></dict>
+      <dict><key>foreground</key><string>#008800</string></dict>
     </dict>
     <dict>
       <key>name</key><string>Regex</string>
@@ -71,7 +88,7 @@
       <string>constant.character.escape, string constant.character.escape</string>
       <key>settings</key>
       <dict>
-        <key>foreground</key><string>#c04400</string>
+        <key>foreground</key><string>#cc4400</string>
         <key>fontStyle</key><string>bold</string>
       </dict>
     </dict>
@@ -82,7 +99,7 @@
       <key>scope</key>
       <string>constant.numeric</string>
       <key>settings</key>
-      <dict><key>foreground</key><string>#c06000</string></dict>
+      <dict><key>foreground</key><string>#cc6600</string></dict>
     </dict>
 
     <!-- ── Language constants (true/false/null/None/Some/Ok/Err) ──────── -->
@@ -107,14 +124,14 @@
       </dict>
     </dict>
 
-    <!-- ── Keywords (general = blue; control flow = orange) ──────────── -->
+    <!-- ── Keywords (general = pure blue; control flow = orange) ──────── -->
     <dict>
       <key>name</key><string>Keyword</string>
       <key>scope</key>
       <string>keyword, keyword.other</string>
       <key>settings</key>
       <dict>
-        <key>foreground</key><string>#0060c0</string>
+        <key>foreground</key><string>#0033cc</string>
         <key>fontStyle</key><string>bold</string>
       </dict>
     </dict>
@@ -124,7 +141,7 @@
       <string>keyword.control, keyword.control.conditional, keyword.control.loop, keyword.control.flow, keyword.control.import</string>
       <key>settings</key>
       <dict>
-        <key>foreground</key><string>#c04400</string>
+        <key>foreground</key><string>#cc4400</string>
         <key>fontStyle</key><string>bold</string>
       </dict>
     </dict>
@@ -144,7 +161,7 @@
       <string>keyword.operator.word, keyword.operator.new, keyword.operator.logical.python</string>
       <key>settings</key>
       <dict>
-        <key>foreground</key><string>#0060c0</string>
+        <key>foreground</key><string>#0033cc</string>
         <key>fontStyle</key><string>bold</string>
       </dict>
     </dict>
@@ -153,7 +170,7 @@
       <key>scope</key>
       <string>keyword.operator</string>
       <key>settings</key>
-      <dict><key>foreground</key><string>#2d2d2d</string></dict>
+      <dict><key>foreground</key><string>#333333</string></dict>
     </dict>
 
     <!-- ── Storage: fn, let, struct, enum, trait, impl, class ─────────── -->
@@ -163,7 +180,7 @@
       <string>storage.type, storage.type.function, storage.type.struct, storage.type.enum, storage.type.trait, storage.type.impl, storage.type.class, storage.type.rust</string>
       <key>settings</key>
       <dict>
-        <key>foreground</key><string>#0060c0</string>
+        <key>foreground</key><string>#0033cc</string>
         <key>fontStyle</key><string>bold</string>
       </dict>
     </dict>
@@ -173,7 +190,7 @@
       <string>storage.modifier, storage.modifier.visibility, storage.modifier.mut, storage.modifier.const, storage.modifier.static, storage.modifier.ref, storage.modifier.rust</string>
       <key>settings</key>
       <dict>
-        <key>foreground</key><string>#006400</string>
+        <key>foreground</key><string>#006600</string>
         <key>fontStyle</key><string>bold</string>
       </dict>
     </dict>
@@ -193,7 +210,7 @@
       <string>storage.modifier.lifetime, entity.name.lifetime, meta.lifetime, punctuation.definition.lifetime</string>
       <key>settings</key>
       <dict>
-        <key>foreground</key><string>#9b7800</string>
+        <key>foreground</key><string>#997700</string>
         <key>fontStyle</key><string>italic</string>
       </dict>
     </dict>
@@ -205,7 +222,7 @@
       <string>support.type, support.type.primitive, support.type.builtin, support.type.rust</string>
       <key>settings</key>
       <dict>
-        <key>foreground</key><string>#0060c0</string>
+        <key>foreground</key><string>#0033cc</string>
         <key>fontStyle</key><string>bold</string>
       </dict>
     </dict>
@@ -215,7 +232,7 @@
       <string>support.class</string>
       <key>settings</key>
       <dict>
-        <key>foreground</key><string>#4400a0</string>
+        <key>foreground</key><string>#4400aa</string>
         <key>fontStyle</key><string>bold</string>
       </dict>
     </dict>
@@ -225,7 +242,7 @@
       <string>support.function, support.function.builtin</string>
       <key>settings</key>
       <dict>
-        <key>foreground</key><string>#007878</string>
+        <key>foreground</key><string>#007777</string>
         <key>fontStyle</key><string>bold</string>
       </dict>
     </dict>
@@ -247,7 +264,7 @@
       <string>entity.name.type, entity.name.class, entity.name.struct, entity.name.enum, entity.name.trait, entity.name.interface, entity.name.union, entity.other.inherited-class</string>
       <key>settings</key>
       <dict>
-        <key>foreground</key><string>#4400a0</string>
+        <key>foreground</key><string>#4400aa</string>
         <key>fontStyle</key><string>bold</string>
       </dict>
     </dict>
@@ -257,7 +274,7 @@
       <string>entity.name.function, meta.function entity.name.function, meta.function.declaration entity.name.function</string>
       <key>settings</key>
       <dict>
-        <key>foreground</key><string>#007878</string>
+        <key>foreground</key><string>#007777</string>
         <key>fontStyle</key><string>bold</string>
       </dict>
     </dict>
@@ -266,7 +283,7 @@
       <key>scope</key>
       <string>meta.function-call entity.name.function, variable.function, meta.method-call entity.name.function</string>
       <key>settings</key>
-      <dict><key>foreground</key><string>#009090</string></dict>
+      <dict><key>foreground</key><string>#009999</string></dict>
     </dict>
     <dict>
       <key>name</key><string>Macro name</string>
@@ -293,7 +310,7 @@
       <key>scope</key>
       <string>entity.name.namespace, entity.name.module, meta.path entity.name, support.other.namespace, support.other.module</string>
       <key>settings</key>
-      <dict><key>foreground</key><string>#1a4fa0</string></dict>
+      <dict><key>foreground</key><string>#2255aa</string></dict>
     </dict>
     <dict>
       <key>name</key><string>Tag</string>
@@ -301,7 +318,7 @@
       <string>entity.name.tag, entity.name.tag.html, entity.name.tag.xml</string>
       <key>settings</key>
       <dict>
-        <key>foreground</key><string>#0060c0</string>
+        <key>foreground</key><string>#0033cc</string>
         <key>fontStyle</key><string>bold</string>
       </dict>
     </dict>
@@ -310,16 +327,16 @@
       <key>scope</key>
       <string>entity.other.attribute-name</string>
       <key>settings</key>
-      <dict><key>foreground</key><string>#9b7800</string></dict>
+      <dict><key>foreground</key><string>#997700</string></dict>
     </dict>
 
-    <!-- ── Variables & parameters ──────────────────────────────────────── -->
+    <!-- ── Variables & parameters (pure red — one-channel clean) ─────── -->
     <dict>
       <key>name</key><string>Variable</string>
       <key>scope</key>
       <string>variable, variable.other, variable.other.readwrite</string>
       <key>settings</key>
-      <dict><key>foreground</key><string>#dd1111</string></dict>
+      <dict><key>foreground</key><string>#cc0000</string></dict>
     </dict>
     <dict>
       <key>name</key><string>Parameter</string>
@@ -327,7 +344,7 @@
       <string>variable.parameter, meta.function.parameters variable</string>
       <key>settings</key>
       <dict>
-        <key>foreground</key><string>#dd1111</string>
+        <key>foreground</key><string>#cc0000</string>
         <key>fontStyle</key><string>italic</string>
       </dict>
     </dict>
@@ -337,7 +354,7 @@
       <string>variable.language, variable.language.self, variable.language.this</string>
       <key>settings</key>
       <dict>
-        <key>foreground</key><string>#c04400</string>
+        <key>foreground</key><string>#cc4400</string>
         <key>fontStyle</key><string>bold italic</string>
       </dict>
     </dict>
@@ -346,7 +363,7 @@
       <key>scope</key>
       <string>variable.other.member, variable.other.property, variable.other.object.property, meta.field entity.name</string>
       <key>settings</key>
-      <dict><key>foreground</key><string>#009090</string></dict>
+      <dict><key>foreground</key><string>#009999</string></dict>
     </dict>
 
     <!-- ── Attributes / annotations / decorators ───────────────────────── -->
@@ -367,7 +384,7 @@
       <key>scope</key>
       <string>punctuation, punctuation.definition, punctuation.section, punctuation.separator, punctuation.terminator, punctuation.accessor</string>
       <key>settings</key>
-      <dict><key>foreground</key><string>#5a5a5a</string></dict>
+      <dict><key>foreground</key><string>#555555</string></dict>
     </dict>
 
     <!-- ── Invalid / deprecated ────────────────────────────────────────── -->
@@ -388,7 +405,7 @@
       <string>invalid.deprecated</string>
       <key>settings</key>
       <dict>
-        <key>foreground</key><string>#c06000</string>
+        <key>foreground</key><string>#cc6600</string>
         <key>fontStyle</key><string>italic</string>
       </dict>
     </dict>
@@ -400,7 +417,7 @@
       <string>markup.heading, entity.name.section</string>
       <key>settings</key>
       <dict>
-        <key>foreground</key><string>#0060c0</string>
+        <key>foreground</key><string>#0033cc</string>
         <key>fontStyle</key><string>bold</string>
       </dict>
     </dict>
@@ -410,7 +427,7 @@
       <string>markup.bold</string>
       <key>settings</key>
       <dict>
-        <key>foreground</key><string>#1c1c1c</string>
+        <key>foreground</key><string>#222222</string>
         <key>fontStyle</key><string>bold</string>
       </dict>
     </dict>
@@ -420,7 +437,7 @@
       <string>markup.italic</string>
       <key>settings</key>
       <dict>
-        <key>foreground</key><string>#1c1c1c</string>
+        <key>foreground</key><string>#222222</string>
         <key>fontStyle</key><string>italic</string>
       </dict>
     </dict>
