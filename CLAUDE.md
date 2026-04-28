@@ -62,7 +62,7 @@ Handwriting recognition uses **Ollama** with `qwen2.5vl:7b` (vision model). Tess
 | Env var | Default | Description |
 |---|---|---|
 | `EINK_OLLAMA_URL` | `http://localhost:11434` | Ollama base URL |
-| `EINK_OLLAMA_MODEL` | `qwen2.5vl:7b` | Model name |
+| `EINK_OLLAMA_MODEL` | `glm-ocr` | Model name |
 | `EINK_OCR_DEBUG` | unset | If set, saves PNG to `/tmp/eink-ocr-*.png` |
 
 ### Timing
@@ -257,3 +257,45 @@ When adding a new feature to `render.rs`:
 2. Add an HTTP-level test in `tests/render_validation_test.rs` if the feature involves session creation or asset serving.
 3. Add a render fixture in `tests/fixtures/eval/render/` and run `just eval-update` to generate the golden.
 4. Run `just test-render` to iterate quickly; `just ci` before committing to run the full suite.
+
+## Known weak points
+
+Areas that work today but could bite under load or after refactoring:
+
+### Notifier / WS sender map leak
+
+`AppState.notifiers` and `AppState.ws_senders` are cleaned up on submit and cancel
+but **not** on session expiry. The expiry loop in `main.rs` only calls
+`SessionManager::expire_stale()` — it never touches the notifier/sender maps.
+Long-running servers will accumulate orphaned entries for every expired session.
+
+Fix: have the expiry loop call `notify_and_cleanup` + `ws_cleanup` for each expired id.
+
+### No server-side WebSocket heartbeat
+
+The CLI sends pings every 30 s, but the server's `handle_ws` has no periodic
+ping. Intermediate proxies or NAT can silently drop idle connections without
+either side noticing until the next message fails.
+
+### Disk I/O under write lock
+
+`SessionManager::persist()` does synchronous `fs::write` inside the `RwLock`
+write guard. Under high concurrency, every mutation (create, update, star,
+submit) serialises on disk I/O. Acceptable at current scale (single user);
+would need async write or write-behind buffer if concurrency grows.
+
+### No pagination on list sessions
+
+`GET /api/sessions` returns every session in one JSON array. Fine for dozens
+of sessions; will blow up response size if sessions accumulate over months
+without purging.
+
+### Startup panics
+
+`main.rs` uses `.unwrap()` on `TcpListener::bind` and `axum::serve`. A port
+conflict gives a raw panic trace instead of a human-readable error.
+
+### OCR timeout not tunable per session
+
+The Ollama HTTP client has a global 120 s timeout. There's no way to set a
+shorter timeout for fast-fail or a longer one for complex images.

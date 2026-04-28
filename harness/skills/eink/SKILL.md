@@ -151,16 +151,28 @@ If `eink-review push` fails: `systemctl --user start eink-serve`
 
 ---
 
-## Authoring Rich Review Documents
+## Authoring Review Documents
 
-**Always use colors and diagrams.** The Boox is a color e-ink tablet — plain prose is fine for
-text, but any architecture, plan, status breakdown, or relationship should be a colored graph or mindmap.
+**Be minimalistic.** The reader is on an e-ink tablet — they want to scan, not read essays.
 
-The renderer supports normal Markdown plus:
+Structure every document like this:
+1. **Brief overview** — 1–3 sentences or bullets stating what this is and why it matters.
+2. **Body** — short bulleted points, not paragraphs. Break prose into bullets whenever possible.
+3. **At most one diagram per document**, and only when structure genuinely cannot be expressed in bullets.
 
-- `mermaid` for flowcharts, sequence diagrams, state machines
-- `mindmap` for plans, review branches, task decomposition
-- `graph` for component relationships, data flows, architecture maps
+Hard limits:
+- Prefer bullets over prose. If a paragraph is more than ~3 lines, split it into bullets.
+- **Maximum one diagram per document.** Two only if they show fundamentally different things (e.g. an architecture graph and a state machine). Never use a diagram as decoration.
+- Skip the diagram entirely if a bulleted list communicates the same information.
+- No "executive summary" + "summary" + "TL;DR" stacking — one overview, then content.
+
+The renderer supports normal Markdown plus the diagram blocks below. Use them sparingly:
+
+- `mermaid` for flowcharts, sequence diagrams, state machines — when ordering or interaction matters
+- `mindmap` for plans or decompositions — when a flat bulleted list would obscure hierarchy
+- `graph` for architecture maps — when relationships between components are the point
+
+If you find yourself reaching for a second diagram, replace it with bullets.
 
 ### Color semantics — use consistently
 
@@ -218,11 +230,26 @@ sequenceDiagram
   A-->>C: 200 JWT
 ```
 
+### Mermaid gotchas
+
+**Avoid reserved keywords as participant aliases in `sequenceDiagram`.** Mermaid's
+parser is case-insensitive for keywords, so `AND`, `AS`, `END`, `LOOP`, `ALT`,
+`OPT`, `PAR`, `NOTE`, `RECT`, `LINK`, `BOX` as short aliases silently break the
+parser with an `Expecting 'SPACE', 'NEWLINE', ... got 'and'`-style error. The
+diagram then falls back to a parse-error block showing the message and source.
+
+Safe short aliases: `CLI`, `SRV`, `TAB`, `AGT`, `DB`, `API`, `UI`, `WEB`, `SVC`.
+
+If a mermaid block shows a parse error, read the message — it points at the
+exact token that clashed. To reproduce locally, open `/eink-webview` and call
+`mermaid.render('id', source)` from the Chrome DevTools console.
+
 ## Guidance
 
 - Push to the Boox whenever the user needs to review a plan, architecture, or diff.
-- Prefer a graph or mindmap over a bullet list whenever structure or status matters.
-- Color every node intentionally.
+- Lead with a 1–3 sentence/bullet overview so the reader gets the gist without scrolling.
+- Use bullets, not paragraphs. Use at most one diagram per document.
+- When you do use a diagram, color every node intentionally — but ask yourself first whether bullets would suffice.
 - The `eink-serve` systemd service must be running. Connection refused → `systemctl --user start eink-serve`.
 - The `eink-channel` MCP server must be running — start Claude Code with `--dangerously-load-development-channels server:eink-channel`.
 - You are NOT blocked while waiting — channel events arrive asynchronously.
