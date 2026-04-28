@@ -230,7 +230,10 @@ class PenOverlayTest {
     }
 
     @Test
-    fun scroll_calls_reset_render_buffer_on_re_enable_to_prevent_ghost_line() {
+    fun re_enable_after_finger_up_does_not_reset_render_buffer() {
+        // Close+reopen Onyx's raw drawing layer wedges the native raw reader on some
+        // Boox firmware. setEnabled is the only safe toggle on finger UP — recovery
+        // from a stuck reader is the watchdog's job, not the per-touch path.
         val buf = StrokeBuffer()
         val mock = MockPenController(buf)
         val webView = buildFakeWebView()
@@ -242,16 +245,11 @@ class PenOverlayTest {
         overlay.init()
 
         mock.simulateStroke(listOf(20f to 60f, 180f to 60f))
-        assertEquals("No reset before any scroll", 0, mock.renderBufferResetCount)
-
         webView.dispatchTouchEvent(buildFingerEvent(MotionEvent.ACTION_DOWN))
-        assertEquals("Disable must not trigger reset", 0, mock.renderBufferResetCount)
-
         webView.dispatchTouchEvent(buildFingerEvent(MotionEvent.ACTION_UP))
-        assertEquals(
-            "Re-enable after scroll must call resetRenderBuffer to flush stored stylus position",
-            1, mock.renderBufferResetCount,
-        )
+
+        assertEquals("Re-enable must NOT reset render buffer", 0, mock.renderBufferResetCount)
+        assertTrue("Re-enable must turn drawing back on", mock.drawingEnabled)
     }
 
     @Test
@@ -482,12 +480,13 @@ class PenOverlayTest {
     }
 
     @Test
-    fun finger_cancel_resets_render_buffer() {
+    fun finger_cancel_does_not_reset_render_buffer() {
+        // See re_enable_after_finger_up_does_not_reset_render_buffer — same contract.
         val (overlay, _, mock) = buildOverlayWithInit()
         val webView = overlay.webView
         webView.dispatchTouchEvent(buildFingerEvent(MotionEvent.ACTION_DOWN))
         webView.dispatchTouchEvent(buildFingerEvent(MotionEvent.ACTION_CANCEL))
-        assertEquals("Cancel must reset render buffer to flush ghost positions", 1, mock.renderBufferResetCount)
+        assertEquals("Cancel must NOT reset render buffer", 0, mock.renderBufferResetCount)
     }
 
     // ── multiple scroll cycles ────────────────────────────────────────────────

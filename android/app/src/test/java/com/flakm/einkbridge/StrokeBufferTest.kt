@@ -258,6 +258,115 @@ class StrokeBufferTest {
         assertEquals("[]", buf.toJson())
     }
 
+    // --- Pressure (variable-thickness strokes) ---
+
+    @Test fun pressureRoundTripThroughJson() {
+        buf.begin(0f, 0f, 3f, pressure = 0.1f)
+        buf.addPoint(10f, 10f, 0.5f)
+        buf.end(20f, 20f, 0.9f)
+
+        // commit() normalizes [0.1, 0.5, 0.9] → [0.0, 0.5, 1.0] (linear rescale).
+        val stored = buf.strokes[0].pressures
+        assertEquals(3, stored.size)
+        assertEquals(0f, stored.first(), 1e-4f)
+        assertEquals(1f, stored.last(), 1e-4f)
+
+        val restored = StrokeBuffer()
+        restored.loadJson(buf.toJson())
+        assertEquals(stored, restored.strokes[0].pressures)
+    }
+
+    @Test fun commitNormalizesRawPressureRange() {
+        // Raw hardware values well above the 0..1 range normalize linearly to [0..1].
+        buf.begin(0f, 0f, 3f, pressure = 1000f)
+        buf.addPoint(10f, 10f, 2500f)
+        buf.end(20f, 20f, 4000f)
+        val ps = buf.strokes[0].pressures
+        assertEquals(0f, ps[0], 1e-4f)
+        assertEquals(0.5f, ps[1], 1e-4f)
+        assertEquals(1f, ps[2], 1e-4f)
+    }
+
+    @Test fun commitCollapsesUniformPressureToNeutral() {
+        buf.begin(0f, 0f, 3f, pressure = 1500f)
+        buf.addPoint(10f, 10f, 1500f)
+        buf.end(20f, 20f, 1500f)
+        assertEquals(List(3) { 0.5f }, buf.strokes[0].pressures)
+    }
+
+    @Test fun normalizeStrokePressuresHelper() {
+        assertEquals(listOf(0f, 0.5f, 1f), normalizeStrokePressures(listOf(10f, 15f, 20f)))
+        assertEquals(listOf(0.5f, 0.5f), normalizeStrokePressures(listOf(7f, 7f)))
+        assertTrue(normalizeStrokePressures(emptyList()).isEmpty())
+    }
+
+    @Test fun allStrokesNormalizesInProgressStroke() {
+        buf.begin(0f, 0f, 3f, pressure = 100f)
+        buf.addPoint(5f, 5f, 200f)
+        buf.addPoint(10f, 10f, 400f)
+        // stroke not yet committed
+        val live = buf.allStrokes()
+        assertEquals(1, live.size)
+        val ps = live[0].pressures
+        assertEquals(3, ps.size)
+        assertEquals(0f, ps.first(), 1e-4f)
+        assertEquals(1f, ps.last(), 1e-4f)
+    }
+
+    @Test fun loadJsonTolerantOfMissingPressureKey() {
+        val legacy = """[{"w":3.0,"pts":[[0,0],[10,10]]}]"""
+        buf.loadJson(legacy)
+        assertEquals(1, buf.size)
+        assertTrue(buf.strokes[0].pressures.isEmpty())
+    }
+
+    @Test fun loadJsonDropsMismatchedPressureArray() {
+        val badLen = """[{"w":3.0,"pts":[[0,0],[10,10],[20,20]],"p":[0.5,0.5]}]"""
+        buf.loadJson(badLen)
+        assertTrue(buf.strokes[0].pressures.isEmpty())
+    }
+
+    @Test fun noPressureWhenBeginWithoutIt() {
+        buf.begin(0f, 0f)
+        buf.addPoint(10f, 10f, 0.9f) // ignored because begin had no pressure
+        buf.end(20f, 20f)
+        assertTrue(buf.strokes[0].pressures.isEmpty())
+    }
+
+    @Test fun toJsonOmitsPressureKeyWhenEmpty() {
+        buf.begin(0f, 0f)
+        buf.end(10f, 10f)
+        assertFalse(buf.toJson().contains("\"p\""))
+    }
+
+    @Test fun effectiveWidthMapsMidpointToBase() {
+        assertEquals(10f, effectiveStrokeWidth(10f, 0.5f), 1e-4f)
+    }
+
+    @Test fun effectiveWidthClampsOutOfRange() {
+        assertEquals(10f * PRESSURE_MIN_SCALE, effectiveStrokeWidth(10f, -1f), 1e-4f)
+        assertEquals(10f * PRESSURE_MAX_SCALE, effectiveStrokeWidth(10f, 2f), 1e-4f)
+    }
+
+    @Test fun annotationsToJsonEmitsPressuresOnlyWhenPresent() {
+        buf.begin(0f, 0f, 3f, pressure = 0.2f)
+        buf.end(10f, 10f, 0.8f)
+        val withP = annotationsToJson(
+            listOf(StrokeGroup(anchor = null, strokes = buf.strokes)),
+            emptyList(),
+        )
+        assertTrue(withP.contains("\"pressures\""))
+
+        val plainBuf = StrokeBuffer()
+        plainBuf.begin(0f, 0f)
+        plainBuf.end(10f, 10f)
+        val withoutP = annotationsToJson(
+            listOf(StrokeGroup(anchor = null, strokes = plainBuf.strokes)),
+            emptyList(),
+        )
+        assertFalse(withoutP.contains("\"pressures\""))
+    }
+
     private fun stroke(b: StrokeBuffer) {
         b.begin(0f, 0f)
         b.addPoint(5f, 5f)

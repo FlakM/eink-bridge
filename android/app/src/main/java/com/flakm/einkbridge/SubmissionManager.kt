@@ -61,13 +61,20 @@ internal class SubmissionManager(private val client: OkHttpClient) {
         sessionId: String,
         annotationsJson: String,
     ): Boolean {
+        val url = "$serverUrl/api/sessions/$sessionId/request_update"
         val body = """{"annotations":$annotationsJson}"""
+        Log.i(TAG, "requestUpdate POST $url")
         return try {
             val request = Request.Builder()
-                .url("$serverUrl/api/sessions/$sessionId/request_update")
+                .url(url)
                 .post(body.toRequestBody("application/json".toMediaType()))
                 .build()
-            client.newCall(request).execute().isSuccessful
-        } catch (_: Exception) { false }
+            val response = client.newCall(request).execute()
+            Log.i(TAG, "requestUpdate response code=${response.code}")
+            response.isSuccessful
+        } catch (e: Exception) {
+            Log.e(TAG, "requestUpdate exception: ${e.javaClass.simpleName}: ${e.message}")
+            false
+        }
     }
 }

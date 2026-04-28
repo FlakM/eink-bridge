@@ -15,7 +15,7 @@ internal class SessionRepository(context: Context) {
     }
 
     fun pushgatewayUrl(): String =
-        prefs.getString("pushgateway_url", "") ?: ""
+        prefs.getString("pushgateway_url", "http://odroid:9091") ?: "http://odroid:9091"
 
     fun savePushgatewayUrl(url: String) {
         prefs.edit().putString("pushgateway_url", url).apply()

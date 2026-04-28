@@ -19,6 +19,12 @@ internal class StrokeView @JvmOverloads constructor(
     internal var strokes: List<Stroke> = emptyList()
         private set
     private var transform = ViewTransform()
+    /**
+     * When set, [onDraw] pulls the current scroll/scale from this lambda instead of the
+     * cached [transform] field. Lets the overlay track a scrolling `WebView` without waiting
+     * for the `OnScrollChangeListener` callback, which otherwise lags a frame on e-paper.
+     */
+    internal var transformProvider: (() -> ViewTransform)? = null
     private var bindGroups: List<BindGroup> = emptyList()
     private var ocrResults: List<OcrResult> = emptyList()
     private var bindPathPoints: List<Pair<Float, Float>>? = null
@@ -145,6 +151,13 @@ internal class StrokeView @JvmOverloads constructor(
         invalidate()
     }
 
+    /** Lightweight toggle for just the annotation-label visibility flag. */
+    fun setAnnotationModeOnly(active: Boolean) {
+        if (annotationMode == active) return
+        annotationMode = active
+        invalidate()
+    }
+
     fun setBindPath(path: List<Pair<Float, Float>>?) {
         bindPathPoints = path
         invalidate()
@@ -220,7 +233,7 @@ internal class StrokeView @JvmOverloads constructor(
     }
 
     override fun onDraw(canvas: Canvas) {
-        val t = transform
+        val t = transformProvider?.invoke() ?: transform
         val expanded = expandedGroupIds
 
         // Build stroke → group highlight and stroke offset lookups
@@ -245,13 +258,19 @@ internal class StrokeView @JvmOverloads constructor(
             val hlColor = highlightedStrokes[idx]
             val off = strokeOffsetMap[idx] ?: (0f to 0f)
             strokePaint.color = hlColor ?: stroke.color
-            val baseWidth = t.docToScreenWidth(stroke.width) * widthScale
-            strokePaint.strokeWidth = if (hlColor != null) baseWidth * 1.5f else baseWidth
+            val rawBase = t.docToScreenWidth(stroke.width) * widthScale
+            val baseWidth = if (hlColor != null) rawBase * 1.5f else rawBase
+            val hasPressure = stroke.pressures.size == stroke.points.size
+            if (!hasPressure) strokePaint.strokeWidth = baseWidth
             var prevX = t.docToScreenX(stroke.points[0].first + off.first)
             var prevY = t.docToScreenY(stroke.points[0].second + off.second)
             for (i in 1 until stroke.points.size) {
                 val curX = t.docToScreenX(stroke.points[i].first + off.first)
                 val curY = t.docToScreenY(stroke.points[i].second + off.second)
+                if (hasPressure) {
+                    val avgP = (stroke.pressures[i - 1] + stroke.pressures[i]) / 2f
+                    strokePaint.strokeWidth = effectiveStrokeWidth(baseWidth, avgP)
+                }
                 canvas.drawLine(prevX, prevY, curX, curY, strokePaint)
                 prevX = curX
                 prevY = curY

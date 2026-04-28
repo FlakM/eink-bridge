@@ -81,8 +81,11 @@ internal class OnyxPenController(
     private var moveCount = 0
     private var lastLimitRect: Rect? = null
     private var lastExcludeRects: List<Rect> = emptyList()
-    private var currentStyle: Int = TouchHelper.STROKE_STYLE_PENCIL
+    private var currentStyle: Int = TouchHelper.STROKE_STYLE_FOUNTAIN
     private var pendingReEnable: Runnable? = null
+
+    /** Monotonic ms timestamp of the last Onyx raw callback we saw (begin/move/end). */
+    @Volatile internal var lastRawCallbackMs: Long = 0L
 
     private fun setEpdFastDraw() {
         val v = penViewRef?.get() ?: return
@@ -95,6 +98,7 @@ internal class OnyxPenController(
 
     private val callback = object : RawInputCallback() {
         override fun onBeginRawDrawing(b: Boolean, tp: TouchPoint) {
+            lastRawCallbackMs = System.currentTimeMillis()
             moveCount = 0
             setEpdFastDraw()
             Log.d(DRAW_TAG, "onBeginRawDrawing eraseMode=$eraseMode tp=(${tp.x},${tp.y}) bufSize=${buf.size}")
@@ -106,11 +110,12 @@ internal class OnyxPenController(
                     currentWidth = it
                     pendingWidth = null
                 }
-                buf.begin(tp.x, tp.y, currentWidth, getTransform())
+                buf.begin(tp.x, tp.y, currentWidth, getTransform(), pressure = tp.pressure)
                 onStrokeProgress?.invoke()
             }
         }
         override fun onEndRawDrawing(b: Boolean, tp: TouchPoint) {
+            lastRawCallbackMs = System.currentTimeMillis()
             Log.d(DRAW_TAG, "onEndRawDrawing eraseMode=$eraseMode bufSize=${buf.size} movePoints=$moveCount")
             if (eraseMode) {
                 eraserPath.add(tp.x to tp.y)
@@ -121,6 +126,9 @@ internal class OnyxPenController(
                 onErasePath?.invoke(path, t)
                 onEraseApplied(removed)
             } else {
+                buf.currentRawPressureRange()?.let { (lo, hi) ->
+                    Log.d(DRAW_TAG, "stroke committed: rawPressureRange=[$lo..$hi] movePoints=$moveCount")
+                }
                 buf.commit()
                 onStrokeProgress?.invoke()
                 onStrokeCommitted?.invoke()
@@ -129,8 +137,9 @@ internal class OnyxPenController(
             setEpdFullColor()
         }
         override fun onRawDrawingTouchPointMoveReceived(tp: TouchPoint) {
+            lastRawCallbackMs = System.currentTimeMillis()
             moveCount++
-            if (eraseMode) eraserPath.add(tp.x to tp.y) else buf.addPoint(tp.x, tp.y)
+            if (eraseMode) eraserPath.add(tp.x to tp.y) else buf.addPoint(tp.x, tp.y, tp.pressure)
             if (moveCount % 3 == 0) onStrokeProgress?.invoke()
         }
         override fun onRawDrawingTouchPointListReceived(list: TouchPointList) {
@@ -184,7 +193,7 @@ internal class OnyxPenController(
         penViewRef = java.lang.ref.WeakReference(view)
         lastLimitRect = Rect(limitRect)
         lastExcludeRects = excludeRects.toList()
-        currentStyle = TouchHelper.STROKE_STYLE_PENCIL
+        currentStyle = TouchHelper.STROKE_STYLE_FOUNTAIN
         helper.setStrokeWidth(currentWidth)
             .setLimitRect(limitRect, excludeRects)
             .openRawDrawing()
@@ -233,6 +242,31 @@ internal class OnyxPenController(
         helper.setRawDrawingRenderEnabled(false)
         helper.setStrokeStyle(currentStyle)
         helper.setRawDrawingEnabled(true)
+    }
+
+    /**
+     * Nuclear recovery: destroys the current [TouchHelper] instance and allocates a fresh one.
+     * Used when the ordinary close+reopen dance in [resetRenderBuffer] is not enough to revive
+     * Onyx's native raw input reader — observed after focus/surface churn around OCR overlays.
+     */
+    internal fun recreateHelper() {
+        val view = penViewRef?.get() ?: return
+        Log.w(DRAW_TAG, "recreateHelper: nuclear reset of TouchHelper", Throwable("recreate stacktrace"))
+        cancelPendingReEnable()
+        touchHelper?.let { old ->
+            runCatching { old.setRawDrawingEnabled(false) }
+            runCatching { old.closeRawDrawing() }
+        }
+        touchHelper = null
+        val helper = TouchHelper.create(view, callback)
+        touchHelper = helper
+        lastLimitRect?.let { helper.setLimitRect(it, lastExcludeRects) }
+        helper.setStrokeWidth(currentWidth)
+        helper.openRawDrawing()
+        helper.setRawDrawingRenderEnabled(false)
+        helper.setStrokeStyle(currentStyle)
+        helper.setRawDrawingEnabled(true)
+        lastRawCallbackMs = System.currentTimeMillis()
     }
 
     override fun close() {
@@ -329,8 +363,13 @@ internal class PenOverlay(
 
     var annotationMode = false
         set(value) {
+            if (field == value) return
             field = value
-            notifyStrokeView()
+            // Lightweight path: only flip the label-visibility flag on the overlay. DO NOT
+            // go through notifyStrokeView() — the heavy update() fans out to the full view
+            // (bind groups, ocr results, label offsets, transform) and has been observed to
+            // cascade into view-tree invalidations that wedge Onyx's raw input reader.
+            strokeView?.setAnnotationModeOnly(value || isBindMode)
         }
 
     private fun scheduleOcr() {
@@ -368,8 +407,15 @@ internal class PenOverlay(
             v: View, left: Int, top: Int, right: Int, bottom: Int,
             oldLeft: Int, oldTop: Int, oldRight: Int, oldBottom: Int,
         ) {
+            val isExclude = v === excludeView
+            val boundsChanged = left != oldLeft || top != oldTop || right != oldRight || bottom != oldBottom
+            Log.d(
+                "EinkDraw",
+                "onLayoutChange isExclude=$isExclude bounds=($left,$top,$right,$bottom) " +
+                    "oldBounds=($oldLeft,$oldTop,$oldRight,$oldBottom) boundsChanged=$boundsChanged initialized=$initialized",
+            )
             if (!initialized) maybeInit()
-            else if (v === excludeView) refreshExcludeRects()
+            else if (isExclude && boundsChanged) refreshExcludeRects()
         }
     }
 
@@ -398,8 +444,54 @@ internal class PenOverlay(
                 Log.d(
                     "EinkDraw",
                     "touchRouter STYLUS actionMasked=${event.actionMasked} hasPen=$hasPen " +
-                        "toolTypes=$toolTypes bufSize=${buf.size}"
+                        "toolTypes=$toolTypes bufSize=${buf.size} fingerDown=$fingerDown"
                 )
+            }
+            // Stylus contact proves no finger is down. If [fingerDown] is still stuck true
+            // (e.g. a finger-UP event was eaten by a label tap or a WebView nav), recover it
+            // here so drawing doesn't silently die after OCR labels appear.
+            if (hasPen && fingerDown) {
+                Log.w("EinkDraw", "touchRouter: clearing stuck fingerDown on stylus event")
+                fingerDown = false
+                applyDrawingState()
+            }
+            // Watchdog: on a stylus DOWN, schedule a short-delayed check. If Onyx's raw input
+            // reader does not fire a callback within the window, the raw layer is stuck (seen
+            // after OCR overlay visibility changes and annotation toggles — likely Onyx SDK
+            // focus/surface glitch).
+            //
+            // First time: try [resetRenderBuffer] (close+reopen same TouchHelper).
+            // If that didn't revive the reader and the watchdog fires again within
+            // [RAW_WATCHDOG_ESCALATE_MS], escalate to [recreateHelper] (destroy + build new
+            // TouchHelper). Some Boox firmware wedges the native reader in a way that only a
+            // full recreate can unstick.
+            if (hasPen && event.actionMasked == MotionEvent.ACTION_DOWN) {
+                (controller as? OnyxPenController)?.let { ctrl ->
+                    val lastAtDown = ctrl.lastRawCallbackMs
+                    webView.postDelayed({
+                        val stillInitialized = initialized
+                        val shouldDraw = !isBindMode && !isSelectMode && !fingerDown && !paused
+                        if (stillInitialized && shouldDraw && ctrl.lastRawCallbackMs <= lastAtDown) {
+                            val now = System.currentTimeMillis()
+                            val softResetStillFailing =
+                                now - lastRawWatchdogResetMs < RAW_WATCHDOG_ESCALATE_MS
+                            if (softResetStillFailing) {
+                                Log.w(
+                                    "EinkDraw",
+                                    "watchdog: soft reset didn't help — recreating TouchHelper",
+                                )
+                                ctrl.recreateHelper()
+                            } else {
+                                Log.w(
+                                    "EinkDraw",
+                                    "watchdog: raw reader silent ${RAW_WATCHDOG_MS}ms after stylus DOWN — resetting",
+                                )
+                                ctrl.resetRenderBuffer()
+                            }
+                            lastRawWatchdogResetMs = now
+                        }
+                    }, RAW_WATCHDOG_MS)
+                }
             }
             hasPen
         }
@@ -407,8 +499,33 @@ internal class PenOverlay(
 
     private val scrollListener = object : View.OnScrollChangeListener {
         override fun onScrollChange(v: View, scrollX: Int, scrollY: Int, oldScrollX: Int, oldScrollY: Int) {
-            strokeView?.updateTransform(currentTransform())
+            // The actual transform is pulled lazily by [StrokeView.transformProvider]; we only
+            // need to mark the overlay dirty so the next draw pass picks up the new scroll.
+            strokeView?.invalidate()
         }
+    }
+
+    private var lastRawWatchdogResetMs = 0L
+    private var lastScrollX = Int.MIN_VALUE
+    private var lastScrollY = Int.MIN_VALUE
+
+    /**
+     * Runs on every UI tree pre-draw. If the WebView has scrolled since the last pass, mark
+     * [strokeView] dirty so its next draw reflects the new scroll — catches scroll changes
+     * that arrive outside `OnScrollChangeListener` (fling frames, programmatic scrolls).
+     *
+     * This closed the one-frame lag between WebView content and StrokeView overlay that was
+     * very visible on e-paper's slow refresh, especially when pill labels are visible.
+     */
+    private val scrollPreDrawListener = android.view.ViewTreeObserver.OnPreDrawListener {
+        val sx = webView.scrollX
+        val sy = webView.scrollY
+        if (sx != lastScrollX || sy != lastScrollY) {
+            lastScrollX = sx
+            lastScrollY = sy
+            strokeView?.invalidate()
+        }
+        true
     }
 
     @SuppressLint("ClickableViewAccessibility")
@@ -417,6 +534,8 @@ internal class PenOverlay(
         excludeView?.addOnLayoutChangeListener(layoutListener)
         webView.setOnTouchListener(touchRouter)
         webView.setOnScrollChangeListener(scrollListener)
+        strokeView?.transformProvider = { currentTransform() }
+        webView.viewTreeObserver.addOnPreDrawListener(scrollPreDrawListener)
         setupScaleTracker()
         maybeInit()
         if (!buf.isEmpty) notifyStrokeView()
@@ -564,7 +683,12 @@ internal class PenOverlay(
 
     private fun refreshExcludeRects() {
         val limit = visibleRect() ?: return
-        controller.updateLimitRect(limit, buildExcludeRects(limit))
+        val excludes = buildExcludeRects(limit)
+        Log.d(
+            "EinkDraw",
+            "refreshExcludeRects limit=$limit excludes=$excludes excludeViewH=${excludeView?.height}",
+        )
+        controller.updateLimitRect(limit, excludes)
     }
 
     private fun visibleRect(): Rect? {
@@ -605,7 +729,7 @@ internal class PenOverlay(
      * — close+reopen between strokes causes the Onyx SDK to drop just-committed strokes from the
      * visible layer, making new letters vanish mid-word.
      */
-    private fun applyDrawingState(reset: Boolean = false) {
+    private fun applyDrawingState() {
         if (!initialized) {
             Log.d("EinkDraw", "applyDrawingState SKIP initialized=false")
             return
@@ -613,17 +737,11 @@ internal class PenOverlay(
         val shouldDraw = !isBindMode && !isSelectMode && !fingerDown && !paused
         Log.d(
             "EinkDraw",
-            "applyDrawingState reset=$reset shouldDraw=$shouldDraw " +
+            "applyDrawingState shouldDraw=$shouldDraw " +
                 "isBindMode=$isBindMode isSelectMode=$isSelectMode fingerDown=$fingerDown paused=$paused " +
                 "bufSize=${buf.size}"
         )
-        if (!shouldDraw) {
-            controller.setEnabled(false)
-        } else if (reset) {
-            controller.resetRenderBuffer()
-        } else {
-            controller.setEnabled(true)
-        }
+        controller.setEnabled(shouldDraw)
     }
 
     fun setStrokeWidth(width: Float) { controller.setStrokeWidth(width) }
@@ -697,7 +815,6 @@ internal class PenOverlay(
     fun setMode(mode: ToolMode) {
         val wasBind = isBindMode
         val wasSelect = isSelectMode
-        val modeChanged = (wasBind != (mode == ToolMode.TAG)) || (wasSelect != (mode == ToolMode.MOVE))
         isBindMode = (mode == ToolMode.TAG)
         isSelectMode = (mode == ToolMode.MOVE)
         if (wasBind && !isBindMode) {
@@ -708,9 +825,10 @@ internal class PenOverlay(
             selectedLabel = null
             onGroupSelectionChanged?.invoke(null)
         }
-        // Reset the render layer on mode transitions to clear any stale finger-drawn
-        // bind-mode lasso path or palm-touch artifacts.
-        applyDrawingState(reset = modeChanged)
+        // Mode transitions MUST NOT close+reopen Onyx's raw drawing layer — the close+reopen
+        // sequence is fragile on some Boox firmware and has been observed to wedge the native
+        // raw input reader. Only [setEnabled] is safe to toggle here.
+        applyDrawingState()
         notifyStrokeView()
     }
 
@@ -1099,6 +1217,8 @@ internal class PenOverlay(
         excludeView?.removeOnLayoutChangeListener(layoutListener)
         webView.setOnTouchListener(null)
         webView.setOnScrollChangeListener(null as View.OnScrollChangeListener?)
+        webView.viewTreeObserver.removeOnPreDrawListener(scrollPreDrawListener)
+        strokeView?.transformProvider = null
         controller.close()
         initialized = false
     }
@@ -1107,6 +1227,10 @@ internal class PenOverlay(
         private const val SCROLL_BLOCK_MS = 500L
         private const val MERGE_THRESHOLD_DOC = 200f
         private const val ERASER_BIND_RADIUS = 40f
+        /** Watchdog: if Onyx raw callbacks don't fire within this window after a stylus DOWN, reset. */
+        private const val RAW_WATCHDOG_MS = 150L
+        /** Escalate from soft reset to full TouchHelper recreate if this long since the last reset. */
+        private const val RAW_WATCHDOG_ESCALATE_MS = 5000L
         private val GROUP_PALETTE = intArrayOf(
             0xFFe74c3c.toInt(), 0xFF2196f3.toInt(), 0xFF4caf50.toInt(),
             0xFFff9800.toInt(), 0xFF9c27b0.toInt(), 0xFF009688.toInt(),
@@ -1135,12 +1259,18 @@ internal fun renderStrokesToPng(
 
     for (stroke in strokes) {
         if (stroke.points.size < 2) continue
-        paint.strokeWidth = transform.docToScreenWidth(stroke.width)
+        val baseWidth = transform.docToScreenWidth(stroke.width)
+        val hasPressure = stroke.pressures.size == stroke.points.size
+        if (!hasPressure) paint.strokeWidth = baseWidth
         var prevX = transform.docToScreenX(stroke.points[0].first)
         var prevY = transform.docToScreenY(stroke.points[0].second)
         for (i in 1 until stroke.points.size) {
             val curX = transform.docToScreenX(stroke.points[i].first)
             val curY = transform.docToScreenY(stroke.points[i].second)
+            if (hasPressure) {
+                val avgP = (stroke.pressures[i - 1] + stroke.pressures[i]) / 2f
+                paint.strokeWidth = effectiveStrokeWidth(baseWidth, avgP)
+            }
             canvas.drawLine(prevX, prevY, curX, curY, paint)
             prevX = curX
             prevY = curY

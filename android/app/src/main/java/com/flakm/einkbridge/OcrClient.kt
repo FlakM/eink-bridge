@@ -50,16 +50,25 @@ internal class OcrClient(private val getServerUrl: () -> String) {
     private suspend fun recognizeViaServer(strokes: List<Stroke>): String? =
         withContext(Dispatchers.IO) {
             val strokesArr = JSONArray()
+            val pressuresArr = JSONArray()
+            var anyPressures = false
             for (stroke in strokes) {
                 val pts = JSONArray()
                 for ((x, y) in stroke.points) {
                     pts.put(JSONArray().apply { put(x.toDouble()); put(y.toDouble()) })
                 }
                 strokesArr.put(pts)
+                val ps = JSONArray()
+                if (stroke.pressures.size == stroke.points.size) {
+                    for (p in stroke.pressures) ps.put(p.toDouble())
+                    anyPressures = true
+                }
+                pressuresArr.put(ps)
             }
             try {
-                val body = JSONObject().put("strokes", strokesArr).toString()
-                    .toRequestBody("application/json".toMediaType())
+                val payload = JSONObject().put("strokes", strokesArr)
+                if (anyPressures) payload.put("pressures", pressuresArr)
+                val body = payload.toString().toRequestBody("application/json".toMediaType())
                 val request = Request.Builder()
                     .url("${getServerUrl()}/api/ocr")
                     .post(body)

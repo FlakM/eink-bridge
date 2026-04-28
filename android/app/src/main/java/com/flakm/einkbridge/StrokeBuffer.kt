@@ -7,7 +7,46 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sqrt
 
-internal data class Stroke(val points: List<Pair<Float, Float>>, val width: Float, val color: Int = Color.BLACK)
+internal data class Stroke(
+    val points: List<Pair<Float, Float>>,
+    val width: Float,
+    val color: Int = Color.BLACK,
+    val pressures: List<Float> = emptyList(),
+)
+
+internal const val PRESSURE_MIN_SCALE = 0.4f
+internal const val PRESSURE_MAX_SCALE = 1.6f
+
+/** Maps a 0..1 pressure reading to an effective stroke width. Clamps out-of-range inputs. */
+internal fun effectiveStrokeWidth(base: Float, pressure: Float): Float {
+    val p = if (pressure.isNaN()) 0.5f else pressure.coerceIn(0f, 1f)
+    return base * (PRESSURE_MIN_SCALE + (PRESSURE_MAX_SCALE - PRESSURE_MIN_SCALE) * p)
+}
+
+/**
+ * Per-stroke linear rescaling of raw pressures to [0..1].
+ *
+ * Onyx reports stylus pressure via `TouchPoint.pressure`, but the effective range is
+ * device-specific — on some Boox hardware the raw value is the digitiser integer
+ * (0..4096-ish), not Android's documented `MotionEvent.getPressure()` 0..1. A blind
+ * `clamp(0, 1)` would pin every point to 1.0 and produce a uniformly fat stroke.
+ *
+ * Rescaling each stroke's values [min..max] → [0..1] keeps the taper visible
+ * regardless of the absolute range. Uniform-pressure strokes collapse to 0.5
+ * (neutral width) instead of max width.
+ */
+internal fun normalizeStrokePressures(pressures: List<Float>): List<Float> {
+    if (pressures.isEmpty()) return pressures
+    var lo = Float.POSITIVE_INFINITY
+    var hi = Float.NEGATIVE_INFINITY
+    for (p in pressures) {
+        if (p < lo) lo = p
+        if (p > hi) hi = p
+    }
+    val span = hi - lo
+    if (span < 1e-4f) return List(pressures.size) { 0.5f }
+    return pressures.map { ((it - lo) / span).coerceIn(0f, 1f) }
+}
 
 internal data class ElementEntry(
     val i: Int,
@@ -80,6 +119,7 @@ internal data class ViewTransform(
 internal class StrokeBuffer {
     private val _strokes = mutableListOf<Stroke>()
     private var currentPoints = mutableListOf<Pair<Float, Float>>()
+    private var currentPressures = mutableListOf<Float>()
     private var currentWidth = 3f
     private var currentColor: Int = Color.BLACK
     private var currentTransform = ViewTransform()
@@ -88,36 +128,69 @@ internal class StrokeBuffer {
     val isEmpty: Boolean get() = _strokes.isEmpty() && currentPoints.size < 2
     val size: Int get() = _strokes.size
 
+    /** The in-progress stroke's raw pressures — used by debug logging before [commit] normalizes them. */
+    internal fun currentRawPressureRange(): Pair<Float, Float>? {
+        if (currentPressures.isEmpty()) return null
+        var lo = Float.POSITIVE_INFINITY
+        var hi = Float.NEGATIVE_INFINITY
+        for (p in currentPressures) {
+            if (p < lo) lo = p
+            if (p > hi) hi = p
+        }
+        return lo to hi
+    }
+
     fun setColor(color: Int) { currentColor = color }
 
     /** Returns committed strokes plus the in-progress stroke (if any). */
     fun allStrokes(): List<Stroke> {
         if (currentPoints.size < 2) return _strokes.toList()
-        return _strokes + Stroke(currentPoints.toList(), currentWidth, currentColor)
+        val ps = if (currentPressures.size == currentPoints.size) {
+            normalizeStrokePressures(currentPressures)
+        } else emptyList()
+        return _strokes + Stroke(currentPoints.toList(), currentWidth, currentColor, ps)
     }
 
-    fun begin(x: Float, y: Float, width: Float = 3f, transform: ViewTransform = ViewTransform()) {
+    fun begin(
+        x: Float,
+        y: Float,
+        width: Float = 3f,
+        transform: ViewTransform = ViewTransform(),
+        pressure: Float = Float.NaN,
+    ) {
         currentTransform = transform
         currentWidth = width / transform.scale
         val docPt = transform.screenToDocX(x) to transform.screenToDocY(y)
         currentPoints = mutableListOf(docPt)
+        currentPressures = mutableListOf()
+        if (!pressure.isNaN()) currentPressures.add(pressure)
     }
 
-    fun addPoint(x: Float, y: Float) {
+    fun addPoint(x: Float, y: Float, pressure: Float = Float.NaN) {
         currentPoints.add(currentTransform.screenToDocX(x) to currentTransform.screenToDocY(y))
+        if (!pressure.isNaN() && currentPressures.size == currentPoints.size - 1) {
+            currentPressures.add(pressure)
+        }
     }
 
-    fun end(x: Float, y: Float) {
+    fun end(x: Float, y: Float, pressure: Float = Float.NaN) {
         val docPt = currentTransform.screenToDocX(x) to currentTransform.screenToDocY(y)
         currentPoints.add(docPt)
+        if (!pressure.isNaN() && currentPressures.size == currentPoints.size - 1) {
+            currentPressures.add(pressure)
+        }
         commit()
     }
 
     fun commit() {
         if (currentPoints.size > 1) {
-            _strokes.add(Stroke(currentPoints.toList(), currentWidth, currentColor))
+            val ps = if (currentPressures.size == currentPoints.size) {
+                normalizeStrokePressures(currentPressures)
+            } else emptyList()
+            _strokes.add(Stroke(currentPoints.toList(), currentWidth, currentColor, ps))
         }
         currentPoints = mutableListOf()
+        currentPressures = mutableListOf()
     }
 
     fun removeStrokes(indices: Collection<Int>) {
@@ -141,6 +214,7 @@ internal class StrokeBuffer {
     fun clear() {
         _strokes.clear()
         currentPoints.clear()
+        currentPressures.clear()
     }
 
     /**
@@ -181,6 +255,11 @@ internal class StrokeBuffer {
                 pts.put(JSONArray().apply { put(x.toDouble()); put(y.toDouble()) })
             }
             obj.put("pts", pts)
+            if (stroke.pressures.isNotEmpty()) {
+                val ps = JSONArray()
+                for (p in stroke.pressures) ps.put(p.toDouble())
+                obj.put("p", ps)
+            }
             arr.put(obj)
         }
         return arr.toString()
@@ -189,6 +268,7 @@ internal class StrokeBuffer {
     fun loadJson(json: String) {
         _strokes.clear()
         currentPoints.clear()
+        currentPressures.clear()
         val arr = JSONArray(json)
         for (i in 0 until arr.length()) {
             val obj = arr.getJSONObject(i)
@@ -200,7 +280,12 @@ internal class StrokeBuffer {
                 val p = pts.getJSONArray(j)
                 points.add(p.getDouble(0).toFloat() to p.getDouble(1).toFloat())
             }
-            if (points.size > 1) _strokes.add(Stroke(points, w, color))
+            val pressures = if (obj.has("p")) {
+                val psArr = obj.getJSONArray("p")
+                (0 until psArr.length()).map { psArr.getDouble(it).toFloat() }
+            } else emptyList()
+            val sanePressures = if (pressures.size == points.size) pressures else emptyList()
+            if (points.size > 1) _strokes.add(Stroke(points, w, color, sanePressures))
         }
     }
 }
@@ -376,6 +461,9 @@ internal fun annotationsToJson(groups: List<StrokeGroup>, unanchored: List<Strok
             obj.put("anchor", anchorObj)
         }
         obj.put("strokes", strokesToPointArrays(group.strokes))
+        if (group.strokes.any { it.pressures.isNotEmpty() }) {
+            obj.put("pressures", strokesToPressureArrays(group.strokes))
+        }
         group.recognizedText?.let { obj.put("recognized_text", it) }
         group.color?.let { obj.put("color", it) }
         arr.put(obj)
@@ -383,6 +471,9 @@ internal fun annotationsToJson(groups: List<StrokeGroup>, unanchored: List<Strok
     if (unanchored.isNotEmpty()) {
         val obj = JSONObject()
         obj.put("strokes", strokesToPointArrays(unanchored))
+        if (unanchored.any { it.pressures.isNotEmpty() }) {
+            obj.put("pressures", strokesToPressureArrays(unanchored))
+        }
         arr.put(obj)
     }
     return arr.toString()
@@ -566,6 +657,16 @@ private fun strokesToPointArrays(strokes: List<Stroke>): JSONArray {
             pts.put(JSONArray().apply { put(x.toDouble()); put(y.toDouble()) })
         }
         arr.put(pts)
+    }
+    return arr
+}
+
+private fun strokesToPressureArrays(strokes: List<Stroke>): JSONArray {
+    val arr = JSONArray()
+    for (stroke in strokes) {
+        val ps = JSONArray()
+        for (p in stroke.pressures) ps.put(p.toDouble())
+        arr.put(ps)
     }
     return arr
 }
