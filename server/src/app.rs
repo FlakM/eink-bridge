@@ -212,6 +212,8 @@ async fn openapi_json() -> Json<serde_json::Value> {
 #[derive(Deserialize)]
 struct OcrRequest {
     strokes: Vec<Vec<[f64; 2]>>,
+    #[serde(default)]
+    pressures: Vec<Vec<f64>>,
 }
 
 async fn ocr_strokes(State(state): State<AppState>, Json(body): Json<OcrRequest>) -> Response {
@@ -221,7 +223,10 @@ async fn ocr_strokes(State(state): State<AppState>, Json(body): Json<OcrRequest>
     let strokes = body.strokes.len();
     let points: usize = body.strokes.iter().map(|s| s.len()).sum();
     tracing::info!(strokes, points, "OCR request");
-    match engine.recognize_strokes(&body.strokes).await {
+    match engine
+        .recognize_strokes(&body.strokes, &body.pressures)
+        .await
+    {
         Ok(text) => {
             tracing::info!(strokes, text = %text, "OCR done");
             Json(serde_json::json!({ "text": text })).into_response()
@@ -408,14 +413,33 @@ async fn purge_sessions(State(state): State<AppState>) -> Json<serde_json::Value
     Json(serde_json::json!({ "purged": count }))
 }
 
+#[derive(Deserialize)]
+struct UpdateContentBody {
+    content: String,
+    #[serde(default)]
+    consumed_annotations: Vec<i32>,
+}
+
 async fn update_content(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let content = match String::from_utf8(body.to_vec()) {
-        Ok(s) => s,
-        Err(_) => return bad_request("request body must be valid UTF-8".into()),
+    let (content, consumed_annotations) = if headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.contains("application/json"))
+    {
+        match serde_json::from_slice::<UpdateContentBody>(&body) {
+            Ok(b) => (b.content, b.consumed_annotations),
+            Err(e) => return bad_request(format!("invalid JSON: {e}")),
+        }
+    } else {
+        match String::from_utf8(body.to_vec()) {
+            Ok(s) => (s, vec![]),
+            Err(_) => return bad_request("request body must be valid UTF-8".into()),
+        }
     };
     let version = {
         let mut mgr = state.sessions.write().await;
@@ -423,9 +447,15 @@ async fn update_content(
     };
     match version {
         Some(v) => {
-            tracing::info!(id = %id, version = v, "content updated via HTTP PUT");
+            tracing::info!(id = %id, version = v, consumed = consumed_annotations.len(), "content updated via HTTP PUT");
             state
-                .ws_send(&id, crate::ws::ServerMessage::VersionUpdated { version: v })
+                .ws_send(
+                    &id,
+                    crate::ws::ServerMessage::VersionUpdated {
+                        version: v,
+                        consumed_annotations,
+                    },
+                )
                 .await;
             Json(serde_json::json!({ "version": v })).into_response()
         }
@@ -647,10 +677,11 @@ async fn request_update(
             .map(|g| {
                 let engine = Arc::clone(engine);
                 let strokes = g.strokes.clone();
+                let pressures = g.pressures.clone();
                 let needs_ocr = g.recognized_text.is_none() && !strokes.is_empty();
                 async move {
                     if needs_ocr {
-                        engine.recognize_strokes(&strokes).await.ok()
+                        engine.recognize_strokes(&strokes, &pressures).await.ok()
                     } else {
                         None
                     }
@@ -679,9 +710,10 @@ async fn request_update(
     state.ws_send(&id, msg.clone()).await;
     if let Some(url) = callback_url {
         let (version, annotations) = match msg {
-            crate::ws::ServerMessage::AnnotationResult { version, annotations } => {
-                (version, annotations)
-            }
+            crate::ws::ServerMessage::AnnotationResult {
+                version,
+                annotations,
+            } => (version, annotations),
             _ => unreachable!(),
         };
         tokio::spawn(async move {
@@ -694,12 +726,16 @@ async fn request_update(
                 annotations: Vec<crate::api::AnnotationGroup>,
             }
             let client = reqwest::Client::new();
-            let _ = client.post(&url).json(&AnnotationWebhook {
-                r#type: "annotation_result",
-                id,
-                version,
-                annotations,
-            }).send().await;
+            let _ = client
+                .post(&url)
+                .json(&AnnotationWebhook {
+                    r#type: "annotation_result",
+                    id,
+                    version,
+                    annotations,
+                })
+                .send()
+                .await;
         });
     }
     StatusCode::OK.into_response()

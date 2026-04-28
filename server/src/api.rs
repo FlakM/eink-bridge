@@ -45,6 +45,11 @@ pub struct AnnotationGroup {
     pub anchor: Option<AnnotationAnchor>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub strokes: Vec<Vec<[f64; 2]>>,
+    /// Parallel to `strokes`: `pressures[i][j]` is the 0..1 stylus pressure at `strokes[i][j]`.
+    /// Empty or shorter-than-`strokes` means "no pressure data" and the OCR renderer falls back
+    /// to a constant stroke width.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pressures: Vec<Vec<f64>>,
     #[serde(default)]
     pub recognized_text: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -492,6 +497,10 @@ pub fn openapi_spec() -> serde_json::Value {
                         "strokes": {
                             "type": "array",
                             "description": "Array of strokes, each stroke is an array of [x,y] points"
+                        },
+                        "pressures": {
+                            "type": "array",
+                            "description": "Optional parallel array: per-point 0..1 stylus pressure for each stroke"
                         },
                         "recognized_text": {
                             "type": ["string", "null"]

@@ -23,6 +23,8 @@ pub enum ClientMessage {
 pub enum ServerMessage {
     VersionUpdated {
         version: u32,
+        #[serde(skip_serializing_if = "Vec::is_empty", default)]
+        consumed_annotations: Vec<i32>,
     },
     SessionSubmitted {
         result: Box<SessionResultResponse>,

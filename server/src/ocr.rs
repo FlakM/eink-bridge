@@ -105,7 +105,11 @@ impl OcrEngine {
         Ok(text)
     }
 
-    pub async fn recognize_strokes(&self, strokes: &[Vec<[f64; 2]>]) -> Result<String, String> {
+    pub async fn recognize_strokes(
+        &self,
+        strokes: &[Vec<[f64; 2]>],
+        pressures: &[Vec<f64>],
+    ) -> Result<String, String> {
         if strokes.is_empty() {
             return Ok(String::new());
         }
@@ -115,7 +119,7 @@ impl OcrEngine {
             points = total_points,
             "OCR: rendering strokes"
         );
-        let png = render_strokes_to_png(strokes)?;
+        let png = render_strokes_to_png(strokes, pressures)?;
         self.recognize_image(&png).await
     }
 }
@@ -138,8 +142,22 @@ const BASE_SCALE: f64 = 2.0;
 const MAX_SIDE: u32 = 512;
 const PADDING: u32 = 15;
 const MIN_DIM: u32 = 80;
+const PRESSURE_MIN_SCALE: f64 = 0.4;
+const PRESSURE_MAX_SCALE: f64 = 1.6;
 
-fn render_strokes_to_png(strokes: &[Vec<[f64; 2]>]) -> Result<Vec<u8>, String> {
+fn effective_width(base: f64, pressure: f64) -> f64 {
+    let p = if pressure.is_nan() {
+        0.5
+    } else {
+        pressure.clamp(0.0, 1.0)
+    };
+    base * (PRESSURE_MIN_SCALE + (PRESSURE_MAX_SCALE - PRESSURE_MIN_SCALE) * p)
+}
+
+fn render_strokes_to_png(
+    strokes: &[Vec<[f64; 2]>],
+    pressures: &[Vec<f64>],
+) -> Result<Vec<u8>, String> {
     let (mut min_x, mut min_y) = (f64::MAX, f64::MAX);
     let (mut max_x, mut max_y) = (f64::MIN, f64::MIN);
 
@@ -173,10 +191,19 @@ fn render_strokes_to_png(strokes: &[Vec<[f64; 2]>]) -> Result<Vec<u8>, String> {
 
     let mut img: RgbImage = ImageBuffer::from_pixel(w, h, Rgb([255, 255, 255]));
 
-    for stroke in strokes {
-        for window in stroke.windows(2) {
+    for (si, stroke) in strokes.iter().enumerate() {
+        let stroke_pressures = pressures.get(si);
+        let has_pressure = stroke_pressures.is_some_and(|p| p.len() == stroke.len());
+        for (i, window) in stroke.windows(2).enumerate() {
             let [x0, y0] = window[0];
             let [x1, y1] = window[1];
+            let seg_width = if has_pressure {
+                let ps = stroke_pressures.unwrap();
+                let avg = (ps[i] + ps[i + 1]) * 0.5;
+                effective_width(stroke_width, avg)
+            } else {
+                stroke_width
+            };
             draw_thick_line(
                 &mut img,
                 (
@@ -187,7 +214,7 @@ fn render_strokes_to_png(strokes: &[Vec<[f64; 2]>]) -> Result<Vec<u8>, String> {
                     (x1 - min_x) * scale + PADDING as f64,
                     (y1 - min_y) * scale + PADDING as f64,
                 ),
-                stroke_width,
+                seg_width,
             );
         }
     }
@@ -245,7 +272,7 @@ mod tests {
     #[test]
     fn render_strokes_produces_valid_png() {
         let strokes = vec![vec![[10.0, 10.0], [50.0, 10.0], [50.0, 50.0]]];
-        let png = render_strokes_to_png(&strokes).unwrap();
+        let png = render_strokes_to_png(&strokes, &[]).unwrap();
         assert!(!png.is_empty());
         assert_eq!(&png[..4], &[0x89, 0x50, 0x4E, 0x47]);
     }
@@ -253,14 +280,61 @@ mod tests {
     #[test]
     fn render_empty_strokes_errors() {
         let strokes: Vec<Vec<[f64; 2]>> = vec![];
-        assert!(render_strokes_to_png(&strokes).is_err());
+        assert!(render_strokes_to_png(&strokes, &[]).is_err());
     }
 
     #[test]
     fn render_single_point_stroke() {
         let strokes = vec![vec![[100.0, 100.0]]];
-        let png = render_strokes_to_png(&strokes).unwrap();
+        let png = render_strokes_to_png(&strokes, &[]).unwrap();
         assert!(!png.is_empty());
+    }
+
+    fn count_black_pixels(png: &[u8]) -> usize {
+        let img = image::load_from_memory(png).unwrap().to_rgb8();
+        img.pixels().filter(|p| p.0 == [0, 0, 0]).count()
+    }
+
+    #[test]
+    fn render_high_pressure_draws_more_pixels_than_low() {
+        let stroke = vec![[10.0, 10.0], [60.0, 10.0], [60.0, 60.0], [10.0, 60.0]];
+        let strokes = vec![stroke];
+        let low = vec![vec![0.05_f64; 4]];
+        let high = vec![vec![0.95_f64; 4]];
+        let png_low = render_strokes_to_png(&strokes, &low).unwrap();
+        let png_high = render_strokes_to_png(&strokes, &high).unwrap();
+        let pixels_low = count_black_pixels(&png_low);
+        let pixels_high = count_black_pixels(&png_high);
+        assert!(
+            pixels_high > pixels_low,
+            "expected high-pressure render to have more black pixels than low ({pixels_high} !> {pixels_low})"
+        );
+    }
+
+    #[test]
+    fn render_mismatched_pressure_length_falls_back_to_constant_width() {
+        let strokes = vec![vec![[10.0, 10.0], [50.0, 10.0], [50.0, 50.0]]];
+        let mismatched = vec![vec![0.9_f64]]; // only 1 pressure for 3 points
+        let png_ignored = render_strokes_to_png(&strokes, &mismatched).unwrap();
+        let png_none = render_strokes_to_png(&strokes, &[]).unwrap();
+        assert_eq!(
+            count_black_pixels(&png_ignored),
+            count_black_pixels(&png_none),
+        );
+    }
+
+    #[test]
+    fn effective_width_midpoint_equals_base() {
+        let w = effective_width(10.0, 0.5);
+        assert!((w - 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn effective_width_clamps_out_of_range() {
+        let low = effective_width(10.0, -1.0);
+        let high = effective_width(10.0, 2.0);
+        assert!((low - 4.0).abs() < 1e-9);
+        assert!((high - 16.0).abs() < 1e-9);
     }
 
     #[tokio::test(flavor = "multi_thread")]
