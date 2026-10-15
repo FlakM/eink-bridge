@@ -22,6 +22,7 @@ class WebSocketClient(
     private val retry = Runnable { if (!stopped) connect() }
     private val client = OkHttpClient.Builder()
         .readTimeout(0, TimeUnit.MILLISECONDS)
+        .pingInterval(10, TimeUnit.SECONDS)
         .build()
 
     private var ws: WebSocket? = null

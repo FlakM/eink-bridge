@@ -26,7 +26,7 @@ class DeliveryTests(unittest.TestCase):
                 f"print({'EVENT:ANNOTATION_RESULT ' + json.dumps(e)!r}, flush=True)" for e in events))
             fake.chmod(0o755)
             result = subprocess.run(["python3", str(ROOT / "harness/skills/eink/scripts/watch-feedback.py"),
-                                     "session", "--after-feedback", "old"],
+                                     "session", "--after-feedback", "old", "--ready-file", str(Path(directory)/"ready.json")],
                                     env={**os.environ, "PATH": directory + ":" + os.environ["PATH"]},
                                     capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -36,9 +36,44 @@ class DeliveryTests(unittest.TestCase):
             self.assertNotIn("strokes", event["annotations"][0])
             self.assertNotIn("pressures", event["annotations"][0])
             self.assertNotIn("TIMEOUT", result.stdout)
+            self.assertEqual(json.loads((Path(directory)/"ready.json").read_text())["state"], "event")
+
+    def test_ready_receipt_requires_a_live_handshake_and_observer_cleans_up(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fake = Path(directory)/"eink-review"
+            fake.write_text("#!/usr/bin/env python3\nimport sys,time\nprint('EVENT:WATCH_READY session_id=session',file=sys.stderr,flush=True)\ntime.sleep(30)\n")
+            fake.chmod(0o755)
+            ready = Path(directory)/"ready.json"
+            script = str(ROOT/"harness/skills/eink/scripts/watch-feedback.py")
+            observer = subprocess.Popen(["python3",script,"session","--ready-file",str(ready)],
+                env={**os.environ,"PATH":directory+":"+os.environ["PATH"]},stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+            try:
+                checked = subprocess.run(["python3",script,"--wait-ready",str(ready)],capture_output=True,text=True,timeout=8)
+                self.assertEqual(checked.returncode,0,checked.stderr)
+                self.assertEqual(json.loads(checked.stdout)["state"],"ready")
+                self.assertIsNone(observer.poll())
+                observer.terminate()
+                observer.wait(timeout=5)
+                self.assertEqual(json.loads(ready.read_text())["state"],"ended")
+                checked = subprocess.run(["python3",script,"--wait-ready",str(ready)],capture_output=True,text=True,timeout=2)
+                self.assertNotEqual(checked.returncode,0,"Ended observers must not be announced as connected")
+            finally:
+                if observer.poll() is None:
+                    observer.terminate(); observer.wait(timeout=5)
+                observer.stdout.close(); observer.stderr.close()
+
+    def test_stale_ready_file_cannot_be_reused_as_proof_of_connection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ready=Path(directory)/"ready.json"
+            ready.write_text('{"state":"ready","session_id":"old"}')
+            result=subprocess.run(["python3",str(ROOT/"harness/skills/eink/scripts/watch-feedback.py"),
+                "new","--ready-file",str(ready)],capture_output=True,text=True,timeout=2)
+            self.assertNotEqual(result.returncode,0)
+            self.assertIn("fresh ready file",result.stderr)
 
     def test_claude_subscription_recovers_feedback_sent_before_subscription(self):
-        pending = {"type": "annotation_result", "feedback_id": "recovered", "version": 1, "annotations": []}
+        pending = {"type": "annotation_result", "feedback_id": "recovered", "version": 1,
+                   "annotations": [{"recognized_text":"say more","anchor":None,"strokes":[[[1,2],[3,4]]],"pressures":[[.5,.8]]}]}
         updates = []
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -82,7 +117,12 @@ class DeliveryTests(unittest.TestCase):
                  "arguments": {"session_id": "session"}}})
             messages = [json.loads(lines.get(timeout=10)), json.loads(lines.get(timeout=10))]
             notification = next(m for m in messages if m.get("method") == "notifications/claude/channel")
-            self.assertEqual(json.loads(notification["params"]["content"])["feedback_id"], "recovered")
+            event=json.loads(notification["params"]["content"])
+            self.assertEqual(event["feedback_id"], "recovered")
+            self.assertEqual(event["annotations"][0]["index"],0)
+            self.assertEqual(event["annotations"][0]["stroke_count"],1)
+            self.assertNotIn("strokes",event["annotations"][0])
+            self.assertNotIn("pressures",event["annotations"][0])
             self.assertTrue(any(m.get("id") == 2 for m in messages))
             send({"id": 3, "method": "tools/call", "params": {"name": "update_session", "arguments": {
                 "session_id": "session", "content": "# Fixed", "expected_version": 1,

@@ -34,6 +34,33 @@ class MainActivityTest {
 
     // ── Session list screen ────────────────────────────────────────────────────
 
+    @Test fun documentUpdatesUseSilentLowImportanceChannel() {
+        scenario.onActivity { activity ->
+            val manager = activity.getSystemService(android.app.NotificationManager::class.java)
+            val channel = manager.getNotificationChannel(NOTIFICATION_CHANNEL_ID)
+            assertEquals(android.app.NotificationManager.IMPORTANCE_LOW, channel.importance)
+            assertNull(channel.sound)
+            assertFalse(channel.shouldVibrate())
+            assertFalse(channel.canShowBadge())
+            activity.notifyDocumentUpdated()
+            assertTrue("Foreground updates must not duplicate the inline status", manager.activeNotifications.isEmpty())
+        }
+    }
+
+    @Test fun routineStatusIsSmallNonBlockingAndReplacesPreviousMessage() {
+        scenario.onActivity { activity ->
+            activity.showRoutineStatus("Feedback saved")
+            activity.showRoutineStatus("Document updated")
+            val status = activity.findViewById<android.widget.TextView>(R.id.routineStatus)
+            assertEquals("Document updated", status.text.toString())
+            assertEquals(View.VISIBLE, status.visibility)
+            assertFalse(status.isClickable)
+            assertFalse(status.isFocusable)
+            assertEquals(12f * activity.resources.displayMetrics.scaledDensity, status.textSize, 0.1f)
+            assertNull(org.robolectric.shadows.ShadowToast.getTextOfLatestToast())
+        }
+    }
+
     @Test
     fun sessionListContainerVisibleOnStart() {
         scenario.onActivity { activity ->

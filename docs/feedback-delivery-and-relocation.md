@@ -1,5 +1,14 @@
 # Feedback delivery and ink relocation
 
+## Review intake contract
+
+- The agent establishes **content, purpose, and depth** before creating a session,
+  in one short message. A filename is content, not a review brief.
+- When the prompt already states the goal, scope, and depth, the agent proceeds and
+  reflects the contract instead of re-interviewing the user.
+- Agents skip redundant investigation (content fetch, screenshots, repository work,
+  broad tests) unless it changes the revision or the review needs new information.
+
 ## Delivery contract
 
 - `POST /api/sessions/{id}/request_update` stores the recognized annotation batch
@@ -19,9 +28,26 @@
 - OpenCode uses a one-event background watcher; rearm after each handled event.
   Claude Code can use the same watcher or the MCP channel. Channel subscription
   fetches pending feedback to recover callbacks received before subscription.
+- `GET /api/sessions/{id}/content` returns the current markdown, version, and status
+  so a resumed conversation loads the document without scraping rendered HTML.
 
 The retained state is the latest request, not an unlimited event journal. A new
 request replaces the pending snapshot with the current visible annotations.
+
+## Observer handshake and loop
+
+- Agents confirm a live subscription before telling the user feedback is connected.
+  The portable watcher writes a unique `--ready-file` receipt on the CLI's
+  `EVENT:WATCH_READY` handshake; `--wait-ready` is a bounded local file check, not
+  network polling. `state=ready` is live, `state=event` means a batch already
+  arrived, `state=ended` is never announced as connected.
+- A stale or reused ready file is rejected, and stopping an observer uses only its
+  own receipt PID. Never terminate every `eink-review` process.
+- The CLI observer reconnects with 150 ms exponential backoff (capped at 2 s),
+  treats a 404/410 as a closed review rather than a retry loop, and treats a 20 s
+  silence as a dropped connection so a dead link is noticed quickly.
+- Each delivery path strips raw stroke/pressure arrays and image blobs from agent
+  context (`index` and `stroke_count` summaries replace them).
 
 ## Relocation contract
 
@@ -51,10 +77,23 @@ request replaces the pending snapshot with the current visible annotations.
 
 ```sh
 just test-one --test=ws_test
+just test-one observer_reconnects_without_a_one_second_pause
 just test-android
 just test-delivery
 just eval
 ```
 
-Delivery tests exercise the portable watcher subprocess and the actual Claude MCP
-stdio protocol. They do not claim a live end-to-end LLM run in both agent products.
+Delivery tests exercise the portable watcher subprocess (including the ready-file
+handshake, stale-file rejection, and cleanup) and the actual Claude MCP stdio
+protocol. The observer-reconnect test asserts a dropped connection resumes in
+under 800 ms. These are transport/contract tests: they do not claim a live
+end-to-end LLM run inside both agent products.
+
+## Skill evaluation
+
+`harness/skills/eink/evals/evals.json` holds dry-run prompts covering the intake
+contract, the OpenCode setup path, and the live-revision loop. A dry run records
+the first reply and intended actions without creating sessions or touching the
+repo. Across the three prompts, the revised skill asks for purpose when only a
+filename is given, proceeds without re-interviewing when the contract is explicit,
+and rearms the observer before drafting instead of after the rewrite.

@@ -27,9 +27,13 @@ eink-review list --status active
 
 If there is exactly one active session, use it. If there are multiple, ask the user which one to update.
 
-### 2. Ask for updated content
+### 2. Establish what should change
 
-Use the AskUserQuestion tool to ask: **"What should the updated content be?"**
+If the requested change and review focus are already clear, use them. Otherwise ask
+one short question about the intended change and desired depth. A file path or
+“current context” alone is not a review goal; follow the `eink` skill's reading
+contract before preparing content. Use the client's question tool if available,
+otherwise ordinary chat—this workflow works in OpenCode and Claude Code.
 
 Accept either:
 - Raw markdown text pasted directly
@@ -57,8 +61,9 @@ repositioned using server text matches; deleted/ambiguous targets are archived.
 This command changes content only: to respond to feedback and retire incorporated
 annotations, follow the `eink` skill's JSON update with `feedback_id`,
 `expected_version`, and zero-based `consumed_annotations` indices.
-Attach/rearm the `eink` skill's background watcher before claiming further feedback
-will reach the conversation.
+Attach the `eink` skill's background observer and confirm its handshake before
+claiming further feedback will reach the conversation. When handling an annotation,
+rearm immediately on receipt rather than waiting until the rewrite finishes.
 
 On error:
 - 404 → session not found

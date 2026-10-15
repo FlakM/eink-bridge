@@ -11,6 +11,22 @@ const SERVER_URL = process.env.EINK_SERVER_URL ?? 'http://localhost:3333'
 const subscribedSessions = new Set<string>()
 const deliveredFeedback = new Set<string>()
 
+function compactEvent(data: Record<string, unknown>) {
+  const compact = { ...data }
+  if (Array.isArray(compact.annotations)) {
+    compact.annotations = compact.annotations.map((annotation, index) => {
+      const { strokes, pressures, ...note } = annotation as Record<string, unknown>
+      return { ...note, index, stroke_count: Array.isArray(strokes) ? strokes.length : 0 }
+    })
+  }
+  if (Array.isArray(compact.annotation_images)) {
+    compact.annotation_image_count = compact.annotation_images.length
+    delete compact.annotation_images
+  }
+  delete compact.stroke_data
+  return compact
+}
+
 async function deliver(session_id: string, data: Record<string, unknown>) {
   if (!subscribedSessions.has(session_id)) return
   const feedbackId = typeof data.feedback_id === 'string' ? data.feedback_id : null
@@ -19,7 +35,7 @@ async function deliver(session_id: string, data: Record<string, unknown>) {
     : data.status === 'Submitted' ? 'submitted' : 'cancelled'
   await mcp.notification({
     method: 'notifications/claude/channel',
-    params: { content: JSON.stringify(data), meta: { event_type, session_id } },
+    params: { content: JSON.stringify(compactEvent(data)), meta: { event_type, session_id } },
   })
   if (feedbackId) deliveredFeedback.add(feedbackId)
   if (event_type === 'submitted' || event_type === 'cancelled') subscribedSessions.delete(session_id)

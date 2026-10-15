@@ -167,7 +167,10 @@ pub fn build_app(state: AppState) -> Router {
             get(get_session).delete(delete_session),
         )
         .route("/api/sessions/{id}/result", get(get_result))
-        .route("/api/sessions/{id}/content", put(update_content))
+        .route(
+            "/api/sessions/{id}/content",
+            get(get_content).put(update_content),
+        )
         .route("/api/sessions/{id}/reanchor", post(reanchor))
         .route("/api/sessions/{id}/feedback", get(pending_feedback))
         .route("/api/sessions/{id}/star", put(set_starred))
@@ -454,6 +457,17 @@ async fn pending_feedback(State(state): State<AppState>, Path(id): Path<String>)
     match mgr.get(&id) {
         None => StatusCode::NOT_FOUND.into_response(),
         Some(s) => Json(serde_json::json!({"status":s.status,"version":s.version,"pending":s.pending_feedback,"last_content_update":s.last_content_update})).into_response(),
+    }
+}
+
+async fn get_content(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    let mgr = state.sessions.read().await;
+    match mgr.get(&id) {
+        None => StatusCode::NOT_FOUND.into_response(),
+        Some(s) => {
+            Json(serde_json::json!({"status":s.status,"version":s.version,"content":s.content}))
+                .into_response()
+        }
     }
 }
 

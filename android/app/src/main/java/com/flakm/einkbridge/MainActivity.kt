@@ -8,14 +8,11 @@ import android.app.NotificationManager
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
-import android.media.RingtoneManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
-import android.os.Vibrator
-import android.os.VibrationEffect
 import android.util.Log
 import android.view.MotionEvent
 import android.view.View
@@ -40,7 +37,8 @@ import java.util.concurrent.TimeUnit
 private const val TAG = "EinkMain"
 private const val INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000L
 private const val NOTIFICATION_ID_UPDATE = 1001
-private const val NOTIFICATION_CHANNEL_ID = "eink_updates"
+// Channel importance is immutable on Android; use a new ID to quiet existing installs too.
+internal const val NOTIFICATION_CHANNEL_ID = "eink_updates_quiet"
 
 class MainActivity : AppCompatActivity() {
     internal lateinit var webView: WebView
@@ -75,6 +73,10 @@ class MainActivity : AppCompatActivity() {
     private var inactivityJob: Job? = null
     private var metricsJob: Job? = null
     private var wsInSleep = false
+    private var activityResumed = false
+    private val hideRoutineStatus = Runnable {
+        findViewById<TextView>(R.id.routineStatus).visibility = View.GONE
+    }
     @Volatile private var annotationSentAt: Long = 0L
     private lateinit var drawControls: android.widget.LinearLayout
     private lateinit var contextBar: android.widget.LinearLayout
@@ -158,8 +160,7 @@ class MainActivity : AppCompatActivity() {
                     emptyState.visibility = View.GONE
                 }
                 if (listState.sessions.size > hadSessions && hadSessions > 0) {
-                    @Suppress("DEPRECATION")
-                    (getSystemService(VIBRATOR_SERVICE) as? Vibrator)?.vibrate(200)
+                    showRoutineStatus("New review")
                 }
                 when (listState.connectionStatus) {
                     is ConnectionStatus.Online -> {
@@ -691,7 +692,7 @@ class MainActivity : AppCompatActivity() {
                             MetricsReporter.recordSubmission(true)
                             scope.launch { MetricsReporter.push(pushgatewayUrl) }
                             sessionRepo.clearSession(sessionId)
-                            Toast.makeText(this@MainActivity, "Submitted!", Toast.LENGTH_SHORT).show()
+                            showRoutineStatus("Review submitted")
                             showSessionList()
                             startPolling()
                         }
@@ -758,7 +759,7 @@ class MainActivity : AppCompatActivity() {
         processingJob = null
         annotationSentAt = 0L
         ocrOverlay.visibility = View.GONE
-        Toast.makeText(this, "Cancelled", Toast.LENGTH_SHORT).show()
+        showRoutineStatus("Cancelled")
     }
 
     private fun requestUpdate() {
@@ -897,17 +898,21 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        activityResumed = true
+        getSystemService(NotificationManager::class.java).cancel(NOTIFICATION_ID_UPDATE)
         if (currentSessionId != null) {
             penOverlay?.onResumed()
         }
     }
 
     override fun onPause() {
+        activityResumed = false
         penOverlay?.onPaused()
         super.onPause()
     }
 
     override fun onDestroy() {
+        findViewById<TextView>(R.id.routineStatus).removeCallbacks(hideRoutineStatus)
         inactivityJob?.cancel()
         penOverlay?.destroy()
         wsClient?.disconnect()
@@ -919,24 +924,35 @@ class MainActivity : AppCompatActivity() {
         val channel = NotificationChannel(
             NOTIFICATION_CHANNEL_ID,
             "Document Updates",
-            NotificationManager.IMPORTANCE_HIGH,
-        ).apply { enableVibration(true) }
-        getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+            NotificationManager.IMPORTANCE_LOW,
+        ).apply {
+            setSound(null, null)
+            enableVibration(false)
+            setShowBadge(false)
+        }
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.createNotificationChannel(channel)
+        // Remove the pre-existing loud channel so it stops appearing in system settings.
+        manager.deleteNotificationChannel("eink_updates")
     }
 
-    private fun notifyDocumentUpdated() {
-        RingtoneManager.getRingtone(
-            this,
-            RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION),
-        )?.play()
-        @Suppress("DEPRECATION")
-        (getSystemService(VIBRATOR_SERVICE) as? Vibrator)?.vibrate(
-            VibrationEffect.createOneShot(200, VibrationEffect.DEFAULT_AMPLITUDE),
-        )
+    internal fun showRoutineStatus(message: String) {
+        findViewById<TextView>(R.id.routineStatus).apply {
+            removeCallbacks(hideRoutineStatus)
+            text = message
+            visibility = View.VISIBLE
+            postDelayed(hideRoutineStatus, 4000)
+        }
+    }
+
+    internal fun notifyDocumentUpdated() {
+        // The inline label is sufficient while reading; no duplicate system alert.
+        if (activityResumed) return
         val notification = Notification.Builder(this, NOTIFICATION_CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentTitle("Document updated")
-            .setContentText("Your e-ink document has been rewritten.")
+            .setContentText("Ready to read")
+            .setOnlyAlertOnce(true)
             .setAutoCancel(true)
             .build()
         getSystemService(NotificationManager::class.java)
@@ -969,12 +985,12 @@ class MainActivity : AppCompatActivity() {
                     ocrOverlay.visibility = View.GONE
                     savedScrollY = webView.scrollY
                     webView.loadUrl("$serverUrl/session/$sid")
-                    Toast.makeText(this, "Document updated ✓", Toast.LENGTH_SHORT).show()
+                    showRoutineStatus("Document updated")
                     notifyDocumentUpdated()
                 }
                 "session_submitted" -> {
                     Log.i(TAG, "session_submitted: going back to session list")
-                    Toast.makeText(this, "Session submitted", Toast.LENGTH_SHORT).show()
+                    showRoutineStatus("Review submitted")
                     showSessionList()
                     startPolling()
                 }
@@ -983,7 +999,7 @@ class MainActivity : AppCompatActivity() {
                     Log.i(TAG, "annotation_result: version=$version — waiting for document update")
                     ocrOverlay.visibility = View.GONE
                     findViewById<Button>(R.id.btnRequestUpdate).text = "Waiting for agent…"
-                    Toast.makeText(this, "Feedback saved on server — waiting for agent update", Toast.LENGTH_LONG).show()
+                    showRoutineStatus("Feedback saved · awaiting reply")
                 }
                 "error" -> {
                     val errMsg = json.optString("message", "Unknown error")

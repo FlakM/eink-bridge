@@ -127,6 +127,25 @@
         android:focusable="false"
         android:visibility="gone" />
 
+    <!-- Quiet, non-blocking feedback instead of large system toast banners. -->
+    <TextView
+        android:id="@+id/routineStatus"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|end"
+        android:layout_marginBottom="76dp"
+        android:layout_marginEnd="12dp"
+        android:maxWidth="260dp"
+        android:maxLines="2"
+        android:textSize="12sp"
+        android:textColor="#555555"
+        android:background="#FFFFFF"
+        android:padding="4dp"
+        android:clickable="false"
+        android:focusable="false"
+        android:accessibilityLiveRegion="polite"
+        android:visibility="gone" />
+
     <!-- Color drawer: sits above toolbar, hidden by default -->
     <LinearLayout
         android:id="@+id/colorDrawer"

@@ -368,6 +368,10 @@ pub fn openapi_spec() -> serde_json::Value {
                 }
             },
             "/api/sessions/{id}/content": {
+                "get": {
+                    "summary": "Recover current markdown and version to resume a review without scraping HTML",
+                    "responses": {"200": {"description": "content, version, status"}, "404": {"description": "Session not found"}}
+                },
                 "put": {
                     "summary": "Rewrite content, optionally acknowledge a feedback request",
                     "description": "JSON {content,expected_version?,feedback_id?,consumed_annotations?} or plain markdown. consumed_annotations are zero-based indices of incorporated notes, require matching feedback_id, and resolve to consumed_strokes for native clients. Unacknowledged feedback survives manual edits.",

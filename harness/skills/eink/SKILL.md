@@ -1,6 +1,6 @@
 ---
 name: eink
-description: Push content to Boox e-ink tablet for iterative review. Supports multiple annotation rounds — user annotates, agent updates document via update_session tool, tablet reloads.
+description: Clarify what the user wants to read or review on the Boox, send a focused document, and observe handwritten feedback for live revision. Use for /eink, tablet review, or resuming a review in OpenCode or Claude Code.
 ---
 
 # E-Ink Review
@@ -18,8 +18,8 @@ The server durably stores pending feedback so a late/reconnected watcher recover
 /eink continue [session-id]
 ```
 
-- If a file path is given, push it directly.
-- Otherwise, write a context summary to `/tmp/eink-review-XXXXX.md`.
+- First establish the user's review goal, including when a file path is supplied.
+- Send only the agreed content; an invocation is not permission to dump the conversation.
 - `continue` resumes watching an already-active session (no new push).
 
 ---
@@ -30,25 +30,44 @@ The server durably stores pending feedback so a late/reconnected watcher recover
    ```bash
    eink-review list --status active
    ```
-   Pick the first ID from the output. If none, tell the user there are no active sessions.
+   Use the only active session if there is one. If there are several, ask which one;
+   the newest session may belong to a different conversation. If none, say so.
 
 2. Attach the background watcher below. It also recovers pending feedback already
    sent without a callback. A server session alone does not connect this conversation.
+
+3. Recover the current markdown once from `GET /api/sessions/<id>/content` if it is
+   absent from this conversation. Confirm the intended review focus if it is unknown.
+   Keep the content and version for subsequent rounds rather than fetching on every note.
 
 ---
 
 ## Steps for a new push
 
-### 1. Determine content
+### 1. Clarify the reading contract
 
-- If the user provided a file path, use it directly.
-- Otherwise, **ask the user** before writing anything:
-  1. What should the document cover? (topic and scope)
-  2. What structure do they want? (prose, bullet list, graph, mindmap, table, or mixed)
-  3. Any specific sections, requirements, or constraints?
-  4. Depth: overview vs. deep-dive?
+Before creating a session, establish **content, purpose, and depth**. Ask only for
+missing information, in one short conversational message, and wait for the answer.
+Useful questions are:
 
-  Wait for their answers, then write the document to `/tmp/eink-review-XXXXX.md` based on that input.
+- **Content:** Which topic, file, or part of the current work should go on the tablet?
+- **Purpose:** What should the user assess—clarity, correctness, architecture,
+  alternatives, or a decision? Are they reading for understanding or requesting edits?
+- **Depth/constraints:** Quick skim or detailed explanation? Anything to include,
+  exclude, preserve, or avoid changing?
+
+A filename identifies content, not purpose. For `/eink README.md`, ask what the user
+wants from the review before sending it. For “current context”, clarify which part
+and why instead of exporting an arbitrary summary.
+
+If the prompt already supplies the contract, briefly reflect it and proceed without
+a redundant interview. Offer a concise, bullet-led layout as a default; ask about a
+diagram only when the topic needs one. Do not make the user choose a formatting menu
+before understanding their goal.
+
+Once agreed, prepare a focused document from the supplied file or context. Preserve
+the original file unless the user authorized editing it. Before sending, state the
+review focus and proposed length in one sentence; ask again only if the scope changed.
 
 ### 2. Connect delivery, then announce the session
 
@@ -72,17 +91,25 @@ This claims the session so that webhook events are routed only to this Claude in
 
 ```bash
 SESSION_ID=$(eink-review --server "${EINK_SERVER_URL:-http://localhost:3333}" push --async <file>)
-python3 <skill-base>/scripts/watch-feedback.py "$SESSION_ID" --timeout 30
+# Launch the next command with the harness's background tool, using a unique ready file:
+python3 <skill-base>/scripts/watch-feedback.py <session-id> --timeout 30 --ready-file <unique-ready-file>
+# Then confirm the actual WebSocket handshake with a foreground command:
+python3 <skill-base>/scripts/watch-feedback.py --wait-ready <unique-ready-file>
 ```
 
-Run push in the foreground to obtain the ID, then launch the Python command through
+Run push in the foreground to obtain the ID, then launch the observer command through
 the harness's **background shell tool**. In OpenCode use `shell(background=true)`;
 in Claude Code use Bash's background-job option. The job's completion notification
 is how feedback reaches this conversation. `--timeout` is **minutes**. Keep stderr
 visible for connection failures. If background jobs are unavailable, tell the user
 automatic delivery is unavailable and offer a foreground watch.
 
-Announce readiness only after subscription succeeds or the watcher is launched.
+Use a fresh ready-file path for every observer (a temporary directory plus session
+and round is sufficient). The ready-file check is a bounded local handshake wait,
+not network polling. `state=ready` confirms a live connection; `state=event` means
+feedback already arrived—handle that completion and arm the next observer.
+
+Announce readiness only after subscription succeeds or the handshake is confirmed.
 If channel subscription fails, attach the portable watcher to the same session.
 Include the session ID and delivery path. If the watcher exits, report it and reattach;
 do not claim to be listening without a live subscription/job.
@@ -132,6 +159,28 @@ Use `feedback_id` to distinguish a new request from a replay after reconnect.
 Annotations are the current visible ink, which can include retained earlier notes;
 apply only feedback not already incorporated.
 
+### Snappy observer loop
+
+1. Acknowledge the received note in one sentence. With the portable path, **arm the
+   next observer immediately**, before drafting, using `--after-feedback <feedback_id>`
+   and a fresh ready file. Only one observer should be waiting for this conversation's
+   session. Claude channel subscriptions stay attached without rearming.
+2. Use the cached markdown and compact event's anchor/text to make the requested
+   revision. An obvious note such as “say more” needs a focused expansion, not another
+   intake questionnaire. Ask only when the annotation's intent or target is ambiguous.
+3. Send the update with its version guard and feedback ID, then give a short completion
+   message. Keep the reader's loop focused on the document: repository work, deployment,
+   broad research, and unrelated tests require separate authorization and should not
+   delay a straightforward revision.
+
+Both delivery paths omit raw stroke/pressure arrays from agent context. Fetch the
+full `/feedback` or `/result` only when handwriting is unclear or visual evidence is
+needed. Normal revisions should not require extra screenshots, preference dumps, or
+status requests. The transport is event-driven, not periodic network polling.
+
+If a newer feedback ID arrives while drafting, reconcile that latest request before
+updating; a rejected stale rewrite is not a reason to discard the newer annotation.
+
 Rewrite the document applying the feedback. The native client asks the server to
 match old/new text and reposition retained ink. Positional section IDs alone are
 not stable identity. Deleted or ambiguous targets are archived rather than guessed.
@@ -152,19 +201,25 @@ If its status is terminal, report the closed review instead of attempting anothe
 Only a matching `feedback_id` acknowledges pending feedback; ordinary content edits
 do not silently discard it.
 
-After a portable watcher returns, **launch another background watcher after every
-successful rewrite**, before telling the user the next round is ready. Use
-`--after-feedback <feedback_id>` to ignore duplicate delivery. Each job returns one
-event; it is not a permanent subscription. The tablet reloads automatically.
+The portable observer already rearmed at the start of this round remains attached
+after the rewrite. If it ended meanwhile, reconnect and confirm its handshake before
+saying the next round is ready. Each background job returns one event, not a permanent
+subscription. The tablet reloads automatically.
+
+To stop a portable observer, terminate only the observer PID in its own ready-file
+receipt (or cancel its harness job). It cleans up its CLI child. Never kill every
+`eink-review` process: other conversations can have their own reviews.
 
 ### Case: `event_type="submitted"`
 
 JSON is `SessionResultResponse`. Key fields:
-- `annotation_images[]` — base64 PNG strings; save each to `/tmp/eink-img-N.png` and use the **Read** tool to view
+- Compact events include `annotation_image_count`; fetch `/api/sessions/<id>/result`
+  for image references/full evidence when needed. Do not assume image references are base64.
 - `verdict` — `LGTM` or `CHANGES`
 - `annotations[]` — final annotation set
 
-Summarize all feedback and continue the conversation.
+Summarize all feedback and continue the conversation. Stop any rearmed observer;
+there is no next round after submission, cancellation, or expiry.
 
 ### Case: `event_type="cancelled"`
 

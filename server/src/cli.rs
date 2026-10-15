@@ -281,6 +281,7 @@ async fn cmd_push_interactive(server: &str, id: &str, timeout_minutes: u64) -> a
     std::io::stdout().flush().ok();
 
     let deadline = Instant::now() + Duration::from_secs(timeout_minutes * 60);
+    let mut retry_delay = Duration::from_millis(150);
 
     'reconnect: loop {
         if Instant::now() > deadline {
@@ -289,7 +290,7 @@ async fn cmd_push_interactive(server: &str, id: &str, timeout_minutes: u64) -> a
 
         let url = ws_url(server, &format!("/ws/{id}"));
         let ws_result = tokio::time::timeout(
-            Duration::from_secs(10),
+            Duration::from_secs(5).min(deadline.saturating_duration_since(Instant::now())),
             tokio_tungstenite::connect_async(&url),
         )
         .await;
@@ -297,12 +298,17 @@ async fn cmd_push_interactive(server: &str, id: &str, timeout_minutes: u64) -> a
         let mut ws = match ws_result {
             Err(_) => {
                 eprintln!("EVENT:RECONNECTING reason=connect_timeout");
-                tokio::time::sleep(Duration::from_secs(2)).await;
+                observer_retry(&mut retry_delay, deadline).await;
                 continue 'reconnect;
             }
             Ok(Err(e)) => {
+                if let tokio_tungstenite::tungstenite::Error::Http(response) = &e
+                    && matches!(response.status().as_u16(), 404 | 410)
+                {
+                    anyhow::bail!("review session unavailable: {}", response.status());
+                }
                 eprintln!("EVENT:RECONNECTING reason={e}");
-                tokio::time::sleep(Duration::from_secs(2)).await;
+                observer_retry(&mut retry_delay, deadline).await;
                 continue 'reconnect;
             }
             Ok(Ok((ws, _))) => ws,
@@ -315,26 +321,41 @@ async fn cmd_push_interactive(server: &str, id: &str, timeout_minutes: u64) -> a
             .await
             .is_err()
         {
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            observer_retry(&mut retry_delay, deadline).await;
             continue 'reconnect;
         }
 
+        retry_delay = Duration::from_millis(150);
+        eprintln!("EVENT:WATCH_READY session_id={id}");
         let mut last_ping = Instant::now();
+        let mut last_received = Instant::now();
         loop {
             if Instant::now() > deadline {
                 anyhow::bail!("timeout waiting for review");
             }
 
-            if last_ping.elapsed() >= Duration::from_secs(30) {
+            if last_received.elapsed() >= Duration::from_secs(20) {
+                eprintln!("EVENT:RECONNECTING reason=heartbeat_timeout");
+                observer_retry(&mut retry_delay, deadline).await;
+                continue 'reconnect;
+            }
+            if last_ping.elapsed() >= Duration::from_secs(10) {
                 if ws.send(WsMessage::Ping(Default::default())).await.is_err() {
                     eprintln!("EVENT:RECONNECTING reason=ping_failed");
-                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    observer_retry(&mut retry_delay, deadline).await;
                     continue 'reconnect;
                 }
                 last_ping = Instant::now();
             }
 
-            let msg = tokio::time::timeout(Duration::from_secs(30), ws.next()).await;
+            let msg = tokio::time::timeout(
+                Duration::from_secs(5).min(deadline.saturating_duration_since(Instant::now())),
+                ws.next(),
+            )
+            .await;
+            if matches!(&msg, Ok(Some(Ok(_)))) {
+                last_received = Instant::now();
+            }
 
             match msg {
                 Err(_) => continue, // idle window, go ping
@@ -380,18 +401,23 @@ async fn cmd_push_interactive(server: &str, id: &str, timeout_minutes: u64) -> a
                 Ok(Some(Ok(WsMessage::Pong(_)))) => {}
                 Ok(Some(Ok(WsMessage::Close(_)))) | Ok(None) => {
                     eprintln!("EVENT:RECONNECTING reason=ws_closed");
-                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    observer_retry(&mut retry_delay, deadline).await;
                     continue 'reconnect;
                 }
                 Ok(Some(Err(e))) => {
                     eprintln!("EVENT:RECONNECTING reason={e}");
-                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    observer_retry(&mut retry_delay, deadline).await;
                     continue 'reconnect;
                 }
                 Ok(Some(Ok(_))) => {}
             }
         }
     }
+}
+
+async fn observer_retry(delay: &mut Duration, deadline: Instant) {
+    tokio::time::sleep((*delay).min(deadline.saturating_duration_since(Instant::now()))).await;
+    *delay = (*delay * 2).min(Duration::from_secs(2));
 }
 
 async fn cmd_update(server: &str, id: &str, file: &str) -> anyhow::Result<()> {

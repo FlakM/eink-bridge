@@ -187,6 +187,23 @@ async fn ws_connect_unknown_session_gets_404() {
 }
 
 #[tokio::test]
+async fn resume_fetches_current_markdown_and_version_in_one_request() {
+    let (url, handle) = start_server().await;
+    let id = create_session(&url).await;
+    let response = reqwest::get(format!("{url}/api/sessions/{id}/content"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        response.json::<serde_json::Value>().await.unwrap(),
+        json!({
+            "content":"# Test", "version":1, "status":"Active"
+        })
+    );
+    handle.abort();
+}
+
+#[tokio::test]
 async fn ws_receives_session_submitted() {
     let (url, _handle) = start_server().await;
     let id = create_session(&url).await;

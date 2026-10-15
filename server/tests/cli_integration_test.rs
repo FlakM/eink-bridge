@@ -2,6 +2,61 @@ use eink_bridge::app::{AppState, build_app};
 use std::time::Duration;
 use tokio::net::TcpListener;
 
+#[tokio::test]
+async fn observer_reconnects_without_a_one_second_pause() {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let server = format!("http://{}", listener.local_addr().unwrap());
+    let mock = tokio::spawn(async move {
+        for feedback_id in ["first", "second"] {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+            ws.next().await.unwrap().unwrap(); // subscribe
+            ws.send(tokio_tungstenite::tungstenite::Message::Text(serde_json::json!({
+                "type":"annotation_result","feedback_id":feedback_id,"version":1,"annotations":[]
+            }).to_string())).await.unwrap();
+            if feedback_id == "first" {
+                ws.close(None).await.unwrap();
+            } else {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        }
+    });
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_eink-review"))
+        .args(["--server", &server, "watch", "test", "--timeout", "1"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    loop {
+        let line = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        if line.starts_with("EVENT:ANNOTATION_RESULT") {
+            assert!(line.contains("first"));
+            break;
+        }
+    }
+    let next = tokio::time::timeout(Duration::from_millis(800), async {
+        loop {
+            let line = lines.next_line().await.unwrap().unwrap();
+            if line.starts_with("EVENT:ANNOTATION_RESULT") {
+                break line;
+            }
+        }
+    })
+    .await
+    .expect("observer should resume in under 800ms after a dropped connection");
+    assert!(next.contains("second"));
+    child.kill().await.unwrap();
+    mock.abort();
+}
+
 async fn start_server() -> (String, tokio::task::JoinHandle<()>) {
     let dir = tempfile::tempdir().unwrap();
     let state = AppState::with_config(dir.keep(), 2);

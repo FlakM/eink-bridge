@@ -1,0 +1,26 @@
+{
+  "skill_name": "eink",
+  "evals": [
+    {
+      "id": 1,
+      "name": "file-without-review-purpose",
+      "prompt": "User says: /eink README.md. No prior review goal, scope, or desired depth has been established. What is your first reply and action sequence?",
+      "expected_output": "Ask a short question about the reading/review purpose before creating a session; do not treat a filename as a complete review brief.",
+      "assertions": ["asks_review_purpose", "does_not_push_before_answer", "avoids_formatting_questionnaire"]
+    },
+    {
+      "id": 2,
+      "name": "opencode-explicit-contract",
+      "prompt": "User says: /eink docs/architecture.md — I want to assess failure handling. Send a concise bullet-led five-minute read and do not modify the file. Environment: OpenCode, background shell available, no Claude channel tools, healthy local CLI/server. Describe the reply and exact intended action sequence without executing it.",
+      "expected_output": "Use the supplied contract without another interview; push the scoped content, start a background portable observer with a fresh ready file, verify its handshake, then announce readiness.",
+      "assertions": ["no_redundant_interview", "uses_portable_background_observer", "confirms_handshake_before_ready"]
+    },
+    {
+      "id": 3,
+      "name": "live-revision-fast-path",
+      "prompt": "A portable observer just returned annotation_result for session abc, version 4, feedback_id note-1. Annotation index 0 says 'Say more' beside the trade-offs section. The current markdown is already in your context and the review goal is known. No repository edits were authorized. Give your first reply and intended action sequence, without executing anything.",
+      "expected_output": "Brief acknowledgement, immediately rearm the next observer with after-feedback note-1 and a fresh receipt before drafting, expand the targeted section from cached markdown, PUT content with version/feedback ID and consumed index 0, no unnecessary screenshot/status requests or repository work.",
+      "assertions": ["rearms_before_rewrite", "uses_cached_markdown_without_redundant_probes", "guards_and_acknowledges_correct_feedback"]
+    }
+  ]
+}
