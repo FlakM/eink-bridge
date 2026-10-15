@@ -43,6 +43,9 @@ request replaces the pending snapshot with the current visible annotations.
   arrived, `state=ended` is never announced as connected.
 - A stale or reused ready file is rejected, and stopping an observer uses only its
   own receipt PID. Never terminate every `eink-review` process.
+- The observer deadline is bounded (default 120 minutes) so the harness can wake the
+  agent; a timeout while the session is still Active is expected and means reattach,
+  not failure. Never announce readiness from an ended job's receipt.
 - The observer resolves its CLI from `EINK_REVIEW_BIN`, then the deploy-refreshed Nix
   profile, then `PATH`. A long-lived shell keeps the PATH it started with, so a
   freshly deployed CLI can be shadowed by a stale store path; profile-first avoids

@@ -16,7 +16,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("session_id", nargs="?")
 parser.add_argument("--server", default=os.environ.get("EINK_SERVER_URL", "http://localhost:3333"))
 parser.add_argument("--after-feedback", default="")
-parser.add_argument("--timeout", type=int, default=30, help="minutes, like eink-review watch")
+parser.add_argument("--timeout", type=int, default=120, help="minutes, like eink-review watch")
 parser.add_argument("--ready-file", help="unique file to receive the live WebSocket handshake receipt")
 parser.add_argument("--wait-ready", metavar="FILE", help="wait up to five seconds for a handshake receipt, then exit")
 parser.add_argument(
