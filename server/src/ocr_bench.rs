@@ -6,17 +6,38 @@ use clap::Parser;
 /// Run with:
 ///   cargo run --bin eink-ocr-bench
 use eink_bridge::ocr::OcrEngine;
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 fn fixture(name: &str) -> Vec<u8> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/ocr")
-        .join(name);
-    std::fs::read(&path).unwrap_or_else(|e| panic!("cannot read fixture {name}: {e}"))
+    // Installed Nix binaries cannot read their compile-time /build source path.
+    let bytes: &[u8] = match name {
+        "sample1_TEST.png" => include_bytes!("../tests/fixtures/ocr/sample1_TEST.png"),
+        "sample2_WTF_is_it.png" => include_bytes!("../tests/fixtures/ocr/sample2_WTF_is_it.png"),
+        "sample3_now.png" => include_bytes!("../tests/fixtures/ocr/sample3_now.png"),
+        "sample4_WRITE_A_TLDR.png" => {
+            include_bytes!("../tests/fixtures/ocr/sample4_WRITE_A_TLDR.png")
+        }
+        "sample5_How_would_you.png" => {
+            include_bytes!("../tests/fixtures/ocr/sample5_How_would_you.png")
+        }
+        _ => panic!("unknown OCR fixture {name}"),
+    };
+    bytes.to_vec()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fixtures_are_embedded_for_installed_binaries() {
+        for (name, _) in SAMPLES {
+            assert!(fixture(name).starts_with(b"\x89PNG\r\n\x1a\n"));
+        }
+    }
 }
 
 const SAMPLES: &[(&str, &str)] = &[
