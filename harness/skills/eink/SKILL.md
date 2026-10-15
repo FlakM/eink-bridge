@@ -10,6 +10,13 @@ Push content to the Boox for reading and annotation. Supports iterative rounds: 
 Works in OpenCode and Claude Code. Choose delivery by **available tools**, not the
 agent's name: Claude channel tools when available, otherwise a background CLI watcher.
 The server durably stores pending feedback so a late/reconnected watcher recovers it.
+For the full menu of push mechanisms in each client — and why the durable server
+contract is the substrate for all of them — see
+`docs/agent-event-delivery-options.md` in the eink-bridge repo.
+
+To review a **pull request** on the tablet — checkout, Neovim diff, impact analysis,
+and global marks for jumping to the important lines — use the `eink-pr` skill instead;
+it delegates delivery back to this skill's contract.
 
 ## Usage
 
