@@ -1871,6 +1871,7 @@ const ELEMENT_MAP_JS: &str = r#"
     }
   };
 
+  window.__einkRebuildElementMap = buildMap;
   document.addEventListener('DOMContentLoaded', buildMap);
   window.addEventListener('resize', buildMap);
 })();

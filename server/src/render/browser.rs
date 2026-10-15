@@ -551,6 +551,7 @@ const REVIEW_JS: &str = r#"
         if (document.getElementById('comment-input').value.trim()) saveComment();
         var payload = {
             schema_version: 1,
+            document_version: Number((document.querySelector('meta[name=eink-version]') || {}).content) || null,
             typed_notes: document.getElementById('typed-notes').value,
             annotations: payloadAnnotations()
         };

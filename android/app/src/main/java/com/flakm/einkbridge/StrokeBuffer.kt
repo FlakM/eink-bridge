@@ -217,6 +217,11 @@ internal class StrokeBuffer {
         currentPressures.clear()
     }
 
+    fun replaceStrokes(strokes: List<Stroke>) {
+        clear()
+        _strokes.addAll(strokes)
+    }
+
     /**
      * Removes every committed stroke that comes within [radius] screen-pixels of any point in [path].
      * [path] is in screen coordinates; stored strokes are in document coordinates.

@@ -347,6 +347,7 @@ async fn cmd_push_interactive(server: &str, id: &str, timeout_minutes: u64) -> a
                                 for ann in anns.iter_mut() {
                                     if let Some(obj) = ann.as_object_mut() {
                                         obj.remove("strokes");
+                                        obj.remove("pressures");
                                     }
                                 }
                             }

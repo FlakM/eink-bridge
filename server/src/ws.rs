@@ -25,11 +25,14 @@ pub enum ServerMessage {
         version: u32,
         #[serde(skip_serializing_if = "Vec::is_empty", default)]
         consumed_annotations: Vec<i32>,
+        #[serde(skip_serializing_if = "Vec::is_empty", default)]
+        consumed_strokes: Vec<Vec<[f64; 2]>>,
     },
     SessionSubmitted {
         result: Box<SessionResultResponse>,
     },
     AnnotationResult {
+        feedback_id: String,
         version: u32,
         annotations: Vec<crate::api::AnnotationGroup>,
     },
@@ -56,6 +59,34 @@ async fn handle_ws(mut socket: WebSocket, id: String, state: AppState) {
     info!(session_id = %id, "ws connected");
     crate::metrics::WS_CONNECTIONS_ACTIVE.inc();
     let mut rx = state.ws_subscribe(&id).await;
+
+    // Subscribe before reading the durable snapshot: an update cannot fall between
+    // snapshot and subscription. Duplicates are possible; losing feedback is not.
+    let (update, replay) = {
+        let mgr = state.sessions.read().await;
+        mgr.get(&id)
+            .filter(|s| s.status == crate::session::SessionStatus::Active)
+            .map(|s| (s.last_content_update.clone(), s.pending_feedback.clone()))
+            .unwrap_or_default()
+    };
+    if let Some(update) = update
+        && socket
+            .send(Message::Text(update.to_string().into()))
+            .await
+            .is_err()
+    {
+        crate::metrics::WS_CONNECTIONS_ACTIVE.dec();
+        return;
+    }
+    if let Some(feedback) = replay
+        && socket
+            .send(Message::Text(feedback.to_string().into()))
+            .await
+            .is_err()
+    {
+        crate::metrics::WS_CONNECTIONS_ACTIVE.dec();
+        return;
+    }
 
     loop {
         tokio::select! {

@@ -12,6 +12,19 @@ import org.robolectric.annotation.Config
 @Config(manifest = Config.NONE)
 class PenOverlayTest {
 
+    @Test fun consumedUnboundInkIsRemovedWithoutLeavingStaleBindIndices() {
+        val (overlay, buf, mock) = buildOverlay()
+        mock.simulateStroke(listOf(10f to 20f, 30f to 40f))
+        mock.simulateStroke(listOf(50f to 60f, 70f to 80f))
+        overlay.loadBindGroups(listOf(BindGroup(42, Color.RED, setOf(1), listOf(1), emptyList(), 50f, 60f)))
+        overlay.consumeStrokes(org.json.JSONArray("[[[10,20],[30,40]]]"))
+        assertEquals(1, buf.size)
+        assertEquals(50f to 60f, buf.strokes.single().points.first())
+        assertEquals(setOf(0), overlay.bindGroups.single().strokeIndices)
+        overlay.consumeStrokes(org.json.JSONArray("[[[10,20],[30,40]]]"))
+        assertEquals("replayed instructions must be idempotent", 1, buf.size)
+    }
+
     // ── MockPenController behaviour ────────────────────────────────────────────
 
     @Test
@@ -536,6 +549,18 @@ class PenOverlayTest {
     }
 
     // ── enable/disable ─────────────────────────────────────────────────────────
+
+    @Test fun layoutPauseCannotBeUndoneByResumeAndRespectsToolMode() {
+        val (overlay, _, mock) = buildOverlayWithInit()
+        overlay.setInputEnabled(false)
+        overlay.onResumed()
+        assertFalse(mock.drawingEnabled)
+        overlay.enterSelectMode()
+        overlay.setInputEnabled(true)
+        assertFalse(mock.drawingEnabled)
+        overlay.exitSelectMode()
+        assertTrue(mock.drawingEnabled)
+    }
 
     @Test
     fun onPaused_disables_controller() {

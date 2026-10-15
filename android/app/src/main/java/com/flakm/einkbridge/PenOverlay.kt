@@ -734,7 +734,7 @@ internal class PenOverlay(
             Log.d("EinkDraw", "applyDrawingState SKIP initialized=false")
             return
         }
-        val shouldDraw = !isBindMode && !isSelectMode && !fingerDown && !paused
+        val shouldDraw = contentReady && !isBindMode && !isSelectMode && !fingerDown && !paused
         Log.d(
             "EinkDraw",
             "applyDrawingState shouldDraw=$shouldDraw " +
@@ -1149,6 +1149,49 @@ internal class PenOverlay(
         ocrResults.clear()
         ocrResults.addAll(results)
         notifyStrokeView()
+    }
+
+    fun applyRelocation(ink: RelocatedInk) {
+        ocrManager?.cancel()
+        buf.replaceStrokes(ink.strokes)
+        _bindGroups.clear()
+        _bindGroups.addAll(ink.groups)
+        ocrResults.clear()
+        undoStack.clear()
+        groupLabelOffsets.clear(); groupStrokeOffsets.clear()
+        clusterLabelOffsets.clear(); clusterStrokeOffsets.clear()
+        notifyStrokeView()
+        syncBindGroupsToWebView()
+        onBindGroupsChanged?.invoke()
+        onOcrResultsChanged?.invoke(emptyList())
+        scheduleOcr()
+    }
+
+    private var contentReady = true
+    fun setInputEnabled(enabled: Boolean) {
+        contentReady = enabled
+        applyDrawingState()
+    }
+
+    fun consumeStrokes(consumed: org.json.JSONArray?) {
+        if (consumed == null || consumed.length() == 0) return
+        val points = (0 until consumed.length()).map { i ->
+            val stroke = consumed.getJSONArray(i)
+            (0 until stroke.length()).map { j ->
+                val p = stroke.getJSONArray(j)
+                p.getDouble(0).toFloat() to p.getDouble(1).toFloat()
+            }
+        }.toSet()
+        val kept = mutableListOf<Stroke>()
+        val indices = mutableMapOf<Int, Int>()
+        buf.strokes.forEachIndexed { i, stroke ->
+            if (stroke.points !in points) { indices[i] = kept.size; kept.add(stroke) }
+        }
+        val groups = _bindGroups.mapNotNull { group ->
+            val remaining = group.strokeIndices.mapNotNull { indices[it] }.toSet()
+            if (remaining.isEmpty()) null else group.copy(strokeIndices = remaining)
+        }
+        applyRelocation(RelocatedInk(kept, groups, 0))
     }
 
     fun loadBindGroups(groups: List<BindGroup>) {

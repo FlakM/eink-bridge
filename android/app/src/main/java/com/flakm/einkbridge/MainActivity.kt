@@ -226,9 +226,20 @@ class MainActivity : AppCompatActivity() {
         webView.settings.useWideViewPort = true
         webView.settings.loadWithOverviewMode = false
         webView.webViewClient = object : android.webkit.WebViewClient() {
+            override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
+                strokeView.visibility = View.INVISIBLE
+                penOverlay?.setInputEnabled(false)
+                findViewById<Button>(R.id.btnRequestUpdate).isEnabled = false
+            }
             override fun onPageFinished(view: WebView, url: String) {
                 val sid = currentSessionId ?: return
                 Log.d(TAG, "webview onPageFinished url=$url session=$sid")
+                view.evaluateJavascript("Number((document.querySelector('meta[name=eink-version]') || {}).content || 0)") { version ->
+                    if (currentSessionId == sid) {
+                        loadedVersion = version?.toIntOrNull() ?: 0
+                        reconcileAnnotations(sid)
+                    }
+                }
                 val scrollY = savedScrollY
                 if (scrollY > 0) {
                     savedScrollY = 0
@@ -530,7 +541,9 @@ class MainActivity : AppCompatActivity() {
         wsClient = WebSocketClient(
             serverUrl = serverUrl,
             sessionId = sessionId,
-            onMessage = { type, json -> handleWsMessage(type, json) },
+            onMessage = { type, json -> runOnUiThread {
+                if (currentSessionId == sessionId) handleWsMessage(type, json)
+            } },
             onClosed = { Log.w(TAG, "ws onClosed session=$sessionId") },
         ).also { it.connect() }
         sessionListContainer.visibility = View.GONE
@@ -716,11 +729,18 @@ class MainActivity : AppCompatActivity() {
         scope.launch {
             try {
                 val serverVersion = withContext(Dispatchers.IO) {
-                    val req = Request.Builder().url("$serverUrl/api/sessions/$sessionId").build()
+                    val req = Request.Builder().url("$serverUrl/api/sessions/$sessionId/feedback").build()
                     val resp = client.newCall(req).execute()
                     if (!resp.isSuccessful) return@withContext -1
                     val body = resp.body?.string() ?: return@withContext -1
-                    org.json.JSONObject(body).optInt("version", -1)
+                    val snapshot = org.json.JSONObject(body)
+                    withContext(Dispatchers.Main) {
+                        if (currentSessionId == sessionId) {
+                            penOverlay?.consumeStrokes(snapshot.optJSONObject("last_content_update")?.optJSONArray("consumed_strokes"))
+                            penOverlay?.let { sessionRepo.saveStrokes(sessionId, it.buf) }
+                        }
+                    }
+                    snapshot.optInt("version", -1)
                 }
                 if (serverVersion > loadedVersion) {
                     Log.i(TAG, "reconnect: server version=$serverVersion > loaded=$loadedVersion — reloading")
@@ -751,7 +771,10 @@ class MainActivity : AppCompatActivity() {
             return
         }
         Log.i(TAG, "requestUpdate: querying element map session=$sessionId strokes=${overlay.buf.strokes.size}")
+        val documentVersion = loadedVersion
         overlay.queryElementMap { elements ->
+            if (currentSessionId != sessionId || loadedVersion != documentVersion) return@queryElementMap
+            sessionRepo.saveElementMap(sessionId, elements)
             Log.i(TAG, "requestUpdate: callback elements=${elements.size} session=$sessionId")
             processingJob?.cancel()
             processingJob = scope.launch {
@@ -765,7 +788,7 @@ class MainActivity : AppCompatActivity() {
                     annotationSentAt = SystemClock.elapsedRealtime()
                     val ok = withTimeout(OCR_OPERATION_TIMEOUT_MS) {
                         withContext(Dispatchers.IO) {
-                            submissionManager.requestUpdate(serverUrl, sessionId, annotationsJson)
+                            submissionManager.requestUpdate(serverUrl, sessionId, annotationsJson, documentVersion.takeIf { it > 0 })
                         }
                     }
                     Log.i(TAG, "requestUpdate: server response ok=$ok session=$sessionId")
@@ -773,6 +796,9 @@ class MainActivity : AppCompatActivity() {
                         annotationSentAt = 0L
                         ocrOverlay.visibility = View.GONE
                         Toast.makeText(this@MainActivity, "Request failed", Toast.LENGTH_SHORT).show()
+                    } else {
+                        ocrOverlay.visibility = View.GONE
+                        findViewById<Button>(R.id.btnRequestUpdate).text = "Waiting for agent…"
                     }
                 } catch (e: TimeoutCancellationException) {
                     annotationSentAt = 0L
@@ -786,6 +812,47 @@ class MainActivity : AppCompatActivity() {
                     Log.e(TAG, "requestUpdate: exception session=$sessionId", e)
                     ocrOverlay.visibility = View.GONE
                     Toast.makeText(this@MainActivity, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
+    private fun reconcileAnnotations(sid: String) {
+        val overlay = penOverlay ?: return
+        val version = loadedVersion
+        overlay.queryElementMap { current ->
+            if (currentSessionId != sid || current.isEmpty()) return@queryElementMap
+            val previous = sessionRepo.loadElementMap(sid)
+            if (overlay.buf.isEmpty || previous == current) {
+                sessionRepo.saveElementMap(sid, current)
+                strokeView.visibility = View.VISIBLE
+                overlay.setInputEnabled(true)
+                findViewById<Button>(R.id.btnRequestUpdate).isEnabled = true
+                return@queryElementMap
+            }
+            val original = overlay.buf.strokes
+            val groups = overlay.bindGroups.toList()
+            scope.launch {
+                try {
+                    val targets = if (previous.isEmpty()) emptyList() else withContext(Dispatchers.IO) {
+                        submissionManager.reanchor(serverUrl, sid, previous, current)
+                    }
+                    if (currentSessionId != sid || loadedVersion != version || overlay.buf.strokes != original) return@launch
+                    val ink = relocateInk(original, groups, previous, current, targets)
+                    Log.i(TAG, "Annotation relocation session=$sid version=$version retained=${ink.strokes.size} archived=${ink.orphanCount}")
+                    sessionRepo.archiveInk(sid, overlay.buf, groups)
+                    overlay.applyRelocation(ink)
+                    sessionRepo.saveStrokes(sid, overlay.buf)
+                    sessionRepo.saveElementMap(sid, current)
+                    strokeView.visibility = View.VISIBLE
+                    overlay.setInputEnabled(true)
+                    findViewById<Button>(R.id.btnRequestUpdate).isEnabled = true
+                    if (ink.orphanCount > 0) Toast.makeText(this@MainActivity,
+                        "${ink.orphanCount} strokes archived: their text could not be located safely", Toast.LENGTH_LONG).show()
+                } catch (e: Exception) {
+                    // Keep the old layout for retry; never label stale ink as relocated.
+                    Log.w(TAG, "Annotation relocation failed", e)
+                    Toast.makeText(this@MainActivity, "Could not reposition annotations; reopen to retry", Toast.LENGTH_LONG).show()
                 }
             }
         }
@@ -883,6 +950,7 @@ class MainActivity : AppCompatActivity() {
                 "version_updated" -> {
                     val version = json.optInt("version")
                     val sid = currentSessionId ?: return@runOnUiThread
+                    if (version <= loadedVersion) return@runOnUiThread
                     val sentAt = annotationSentAt
                     if (sentAt != 0L) {
                         val roundTripMs = SystemClock.elapsedRealtime() - sentAt
@@ -891,16 +959,12 @@ class MainActivity : AppCompatActivity() {
                         Log.i(TAG, "version_updated: round-trip=${roundTripMs}ms")
                         scope.launch { MetricsReporter.push(pushgatewayUrl) }
                     }
-                    val consumed = json.optJSONArray("consumed_annotations")
-                    if (consumed != null && consumed.length() > 0) {
-                        val ids = (0 until consumed.length()).map { consumed.getInt(it) }
-                        Log.i(TAG, "version_updated: clearing bind groups $ids")
-                        penOverlay?.also { overlay ->
-                            ids.forEach { overlay.removeBindGroup(it) }
-                            sessionRepo.saveBindGroups(sid, overlay.bindGroups)
-                        }
+                    penOverlay?.also { overlay ->
+                        overlay.consumeStrokes(json.optJSONArray("consumed_strokes"))
+                        sessionRepo.saveStrokes(sid, overlay.buf)
                     }
                     Log.i(TAG, "version_updated: version=$version — reloading webview")
+                    findViewById<Button>(R.id.btnRequestUpdate).text = "Update"
                     loadedVersion = version
                     ocrOverlay.visibility = View.GONE
                     savedScrollY = webView.scrollY
@@ -918,7 +982,8 @@ class MainActivity : AppCompatActivity() {
                     val version = json.optInt("version")
                     Log.i(TAG, "annotation_result: version=$version — waiting for document update")
                     ocrOverlay.visibility = View.GONE
-                    Toast.makeText(this, "Annotations sent ✓", Toast.LENGTH_SHORT).show()
+                    findViewById<Button>(R.id.btnRequestUpdate).text = "Waiting for agent…"
+                    Toast.makeText(this, "Feedback saved on server — waiting for agent update", Toast.LENGTH_LONG).show()
                 }
                 "error" -> {
                     val errMsg = json.optString("message", "Unknown error")

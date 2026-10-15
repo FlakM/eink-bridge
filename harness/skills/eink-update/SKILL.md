@@ -52,7 +52,13 @@ EOF
 eink-review update <session-id> /tmp/eink-update-XXXXX.md
 ```
 
-On success, the server responds with the new version number. Tell the user the tablet has been updated.
+On success, the server responds with the new version number. Retained native ink is
+repositioned using server text matches; deleted/ambiguous targets are archived.
+This command changes content only: to respond to feedback and retire incorporated
+annotations, follow the `eink` skill's JSON update with `feedback_id`,
+`expected_version`, and zero-based `consumed_annotations` indices.
+Attach/rearm the `eink` skill's background watcher before claiming further feedback
+will reach the conversation.
 
 On error:
 - 404 → session not found

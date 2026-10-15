@@ -32,6 +32,22 @@ internal class SessionRepository(context: Context) {
         else prefs.edit().putString(key, buf.toJson()).apply()
     }
 
+    fun loadElementMap(sessionId: String): List<ElementEntry> = try {
+        parseElementMap(prefs.getString("layout_$sessionId", "[]") ?: "[]")
+    } catch (_: Exception) { emptyList() }
+
+    fun saveElementMap(sessionId: String, elements: List<ElementEntry>) {
+        prefs.edit().putString("layout_$sessionId", elementMapJson(elements)).apply()
+    }
+
+    fun archiveInk(sessionId: String, buf: StrokeBuffer, groups: List<BindGroup>) {
+        // Append-only backup: relocation must never destroy the original handwriting.
+        prefs.edit().putString("archive_${sessionId}_${System.currentTimeMillis()}",
+            org.json.JSONObject().put("strokes", buf.toJson()).put("groups", bindGroupsToJson(groups))
+                .put("layout", elementMapJson(loadElementMap(sessionId)))
+                .put("ocr", prefs.getString("ocr_$sessionId", "[]")).toString()).apply()
+    }
+
     fun loadBindGroups(sessionId: String): List<BindGroup> {
         val json = prefs.getString("binds_$sessionId", null) ?: return emptyList()
         return try { bindGroupsFromJson(json) } catch (_: Exception) { emptyList() }

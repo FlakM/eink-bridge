@@ -160,6 +160,10 @@ logs-recent n='50':
 test-android:
     cd android && ./gradlew testDebugUnitTest
 
+# portable OpenCode watcher and Claude MCP-channel contracts
+test-delivery:
+    python3 -m unittest discover -s harness/tests -v
+
 # run android unit tests with JaCoCo coverage report
 coverage-android:
     cd android && ./gradlew testDebugUnitTest jacocoTestReport

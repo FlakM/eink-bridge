@@ -7,7 +7,9 @@ description: Push content to Boox e-ink tablet for iterative review. Supports mu
 
 Push content to the Boox for reading and annotation. Supports iterative rounds: the user annotates and taps "Request Update", the agent rewrites the document and calls `update_session`, and the tablet reloads automatically.
 
-Requires the `eink-channel` MCP server to be running (start Claude Code with `--dangerously-load-development-channels server:eink-channel`).
+Works in OpenCode and Claude Code. Choose delivery by **available tools**, not the
+agent's name: Claude channel tools when available, otherwise a background CLI watcher.
+The server durably stores pending feedback so a late/reconnected watcher recovers it.
 
 ## Usage
 
@@ -30,16 +32,8 @@ Requires the `eink-channel` MCP server to be running (start Claude Code with `--
    ```
    Pick the first ID from the output. If none, tell the user there are no active sessions.
 
-2. For `continue`, the callback_url cannot be added retroactively. Use the watch fallback:
-   ```bash
-   eink-review watch <SESSION_ID> --timeout 1800 2>/dev/null | while IFS= read -r line; do
-     case "$line" in
-       EVENT:ANNOTATION_RESULT*|EVENT:SUBMITTED*) echo "$line"; exit 0 ;;
-     esac
-   done
-   echo "EVENT:TIMEOUT"
-   ```
-   Launch this as a **background Bash command** and proceed as normal.
+2. Attach the background watcher below. It also recovers pending feedback already
+   sent without a callback. A server session alone does not connect this conversation.
 
 ---
 
@@ -56,11 +50,14 @@ Requires the `eink-channel` MCP server to be running (start Claude Code with `--
 
   Wait for their answers, then write the document to `/tmp/eink-review-XXXXX.md` based on that input.
 
-### 2. Create session with channel callback URL
+### 2. Connect delivery, then announce the session
+
+**Claude channel path:** use this only when `subscribe_session` is available and
+Claude channel notifications are enabled (`--dangerously-load-development-channels server:eink-channel`).
 
 ```bash
 CHANNEL_PORT=${EINK_CHANNEL_PORT:-8789}
-SESSION_ID=$(eink-review push --async --callback-url "http://127.0.0.1:$CHANNEL_PORT/" <file>)
+SESSION_ID=$(eink-review --server "${EINK_SERVER_URL:-http://localhost:3333}" push --async --callback-url "http://127.0.0.1:$CHANNEL_PORT/" <file>)
 echo "SESSION_ID:$SESSION_ID"
 ```
 
@@ -71,7 +68,24 @@ subscribe_session(session_id="<SESSION_ID>")
 
 This claims the session so that webhook events are routed only to this Claude instance and not to other running instances.
 
-Tell the user the session is active. You are free to answer other questions while waiting — events will arrive automatically via the `eink-channel` MCP server.
+**Portable path (OpenCode, or Claude Code without channel tools):**
+
+```bash
+SESSION_ID=$(eink-review --server "${EINK_SERVER_URL:-http://localhost:3333}" push --async <file>)
+python3 <skill-base>/scripts/watch-feedback.py "$SESSION_ID" --timeout 30
+```
+
+Run push in the foreground to obtain the ID, then launch the Python command through
+the harness's **background shell tool**. In OpenCode use `shell(background=true)`;
+in Claude Code use Bash's background-job option. The job's completion notification
+is how feedback reaches this conversation. `--timeout` is **minutes**. Keep stderr
+visible for connection failures. If background jobs are unavailable, tell the user
+automatic delivery is unavailable and offer a foreground watch.
+
+Announce readiness only after subscription succeeds or the watcher is launched.
+If channel subscription fails, attach the portable watcher to the same session.
+Include the session ID and delivery path. If the watcher exits, report it and reattach;
+do not claim to be listening without a live subscription/job.
 
 ---
 
@@ -114,16 +128,34 @@ Key fields:
 - `annotations[].anchor.elements[]` — nearby document elements (use to locate sections)
 - `anchor: null` — unanchored; treat as general comment
 
-**Each round is fresh** — annotations contain only current strokes. Do not re-apply previous rounds.
+Use `feedback_id` to distinguish a new request from a replay after reconnect.
+Annotations are the current visible ink, which can include retained earlier notes;
+apply only feedback not already incorporated.
 
-Rewrite the document applying the feedback. **Preserve heading text exactly** — IDs are derived from it.
+Rewrite the document applying the feedback. The native client asks the server to
+match old/new text and reposition retained ink. Positional section IDs alone are
+not stable identity. Deleted or ambiguous targets are archived rather than guessed.
 
 Then call the `update_session` tool:
 ```
-update_session(session_id="<id>", content="<full updated markdown>")
+update_session(session_id="<id>", content="<full updated markdown>", expected_version=<version>, feedback_id="<feedback_id>", consumed_annotations=[<zero-based indices incorporated>])
 ```
 
-The tablet reloads automatically.
+`consumed_annotations` are indices in this event's `annotations` array, **not**
+bind-group IDs. Leave unaddressed notes out so they follow the remaining text.
+The tablet removes consumed strokes, including ordinary unbound handwriting.
+
+Without `update_session`, PUT the same JSON fields to
+`$EINK_SERVER_URL/api/sessions/<id>/content` (default `http://localhost:3333`).
+409 means stale version: fetch `/api/sessions/<id>/feedback` and reconcile before retrying.
+If its status is terminal, report the closed review instead of attempting another rewrite.
+Only a matching `feedback_id` acknowledges pending feedback; ordinary content edits
+do not silently discard it.
+
+After a portable watcher returns, **launch another background watcher after every
+successful rewrite**, before telling the user the next round is ready. Use
+`--after-feedback <feedback_id>` to ignore duplicate delivery. Each job returns one
+event; it is not a permanent subscription. The tablet reloads automatically.
 
 ### Case: `event_type="submitted"`
 
@@ -251,6 +283,6 @@ exact token that clashed. To reproduce locally, open `/eink-webview` and call
 - Use bullets, not paragraphs. Use at most one diagram per document.
 - When you do use a diagram, color every node intentionally — but ask yourself first whether bullets would suffice.
 - The `eink-serve` systemd service must be running. Connection refused → `systemctl --user start eink-serve`.
-- The `eink-channel` MCP server must be running — start Claude Code with `--dangerously-load-development-channels server:eink-channel`.
-- You are NOT blocked while waiting — channel events arrive asynchronously.
+- Channel notifications are Claude-specific; the portable background watcher works in both harnesses.
+- You are not blocked while waiting; wait for the harness's background completion notification.
 - After all rounds complete, summarize all feedback and continue informed by it.

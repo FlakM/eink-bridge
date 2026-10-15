@@ -168,6 +168,8 @@ pub fn build_app(state: AppState) -> Router {
         )
         .route("/api/sessions/{id}/result", get(get_result))
         .route("/api/sessions/{id}/content", put(update_content))
+        .route("/api/sessions/{id}/reanchor", post(reanchor))
+        .route("/api/sessions/{id}/feedback", get(pending_feedback))
         .route("/api/sessions/{id}/star", put(set_starred))
         .route("/api/sessions/{id}/submit", post(submit_review))
         .route("/api/sessions/{id}/request_update", post(request_update))
@@ -435,6 +437,53 @@ struct UpdateContentBody {
     content: String,
     #[serde(default)]
     consumed_annotations: Vec<i32>,
+    #[serde(default)]
+    expected_version: Option<u32>,
+    #[serde(default)]
+    feedback_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ReanchorBody {
+    previous: Vec<crate::reanchor::Element>,
+    current: Vec<crate::reanchor::Element>,
+}
+
+async fn pending_feedback(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    let mgr = state.sessions.read().await;
+    match mgr.get(&id) {
+        None => StatusCode::NOT_FOUND.into_response(),
+        Some(s) => Json(serde_json::json!({"status":s.status,"version":s.version,"pending":s.pending_feedback,"last_content_update":s.last_content_update})).into_response(),
+    }
+}
+
+async fn reanchor(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<ReanchorBody>,
+) -> Response {
+    if state.sessions.read().await.get(&id).is_none() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    // Bound the quadratic edit-distance workload independently of the HTTP body limit.
+    if body.previous.len() > 1000
+        || body.current.len() > 1000
+        || body
+            .previous
+            .iter()
+            .chain(&body.current)
+            .any(|e| e.text.chars().count() > 150)
+    {
+        return bad_request("element map exceeds reanchor limits".into());
+    }
+    let targets = tokio::task::spawn_blocking(move || {
+        crate::reanchor::targets(&body.previous, &body.current)
+    })
+    .await;
+    match targets {
+        Ok(targets) => Json(serde_json::json!({"targets":targets})).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
 }
 
 async fn update_content(
@@ -443,37 +492,74 @@ async fn update_content(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let (content, consumed_annotations) = if headers
+    let (content, consumed_annotations, expected_version, feedback_id) = if headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .is_some_and(|ct| ct.contains("application/json"))
     {
         match serde_json::from_slice::<UpdateContentBody>(&body) {
-            Ok(b) => (b.content, b.consumed_annotations),
+            Ok(b) => (
+                b.content,
+                b.consumed_annotations,
+                b.expected_version,
+                b.feedback_id,
+            ),
             Err(e) => return bad_request(format!("invalid JSON: {e}")),
         }
     } else {
         match String::from_utf8(body.to_vec()) {
-            Ok(s) => (s, vec![]),
+            Ok(s) => (s, vec![], None, None),
             Err(_) => return bad_request("request body must be valid UTF-8".into()),
         }
     };
-    let version = {
+    let event = {
         let mut mgr = state.sessions.write().await;
-        mgr.update_content(&id, content)
+        let Some(s) = mgr.get(&id) else {
+            return StatusCode::NOT_FOUND.into_response();
+        };
+        if expected_version.is_some_and(|v| v != s.version) {
+            return StatusCode::CONFLICT.into_response();
+        }
+        let pending = s.pending_feedback.as_ref();
+        let acknowledge = feedback_id
+            .as_ref()
+            .is_some_and(|id| pending.and_then(|p| p["feedback_id"].as_str()) == Some(id.as_str()));
+        if (feedback_id.is_some() || !consumed_annotations.is_empty()) && !acknowledge {
+            return bad_request("consuming annotations requires the matching feedback_id".into());
+        }
+        let annotations = pending.and_then(|p| p["annotations"].as_array());
+        let mut consumed_strokes = Vec::new();
+        for &index in &consumed_annotations {
+            let Some(annotation) = usize::try_from(index)
+                .ok()
+                .and_then(|i| annotations.and_then(|a| a.get(i)))
+            else {
+                return bad_request("consumed annotation index is out of range".into());
+            };
+            if let Some(strokes) = annotation.get("strokes") {
+                consumed_strokes.extend(
+                    serde_json::from_value::<Vec<Vec<[f64; 2]>>>(strokes.clone())
+                        .unwrap_or_default(),
+                );
+            }
+        }
+        mgr.update_content(&id, content).map(|version| {
+            let event = crate::ws::ServerMessage::VersionUpdated {
+                version,
+                consumed_annotations,
+                consumed_strokes,
+            };
+            mgr.record_content_update(&id, serde_json::to_value(&event).unwrap(), acknowledge);
+            event
+        })
     };
-    match version {
-        Some(v) => {
-            tracing::info!(id = %id, version = v, consumed = consumed_annotations.len(), "content updated via HTTP PUT");
-            state
-                .ws_send(
-                    &id,
-                    crate::ws::ServerMessage::VersionUpdated {
-                        version: v,
-                        consumed_annotations,
-                    },
-                )
-                .await;
+    match event {
+        Some(event) => {
+            let crate::ws::ServerMessage::VersionUpdated { version: v, .. } = &event else {
+                unreachable!()
+            };
+            let v = *v;
+            state.ws_send(&id, event).await;
             Json(serde_json::json!({ "version": v })).into_response()
         }
         None => {
@@ -679,7 +765,12 @@ async fn request_update(
             Some(s) if s.status != crate::session::SessionStatus::Active => {
                 return StatusCode::CONFLICT.into_response();
             }
-            Some(s) => s.version,
+            Some(s) => {
+                if body.document_version.is_some_and(|v| v != s.version) {
+                    return StatusCode::CONFLICT.into_response();
+                }
+                s.version
+            }
         }
     };
 
@@ -720,20 +811,31 @@ async fn request_update(
 
     tracing::info!(id = %id, version, count = annotations.len(), "annotation_result broadcast");
     let msg = crate::ws::ServerMessage::AnnotationResult {
+        feedback_id: uuid::Uuid::new_v4().to_string(),
         version,
         annotations,
     };
+    // Persist before acknowledging or broadcasting, including when no agent is
+    // connected. Reject OCR that finished after the document changed.
+    if !state.sessions.write().await.record_feedback(
+        &id,
+        version,
+        serde_json::to_value(&msg).unwrap(),
+    ) {
+        return StatusCode::CONFLICT.into_response();
+    }
     let callback_url = {
         let mgr = state.sessions.read().await;
         mgr.get(&id).and_then(|s| s.callback_url.clone())
     };
     state.ws_send(&id, msg.clone()).await;
     if let Some(url) = callback_url {
-        let (version, annotations) = match msg {
+        let (feedback_id, version, annotations) = match msg {
             crate::ws::ServerMessage::AnnotationResult {
+                feedback_id,
                 version,
                 annotations,
-            } => (version, annotations),
+            } => (feedback_id, version, annotations),
             _ => unreachable!(),
         };
         tokio::spawn(async move {
@@ -743,6 +845,7 @@ async fn request_update(
                 r#type: &'static str,
                 id: String,
                 version: u32,
+                feedback_id: String,
                 annotations: Vec<crate::api::AnnotationGroup>,
             }
             let client = reqwest::Client::new();
@@ -752,6 +855,7 @@ async fn request_update(
                     r#type: "annotation_result",
                     id,
                     version,
+                    feedback_id,
                     annotations,
                 })
                 .send()
@@ -890,7 +994,13 @@ async fn render_session(
     match mgr.get(&id) {
         Some(s) => {
             tracing::debug!(id = %id, "rendering session HTML");
-            Ok(Html(render::to_eink_html(&s.content, &s.id)))
+            Ok(Html(render::to_eink_html(&s.content, &s.id).replace(
+                "</head>",
+                &format!(
+                    "<meta name=\"eink-version\" content=\"{}\"></head>",
+                    s.version
+                ),
+            )))
         }
         None => {
             tracing::debug!(id = %id, "render: session not found");
@@ -904,7 +1014,13 @@ async fn render_review(State(state): State<AppState>, Path(id): Path<String>) ->
     match mgr.get(&id) {
         Some(s) => {
             tracing::debug!(id = %id, "rendering browser review HTML");
-            Ok(Html(render::to_browser_html(&s.content, &s.id)))
+            Ok(Html(render::to_browser_html(&s.content, &s.id).replace(
+                "</head>",
+                &format!(
+                    "<meta name=\"eink-version\" content=\"{}\"></head>",
+                    s.version
+                ),
+            )))
         }
         None => {
             tracing::debug!(id = %id, "review: session not found");

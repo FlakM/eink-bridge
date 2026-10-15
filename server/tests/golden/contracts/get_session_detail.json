@@ -9,5 +9,6 @@
     "env": "test"
   },
   "title": "Detail Test",
-  "updated_at": "<timestamp>"
+  "updated_at": "<timestamp>",
+  "version": 1
 }

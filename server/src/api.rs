@@ -31,6 +31,8 @@ pub struct SetStarredRequest {
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct SubmitReviewRequest {
     #[serde(default)]
+    pub document_version: Option<u32>,
+    #[serde(default)]
     pub schema_version: Option<u32>,
     #[serde(default)]
     pub typed_notes: String,
@@ -109,6 +111,7 @@ pub struct SessionSummaryResponse {
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionDetailResponse {
     pub schema_version: u32,
+    pub version: u32,
     pub id: String,
     pub title: Option<String>,
     pub status: &'static str,
@@ -163,6 +166,7 @@ impl SessionDetailResponse {
     pub fn from_session(session: &Session) -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
+            version: session.version,
             id: session.id.clone(),
             title: session.title.clone(),
             status: session.status.as_str(),
@@ -350,6 +354,33 @@ pub fn openapi_spec() -> serde_json::Value {
                     }
                 }
             },
+            "/api/sessions/{id}/feedback": {
+                "get": {
+                    "summary": "Recover durable pending feedback and latest content-update instructions",
+                    "responses": {"200": {"description": "version, pending (annotation_result or null), last_content_update (version_updated or null)"}, "404": {"description": "Session not found"}}
+                }
+            },
+            "/api/sessions/{id}/reanchor": {
+                "post": {
+                    "summary": "Resolve previous layout elements to current layout elements by text",
+                    "description": "Submit previous/current arrays of {i,tag,text}, at most 1000 elements, 150 characters per text. Returns targets parallel to previous: current element indices, or null for missing/ambiguous matches. Client applies actual layout displacement.",
+                    "responses": {"200": {"description": "targets array"}, "400": {"description": "Invalid or excessive layout"}, "404": {"description": "Session not found"}}
+                }
+            },
+            "/api/sessions/{id}/content": {
+                "put": {
+                    "summary": "Rewrite content, optionally acknowledge a feedback request",
+                    "description": "JSON {content,expected_version?,feedback_id?,consumed_annotations?} or plain markdown. consumed_annotations are zero-based indices of incorporated notes, require matching feedback_id, and resolve to consumed_strokes for native clients. Unacknowledged feedback survives manual edits.",
+                    "responses": {"200": {"description": "New version"}, "400": {"description": "Invalid feedback ID or annotation index"}, "404": {"description": "Session not found"}, "409": {"description": "Stale version or terminal session"}}
+                }
+            },
+            "/api/sessions/{id}/request_update": {
+                "post": {
+                    "summary": "Persist feedback before notifying agents",
+                    "description": "Accepts SubmitReviewRequest. Pending feedback is replayed on WebSocket connection and exposed through GET /feedback until explicitly acknowledged by feedback_id.",
+                    "responses": {"200": {"description": "Feedback durably saved; agent response not yet confirmed"}, "404": {"description": "Session not found"}, "409": {"description": "Document changed during recognition or session inactive"}}
+                }
+            },
             "/api/sessions/{id}/submit": {
                 "post": {
                     "summary": "Submit review",
@@ -426,6 +457,7 @@ pub fn openapi_spec() -> serde_json::Value {
                 "SubmitReviewRequest": {
                     "type": "object",
                     "properties": {
+                        "document_version": {"type": "integer", "description": "Reject feedback from an outdated rendered document"},
                         "schema_version": {"type": "integer"},
                         "typed_notes": {"type": "string"},
                         "verdict": {"type": ["string", "null"]},
@@ -460,7 +492,7 @@ pub fn openapi_spec() -> serde_json::Value {
                 "SessionDetailResponse": {
                     "allOf": [
                         {"$ref": "#/components/schemas/SessionSummaryResponse"},
-                        {"type": "object", "properties": {"callback_url": {"type": ["string", "null"]}}}
+                        {"type": "object", "properties": {"version": {"type": "integer"}, "callback_url": {"type": ["string", "null"]}}}
                     ]
                 },
                 "SessionResultResponse": {

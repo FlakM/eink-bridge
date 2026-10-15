@@ -82,6 +82,11 @@ pub struct Session {
     pub stroke_data: Option<serde_json::Value>,
     #[serde(default)]
     pub annotations: Vec<AnnotationGroup>,
+    /// Latest unacknowledged update request. Kept separately from final submission.
+    #[serde(default)]
+    pub pending_feedback: Option<serde_json::Value>,
+    #[serde(default)]
+    pub last_content_update: Option<serde_json::Value>,
     #[serde(default)]
     pub callback_url: Option<String>,
     #[serde(default)]
@@ -212,6 +217,8 @@ impl SessionManager {
             annotation_images: Vec::new(),
             stroke_data: None,
             annotations: Vec::new(),
+            pending_feedback: None,
+            last_content_update: None,
             callback_url,
             tags,
             starred,
@@ -239,6 +246,29 @@ impl SessionManager {
 
     pub fn get(&self, id: &str) -> Option<&Session> {
         self.sessions.get(id)
+    }
+
+    pub fn record_content_update(&mut self, id: &str, event: serde_json::Value, acknowledge: bool) {
+        if let Some(s) = self.sessions.get_mut(id) {
+            if acknowledge {
+                s.pending_feedback = None;
+            }
+            s.last_content_update = Some(event);
+            s.persist();
+        }
+    }
+
+    pub fn record_feedback(&mut self, id: &str, version: u32, feedback: serde_json::Value) -> bool {
+        let Some(s) = self.sessions.get_mut(id) else {
+            return false;
+        };
+        if s.status != SessionStatus::Active || s.version != version {
+            return false;
+        }
+        s.pending_feedback = Some(feedback);
+        s.updated_at = Utc::now();
+        s.persist();
+        true
     }
 
     pub fn list(&self) -> Vec<&Session> {

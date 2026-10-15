@@ -3,6 +3,7 @@ pub mod app;
 pub mod config;
 pub mod metrics;
 pub mod ocr;
+pub mod reanchor;
 pub mod render;
 pub mod session;
 pub mod verdict;

@@ -1,5 +1,5 @@
 use eink_bridge::app::{AppState, build_app};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::StreamExt;
 use serde_json::json;
 use std::time::Duration;
 use tokio::net::TcpListener;
@@ -37,6 +37,127 @@ async fn create_session(url: &str) -> String {
 
 fn ws_url(http_url: &str, path: &str) -> String {
     http_url.replacen("http://", "ws://", 1) + path
+}
+
+#[tokio::test]
+async fn late_watcher_recovers_pending_feedback_after_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::with_config(dir.path().to_path_buf(), 5);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let handle = tokio::spawn(axum::serve(listener, build_app(state)).into_future());
+    let id = create_session(&url).await;
+    let client = reqwest::Client::new();
+    assert!(client.post(format!("{url}/api/sessions/{id}/request_update"))
+        .json(&json!({"annotations": [{"anchor":null,"strokes":[],"recognized_text":"make it bigger"}]}))
+        .send().await.unwrap().status().is_success());
+    handle.abort();
+    let state = AppState::with_config(dir.path().to_path_buf(), 5);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let handle = tokio::spawn(axum::serve(listener, build_app(state)).into_future());
+    let (mut ws, _) = connect_async(ws_url(&url, &format!("/ws/{id}")))
+        .await
+        .unwrap();
+    let msg = next_text(&mut ws).await;
+    assert_eq!(msg["type"], "annotation_result");
+    assert_eq!(msg["annotations"][0]["recognized_text"], "make it bigger");
+    handle.abort();
+}
+
+#[tokio::test]
+async fn server_reanchors_changed_text_and_rejects_deleted_or_ambiguous_targets() {
+    let (url, handle) = start_server().await;
+    let id = create_session(&url).await;
+    let response = reqwest::Client::new()
+        .post(format!("{url}/api/sessions/{id}/reanchor"))
+        .json(&json!({
+            "previous": [
+                {"i":0,"tag":"P","text":"Local recognition is fast and private"},
+                {"i":1,"tag":"P","text":"Deleted sentence"},
+                {"i":2,"tag":"P","text":"Repeated sentence"}
+            ],
+            "current": [
+                {"i":7,"tag":"P","text":"Local recognition is very fast and private"},
+                {"i":8,"tag":"P","text":"Repeated sentence"},
+                {"i":9,"tag":"P","text":"Repeated sentence"}
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let body = response.json::<serde_json::Value>().await.unwrap();
+    assert_eq!(body["targets"], json!([7, null, null]));
+    handle.abort();
+}
+
+#[tokio::test]
+async fn feedback_is_only_acknowledged_by_matching_id_and_consumes_array_indices() {
+    let (url, handle) = start_server().await;
+    let id = create_session(&url).await;
+    let client = reqwest::Client::new();
+    client.post(format!("{url}/api/sessions/{id}/request_update"))
+        .json(&json!({"annotations":[{"anchor":null,"strokes":[[[1,2],[3,4]]],"recognized_text":"larger"}]}))
+        .send().await.unwrap().error_for_status().unwrap();
+    let snapshot = client
+        .get(format!("{url}/api/sessions/{id}/feedback"))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let feedback_id = snapshot["pending"]["feedback_id"].clone();
+    // Unsolicited content changes preserve pending requests.
+    client
+        .put(format!("{url}/api/sessions/{id}/content"))
+        .body("# A manual edit")
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let snapshot = client
+        .get(format!("{url}/api/sessions/{id}/feedback"))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(snapshot["pending"]["feedback_id"], feedback_id);
+    let stale = client
+        .put(format!("{url}/api/sessions/{id}/content"))
+        .json(&json!({"content":"stale","feedback_id":feedback_id,"expected_version":1}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), 409);
+    let stale_feedback = client
+        .post(format!("{url}/api/sessions/{id}/request_update"))
+        .json(&json!({"document_version":1,"annotations":[]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale_feedback.status(), 409);
+    client.put(format!("{url}/api/sessions/{id}/content"))
+        .json(&json!({"content":"# Fixed","feedback_id":feedback_id,"expected_version":2,"consumed_annotations":[0]}))
+        .send().await.unwrap().error_for_status().unwrap();
+    let snapshot = client
+        .get(format!("{url}/api/sessions/{id}/feedback"))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert!(snapshot["pending"].is_null());
+    assert_eq!(
+        snapshot["last_content_update"]["consumed_strokes"],
+        json!([[[1.0, 2.0], [3.0, 4.0]]])
+    );
+    handle.abort();
 }
 
 async fn next_text(

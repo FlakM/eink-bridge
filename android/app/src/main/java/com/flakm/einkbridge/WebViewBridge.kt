@@ -80,7 +80,7 @@ internal class WebViewBridge(private val webView: WebView) {
     }
 
     fun queryElementMap(callback: (List<ElementEntry>) -> Unit) {
-        webView.evaluateJavascript("JSON.stringify(window.__einkElementMap || [])") { json ->
+        webView.evaluateJavascript("window.__einkRebuildElementMap && window.__einkRebuildElementMap(); JSON.stringify(window.__einkElementMap || [])") { json ->
             val cleaned = json?.trim()?.removeSurrounding("\"")
                 ?.replace("\\\\", "\\")
                 ?.replace("\\\"", "\"") ?: "[]"

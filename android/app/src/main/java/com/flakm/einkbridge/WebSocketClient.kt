@@ -17,6 +17,9 @@ class WebSocketClient(
     private val onMessage: (type: String, json: JSONObject) -> Unit,
     private val onClosed: () -> Unit,
 ) {
+    private val handler = android.os.Handler(android.os.Looper.getMainLooper())
+    @Volatile private var stopped = false
+    private val retry = Runnable { if (!stopped) connect() }
     private val client = OkHttpClient.Builder()
         .readTimeout(0, TimeUnit.MILLISECONDS)
         .build()
@@ -24,6 +27,8 @@ class WebSocketClient(
     private var ws: WebSocket? = null
 
     fun connect() {
+        stopped = false
+        handler.removeCallbacks(retry)
         val wsUrl = serverUrl
             .replaceFirst("http://", "ws://")
             .replaceFirst("https://", "wss://") + "/ws/$sessionId"
@@ -48,16 +53,20 @@ class WebSocketClient(
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 Log.i(TAG, "closed code=$code reason=$reason session=$sessionId")
                 onClosed()
+                if (!stopped) handler.postDelayed(retry, 2000)
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 Log.w(TAG, "failed session=$sessionId code=${response?.code}", t)
                 onClosed()
+                if (!stopped) handler.postDelayed(retry, 2000)
             }
         })
     }
 
     fun disconnect() {
+        stopped = true
+        handler.removeCallbacks(retry)
         Log.i(TAG, "disconnect session=$sessionId")
         ws?.close(1000, null)
         ws = null

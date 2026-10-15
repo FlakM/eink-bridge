@@ -110,6 +110,9 @@
                   "string",
                   "null"
                 ]
+              },
+              "version": {
+                "type": "integer"
               }
             },
             "type": "object"
@@ -265,6 +268,10 @@
             },
             "type": "array"
           },
+          "document_version": {
+            "description": "Reject feedback from an outdated rendered document",
+            "type": "integer"
+          },
           "schema_version": {
             "type": "integer"
           },
@@ -409,6 +416,73 @@
           }
         },
         "summary": "Get session metadata"
+      }
+    },
+    "/api/sessions/{id}/content": {
+      "put": {
+        "description": "JSON {content,expected_version?,feedback_id?,consumed_annotations?} or plain markdown. consumed_annotations are zero-based indices of incorporated notes, require matching feedback_id, and resolve to consumed_strokes for native clients. Unacknowledged feedback survives manual edits.",
+        "responses": {
+          "200": {
+            "description": "New version"
+          },
+          "400": {
+            "description": "Invalid feedback ID or annotation index"
+          },
+          "404": {
+            "description": "Session not found"
+          },
+          "409": {
+            "description": "Stale version or terminal session"
+          }
+        },
+        "summary": "Rewrite content, optionally acknowledge a feedback request"
+      }
+    },
+    "/api/sessions/{id}/feedback": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "version, pending (annotation_result or null), last_content_update (version_updated or null)"
+          },
+          "404": {
+            "description": "Session not found"
+          }
+        },
+        "summary": "Recover durable pending feedback and latest content-update instructions"
+      }
+    },
+    "/api/sessions/{id}/reanchor": {
+      "post": {
+        "description": "Submit previous/current arrays of {i,tag,text}, at most 1000 elements, 150 characters per text. Returns targets parallel to previous: current element indices, or null for missing/ambiguous matches. Client applies actual layout displacement.",
+        "responses": {
+          "200": {
+            "description": "targets array"
+          },
+          "400": {
+            "description": "Invalid or excessive layout"
+          },
+          "404": {
+            "description": "Session not found"
+          }
+        },
+        "summary": "Resolve previous layout elements to current layout elements by text"
+      }
+    },
+    "/api/sessions/{id}/request_update": {
+      "post": {
+        "description": "Accepts SubmitReviewRequest. Pending feedback is replayed on WebSocket connection and exposed through GET /feedback until explicitly acknowledged by feedback_id.",
+        "responses": {
+          "200": {
+            "description": "Feedback durably saved; agent response not yet confirmed"
+          },
+          "404": {
+            "description": "Session not found"
+          },
+          "409": {
+            "description": "Document changed during recognition or session inactive"
+          }
+        },
+        "summary": "Persist feedback before notifying agents"
       }
     },
     "/api/sessions/{id}/result": {

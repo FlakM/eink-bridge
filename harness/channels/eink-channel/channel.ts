@@ -9,6 +9,21 @@ const SERVER_URL = process.env.EINK_SERVER_URL ?? 'http://localhost:3333'
 
 // Sessions subscribed by this Claude instance — only these receive channel events.
 const subscribedSessions = new Set<string>()
+const deliveredFeedback = new Set<string>()
+
+async function deliver(session_id: string, data: Record<string, unknown>) {
+  if (!subscribedSessions.has(session_id)) return
+  const feedbackId = typeof data.feedback_id === 'string' ? data.feedback_id : null
+  if (feedbackId && deliveredFeedback.has(feedbackId)) return
+  const event_type = data.type === 'annotation_result' ? 'annotation_result'
+    : data.status === 'Submitted' ? 'submitted' : 'cancelled'
+  await mcp.notification({
+    method: 'notifications/claude/channel',
+    params: { content: JSON.stringify(data), meta: { event_type, session_id } },
+  })
+  if (feedbackId) deliveredFeedback.add(feedbackId)
+  if (event_type === 'submitted' || event_type === 'cancelled') subscribedSessions.delete(session_id)
+}
 
 const mcp = new Server(
   { name: 'eink-channel', version: '0.1.0' },
@@ -24,7 +39,7 @@ const mcp = new Server(
       'cancelled (session cancelled). ' +
       'After creating a session with eink-review push, call subscribe_session immediately so events are routed to this instance. ' +
       'To push updated content back to the tablet, call the update_session tool. ' +
-      'Pass consumed_annotations with the bind-group IDs from the annotation_result to clear those strokes from the tablet.',
+      'Pass feedback_id and expected_version when responding. consumed_annotations are zero-based annotation array indices, not bind-group IDs.',
   },
 )
 
@@ -43,7 +58,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'update_session',
-      description: 'Push updated markdown content to an active eink session on the tablet. Pass consumed_annotations with the bind-group IDs you have understood so the tablet clears those strokes automatically.',
+      description: 'Push updated markdown. Acknowledge feedback_id with expected_version; consumed_annotations are zero-based array indices of incorporated notes, not bind-group IDs.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -52,8 +67,10 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           consumed_annotations: {
             type: 'array',
             items: { type: 'integer' },
-            description: 'Bind-group IDs that have been incorporated into the document — the tablet removes these strokes automatically',
+            description: 'Zero-based indices in the feedback annotations array that have been incorporated; requires feedback_id',
           },
+          feedback_id: { type: 'string', description: 'ID of the feedback being acknowledged' },
+          expected_version: { type: 'integer', description: 'Document version used for this rewrite; stale updates are rejected' },
         },
         required: ['session_id', 'content'],
       },
@@ -65,17 +82,22 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
   if (req.params.name === 'subscribe_session') {
     const { session_id } = req.params.arguments as { session_id: string }
     subscribedSessions.add(session_id)
+    // Callback may have arrived before the session was claimed, or while this
+    // process was down. Recover the durable request, not only future webhooks.
+    const response = await fetch(`${SERVER_URL}/api/sessions/${encodeURIComponent(session_id)}/feedback`)
+    if (!response.ok) throw new Error(`subscribe_session failed: ${response.status}`)
+    const snapshot = await response.json() as { pending?: Record<string, unknown> }
+    if (snapshot.pending) await deliver(session_id, snapshot.pending)
     return { content: [{ type: 'text', text: `subscribed to session ${session_id}` }] }
   }
   if (req.params.name === 'update_session') {
-    const { session_id, content, consumed_annotations } = req.params.arguments as {
-      session_id: string; content: string; consumed_annotations?: number[]
+    const { session_id, content, consumed_annotations, feedback_id, expected_version } = req.params.arguments as {
+      session_id: string; content: string; consumed_annotations?: number[]; feedback_id?: string; expected_version?: number
     }
-    const hasConsumed = consumed_annotations && consumed_annotations.length > 0
     const resp = await fetch(`${SERVER_URL}/api/sessions/${session_id}/content`, {
       method: 'PUT',
-      headers: { 'Content-Type': hasConsumed ? 'application/json' : 'text/plain' },
-      body: hasConsumed ? JSON.stringify({ content, consumed_annotations }) : content,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content, consumed_annotations, feedback_id, expected_version }),
     })
     if (!resp.ok) {
       throw new Error(`update_session failed: ${resp.status} ${await resp.text()}`)
@@ -105,22 +127,13 @@ const httpServer = createServer((req, res) => {
       return
     }
 
-    const event_type =
-      data.type === 'annotation_result' ? 'annotation_result'
-      : data.status === 'Submitted'     ? 'submitted'
-      : 'cancelled'
     const session_id = String(data.id ?? '')
-
-    if (subscribedSessions.has(session_id)) {
-      if (event_type === 'submitted' || event_type === 'cancelled') {
-        subscribedSessions.delete(session_id)
-      }
-      await mcp.notification({
-        method: 'notifications/claude/channel',
-        params: { content: body, meta: { event_type, session_id } },
-      })
+    try {
+      await deliver(session_id, data)
+      res.writeHead(200).end('ok')
+    } catch {
+      res.writeHead(503).end('delivery failed; feedback remains on server')
     }
-    res.writeHead(200).end('ok')
   })
 })
 

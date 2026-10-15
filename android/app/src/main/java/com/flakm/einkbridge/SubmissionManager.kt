@@ -18,6 +18,17 @@ internal sealed class SubmitResult {
 
 internal class SubmissionManager(private val client: OkHttpClient = OcrClient.buildHttpClient()) {
 
+    fun reanchor(serverUrl: String, sessionId: String, previous: List<ElementEntry>, current: List<ElementEntry>): List<Int?> {
+        val body = """{"previous":${elementMapJson(previous)},"current":${elementMapJson(current)}}"""
+        val request = Request.Builder().url("$serverUrl/api/sessions/$sessionId/reanchor")
+            .post(body.toRequestBody("application/json".toMediaType())).build()
+        return client.newCall(request).execute().use { response ->
+            check(response.isSuccessful) { "Reanchor failed: ${response.code}" }
+            val targets = org.json.JSONObject(response.body!!.string()).getJSONArray("targets")
+            (0 until targets.length()).map { if (targets.isNull(it)) null else targets.getInt(it) }
+        }
+    }
+
     fun buildAnnotationsJson(
         strokes: List<Stroke>,
         bindGroups: List<BindGroup>,
@@ -60,9 +71,10 @@ internal class SubmissionManager(private val client: OkHttpClient = OcrClient.bu
         serverUrl: String,
         sessionId: String,
         annotationsJson: String,
+        documentVersion: Int? = null,
     ): Boolean {
         val url = "$serverUrl/api/sessions/$sessionId/request_update"
-        val body = """{"annotations":$annotationsJson}"""
+        val body = """{"annotations":$annotationsJson,"document_version":${documentVersion ?: "null"}}"""
         Log.i(TAG, "requestUpdate POST $url")
         return try {
             val request = Request.Builder()
