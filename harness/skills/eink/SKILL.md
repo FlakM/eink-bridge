@@ -104,6 +104,13 @@ is how feedback reaches this conversation. `--timeout` is **minutes**. Keep stde
 visible for connection failures. If background jobs are unavailable, tell the user
 automatic delivery is unavailable and offer a foreground watch.
 
+The observer resolves its CLI from `EINK_REVIEW_BIN`, then the deploy-refreshed Nix
+profile, then `PATH`. A long-lived shell or agent service keeps the PATH it started
+with, so a freshly deployed CLI can be shadowed by a stale store path that lacks the
+current protocol; the profile-first order avoids that. If the handshake never
+confirms and stderr shows no `EVENT:WATCH_READY`, pass `--eink-review <absolute-path>`
+to the current binary instead of debugging the document.
+
 Use a fresh ready-file path for every observer (a temporary directory plus session
 and round is sufficient). The ready-file check is a bounded local handshake wait,
 not network polling. `state=ready` confirms a live connection; `state=event` means

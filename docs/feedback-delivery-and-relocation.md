@@ -43,6 +43,10 @@ request replaces the pending snapshot with the current visible annotations.
   arrived, `state=ended` is never announced as connected.
 - A stale or reused ready file is rejected, and stopping an observer uses only its
   own receipt PID. Never terminate every `eink-review` process.
+- The observer resolves its CLI from `EINK_REVIEW_BIN`, then the deploy-refreshed Nix
+  profile, then `PATH`. A long-lived shell keeps the PATH it started with, so a
+  freshly deployed CLI can be shadowed by a stale store path; profile-first avoids
+  that silent shadowing. `--eink-review <path>` overrides explicitly.
 - The CLI observer reconnects with 150 ms exponential backoff (capped at 2 s),
   treats a 404/410 as a closed review rather than a retry loop, and treats a 20 s
   silence as a dropped connection so a dead link is noticed quickly.

@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """One review event per background job, for harnesses without Claude channels."""
 import argparse
+import getpass
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -17,7 +19,28 @@ parser.add_argument("--after-feedback", default="")
 parser.add_argument("--timeout", type=int, default=30, help="minutes, like eink-review watch")
 parser.add_argument("--ready-file", help="unique file to receive the live WebSocket handshake receipt")
 parser.add_argument("--wait-ready", metavar="FILE", help="wait up to five seconds for a handshake receipt, then exit")
+parser.add_argument(
+    "--eink-review",
+    default=os.environ.get("EINK_REVIEW_BIN"),
+    help="CLI binary; defaults to EINK_REVIEW_BIN or the deploy-refreshed Nix profile, then PATH",
+)
 args = parser.parse_args()
+
+
+def resolve_cli():
+    """Prefer the Nix profile over PATH.
+
+    A long-running shell or agent service keeps the PATH it started with, so a
+    freshly deployed deploy (which refreshes the Nix profile) can be shadowed by a
+    stale store path on PATH. That shadowing silently runs an older CLI that lacks
+    the current protocol, e.g. the observer handshake.
+    """
+    if args.eink_review:
+        return args.eink_review
+    profile = Path(f"/etc/profiles/per-user/{getpass.getuser()}/bin/eink-review")
+    if profile.exists():
+        return str(profile)
+    return shutil.which("eink-review") or "eink-review"
 if args.wait_ready:
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
@@ -47,8 +70,9 @@ def receipt(state):
             temporary.write_text(json.dumps({"state": state, "session_id": args.session_id, "pid": os.getpid()}))
             temporary.replace(path)
 
+cli = resolve_cli()
 process = subprocess.Popen(
-    ["eink-review", "--server", args.server, "watch", args.session_id, "--timeout", str(args.timeout)],
+    [cli, "--server", args.server, "watch", args.session_id, "--timeout", str(args.timeout)],
     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
 )
 
@@ -84,7 +108,7 @@ try:
         break
     else:
         code = process.wait()
-        print(f"EVENT:WATCH_ENDED session_id={args.session_id} exit={code}", flush=True)
+        print(f"EVENT:WATCH_ENDED session_id={args.session_id} exit={code} cli={cli}", flush=True)
         receipt("ended")
         sys.exit(code or 1)
 finally:

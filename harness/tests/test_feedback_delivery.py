@@ -26,7 +26,8 @@ class DeliveryTests(unittest.TestCase):
                 f"print({'EVENT:ANNOTATION_RESULT ' + json.dumps(e)!r}, flush=True)" for e in events))
             fake.chmod(0o755)
             result = subprocess.run(["python3", str(ROOT / "harness/skills/eink/scripts/watch-feedback.py"),
-                                     "session", "--after-feedback", "old", "--ready-file", str(Path(directory)/"ready.json")],
+                                     "session", "--after-feedback", "old", "--eink-review", str(fake),
+                                     "--ready-file", str(Path(directory)/"ready.json")],
                                     env={**os.environ, "PATH": directory + ":" + os.environ["PATH"]},
                                     capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -45,7 +46,7 @@ class DeliveryTests(unittest.TestCase):
             fake.chmod(0o755)
             ready = Path(directory)/"ready.json"
             script = str(ROOT/"harness/skills/eink/scripts/watch-feedback.py")
-            observer = subprocess.Popen(["python3",script,"session","--ready-file",str(ready)],
+            observer = subprocess.Popen(["python3",script,"session","--eink-review",str(fake),"--ready-file",str(ready)],
                 env={**os.environ,"PATH":directory+":"+os.environ["PATH"]},stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
             try:
                 checked = subprocess.run(["python3",script,"--wait-ready",str(ready)],capture_output=True,text=True,timeout=8)
@@ -61,6 +62,25 @@ class DeliveryTests(unittest.TestCase):
                 if observer.poll() is None:
                     observer.terminate(); observer.wait(timeout=5)
                 observer.stdout.close(); observer.stderr.close()
+
+    def test_explicit_binary_beats_a_stale_path_shadow(self):
+        """A long-lived shell keeps the PATH it started with, so a freshly deployed
+        CLI can be shadowed by a stale store path. An explicit override must win, and
+        the watcher must report which CLI it used."""
+        with tempfile.TemporaryDirectory() as directory:
+            stale = Path(directory) / "stale"
+            stale.mkdir()
+            (stale / "eink-review").write_text("#!/usr/bin/env python3\nprint('WRONG CLI')\n")
+            (stale / "eink-review").chmod(0o755)
+            real = Path(directory) / "real-eink-review"
+            real.write_text("#!/usr/bin/env python3\nprint('EVENT:WATCH_ENDED session_id=session exit=1', flush=True)\n")
+            real.chmod(0o755)
+            result = subprocess.run(["python3", str(ROOT / "harness/skills/eink/scripts/watch-feedback.py"),
+                                     "session", "--eink-review", str(real)],
+                                    env={**os.environ, "PATH": str(stale) + ":" + os.environ["PATH"]},
+                                    capture_output=True, text=True, timeout=10)
+            self.assertNotIn("WRONG CLI", result.stdout)
+            self.assertIn(f"cli={real}", result.stdout)
 
     def test_stale_ready_file_cannot_be_reused_as_proof_of_connection(self):
         with tempfile.TemporaryDirectory() as directory:
