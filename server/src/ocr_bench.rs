@@ -1,6 +1,7 @@
-/// OCR benchmark — measures latency of the Ollama vision model for each
-/// handwriting fixture, sequentially then in parallel (bounded by
-/// OLLAMA_NUM_PARALLEL, default 4).
+use clap::Parser;
+/// OCR benchmark — default mode compares initial recognition with concurrent
+/// cached requests. --compare bypasses caching and waits for every enabled
+/// provider, so output quality and latency can be compared on identical inputs.
 ///
 /// Run with:
 ///   cargo run --bin eink-ocr-bench
@@ -26,8 +27,17 @@ const SAMPLES: &[(&str, &str)] = &[
     ("sample5_How_would_you.png", "How would you do it?"),
 ];
 
+#[derive(Parser)]
+struct Args {
+    /// Run each enabled provider to completion, without caching or racing.
+    /// With cloud OCR enabled this makes five paid OpenAI requests.
+    #[arg(long)]
+    compare: bool,
+}
+
 #[tokio::main]
 async fn main() {
+    let args = Args::parse();
     let parallelism: usize = std::env::var("OLLAMA_NUM_PARALLEL")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -40,6 +50,30 @@ async fn main() {
             std::process::exit(1);
         }
     };
+
+    if args.compare {
+        println!("Uncached provider comparison (both finish; check text as well as latency)");
+        println!(
+            "{:<22} {:<8} {:>9}  recognized text",
+            "expected", "provider", "wall ms"
+        );
+        for (index, (filename, expected)) in SAMPLES.iter().enumerate() {
+            let results = engine.compare_image(&fixture(filename)).await;
+            if index == 0 && results.len() == 1 {
+                eprintln!("Cloud OCR is disabled or has no key; comparing local only.");
+            }
+            for result in results {
+                println!(
+                    "{:<22} {:<8} {:>9}  {:?}",
+                    expected,
+                    result.provider,
+                    result.elapsed.as_millis(),
+                    result.result
+                );
+            }
+        }
+        return;
+    }
 
     // ── Sequential ────────────────────────────────────────────────────────────
     println!("=== Sequential OCR ({} samples) ===", SAMPLES.len());
@@ -55,11 +89,7 @@ async fn main() {
                 let ms = t.elapsed().as_millis();
                 seq_times.push(ms);
                 let preview = text.replace('\n', " ");
-                let preview = if preview.len() > 40 {
-                    format!("{}…", &preview[..40])
-                } else {
-                    preview
-                };
+                let preview: String = preview.chars().take(40).collect();
                 println!("{:<22} {:>9}  \"{}\"", label, ms, preview);
             }
             Err(e) => println!("{:<22}  ERROR — {e}", label),
@@ -68,14 +98,14 @@ async fn main() {
     let seq_total: u128 = seq_times.iter().sum();
     let seq_min = seq_times.iter().min().copied().unwrap_or(0);
     let seq_max = seq_times.iter().max().copied().unwrap_or(0);
-    let seq_mean = seq_total / seq_times.len() as u128;
+    let seq_mean = seq_total / seq_times.len().max(1) as u128;
     println!("{}", "─".repeat(70));
     println!("total={seq_total} ms   min={seq_min} ms   mean={seq_mean} ms   max={seq_max} ms");
 
     // ── Parallel ─────────────────────────────────────────────────────────────
     println!();
     println!(
-        "=== Parallel OCR ({} samples, {} concurrent) ===",
+        "=== Parallel cached OCR ({} samples, {} concurrent) ===",
         SAMPLES.len(),
         parallelism
     );

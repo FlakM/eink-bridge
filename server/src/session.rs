@@ -344,23 +344,29 @@ impl SessionManager {
     }
 
     pub fn expire_stale(&mut self, timeout: Duration) -> usize {
+        self.expire_stale_ids(timeout).len()
+    }
+
+    pub(crate) fn expire_stale_ids(&mut self, timeout: Duration) -> Vec<String> {
         let now = Utc::now();
-        let mut count = 0usize;
+        let mut expired = Vec::new();
         for session in self.sessions.values_mut() {
             if session.status == SessionStatus::Active && !session.starred {
                 let age = now.signed_duration_since(session.created_at);
                 if age.to_std().unwrap_or(Duration::ZERO) > timeout {
                     session.status = SessionStatus::Expired;
+                    session.updated_at = now;
                     session.persist();
-                    count += 1;
+                    expired.push(session.id.clone());
                 }
             }
         }
+        let count = expired.len();
         if count > 0 {
             crate::metrics::SESSIONS_EXPIRED.inc_by(count as u64);
             crate::metrics::SESSIONS_ACTIVE.sub(count as i64);
         }
-        count
+        expired
     }
 }
 

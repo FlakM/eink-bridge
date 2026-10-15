@@ -105,6 +105,22 @@ impl AppState {
         let mut map: tokio::sync::RwLockWriteGuard<'_, Map> = self.ws_senders.write().await;
         map.remove(id);
     }
+
+    pub async fn expire_stale(&self, timeout: Duration) -> usize {
+        let expired = self.sessions.write().await.expire_stale_ids(timeout);
+        for id in &expired {
+            self.notify_and_cleanup(id).await;
+            self.ws_send(
+                id,
+                crate::ws::ServerMessage::Error {
+                    message: "session expired".into(),
+                },
+            )
+            .await;
+            self.ws_cleanup(id).await;
+        }
+        expired.len()
+    }
 }
 
 fn default_assets_dir() -> PathBuf {
@@ -157,6 +173,7 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/sessions/{id}/request_update", post(request_update))
         .route("/ws/{id}", get(crate::ws::ws_handler))
         .route("/session/{id}", get(render_session))
+        .route("/review/{id}", get(render_review))
         .route_layer(axum::middleware::from_fn(track_metrics))
         .nest_service("/assets", ServeDir::new(assets_dir))
         .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY_SIZE))
@@ -228,7 +245,7 @@ async fn ocr_strokes(State(state): State<AppState>, Json(body): Json<OcrRequest>
         .await
     {
         Ok(text) => {
-            tracing::info!(strokes, text = %text, "OCR done");
+            tracing::info!(strokes, text_bytes = text.len(), "OCR done");
             Json(serde_json::json!({ "text": text })).into_response()
         }
         Err(e) => {
@@ -524,7 +541,7 @@ async fn get_result(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<SessionResultResponse>, StatusCode> {
-    {
+    let notified = {
         let mgr = state.sessions.read().await;
         match mgr.get(&id) {
             None => return Err(StatusCode::NOT_FOUND),
@@ -536,12 +553,15 @@ async fn get_result(
             }
             _ => {}
         }
-    }
+        let notify = state.get_or_create_notify(&id).await;
+        let mut notified = Box::pin(notify.notified_owned());
+        notified.as_mut().enable();
+        notified
+    };
 
     tracing::debug!(id = %id, "long-poll waiting");
-    let notify = state.get_or_create_notify(&id).await;
     let poll_outcome = tokio::select! {
-        _ = notify.notified() => {
+        _ = notified => {
             tracing::debug!(id = %id, "long-poll: notified");
             "notified"
         }
@@ -874,6 +894,20 @@ async fn render_session(
         }
         None => {
             tracing::debug!(id = %id, "render: session not found");
+            Err(StatusCode::NOT_FOUND)
+        }
+    }
+}
+
+async fn render_review(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+    let mgr = state.sessions.read().await;
+    match mgr.get(&id) {
+        Some(s) => {
+            tracing::debug!(id = %id, "rendering browser review HTML");
+            Ok(Html(render::to_browser_html(&s.content, &s.id)))
+        }
+        None => {
+            tracing::debug!(id = %id, "review: session not found");
             Err(StatusCode::NOT_FOUND)
         }
     }

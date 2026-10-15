@@ -16,7 +16,7 @@ internal sealed class SubmitResult {
     val isConflict get() = this is Http && code == 409
 }
 
-internal class SubmissionManager(private val client: OkHttpClient) {
+internal class SubmissionManager(private val client: OkHttpClient = OcrClient.buildHttpClient()) {
 
     fun buildAnnotationsJson(
         strokes: List<Stroke>,

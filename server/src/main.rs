@@ -20,7 +20,10 @@ async fn main() {
         long_poll_sec = config.server.long_poll_seconds,
         "config loaded"
     );
-    let state = AppState::new(config.server.state_dir.clone());
+    let state = AppState::with_config(
+        config.server.state_dir.clone(),
+        config.server.long_poll_seconds,
+    );
     let app = eink_bridge::app::build_app(state.clone());
     let addr = config.bind_addr();
 
@@ -29,7 +32,7 @@ async fn main() {
         let mut interval = tokio::time::interval(Duration::from_secs(60));
         loop {
             interval.tick().await;
-            let expired = state.sessions.write().await.expire_stale(timeout);
+            let expired = state.expire_stale(timeout).await;
             if expired > 0 {
                 tracing::info!(count = expired, "expired stale sessions");
             }

@@ -1,3 +1,5 @@
+#[path = "render/browser.rs"]
+mod browser;
 #[path = "render/chunks.rs"]
 mod chunks;
 #[path = "render/diagrams.rs"]
@@ -9,6 +11,7 @@ mod markdown;
 #[path = "render/models.rs"]
 mod models;
 
+pub use browser::to_browser_html;
 use chunks::{parse_chunks, render_chunk};
 
 #[cfg(test)]

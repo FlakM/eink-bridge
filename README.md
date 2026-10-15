@@ -325,6 +325,130 @@ The neovim plugin lives in [nix_dots](https://github.com/FlakM/nix_dots) at `hom
 | `<leader>ec` | normal | cancel last session |
 | `<leader>ea` | normal | list sessions in vertical split |
 
+## OCR: caching and optional OpenAI race
+
+OCR runs locally with Ollama (`qwen2.5vl:7b`) by default. No OpenAI requests are
+made merely because an API key exists. Server-side caching and racing work with
+the native app without another APK update.
+
+### Caching
+
+All OCR entry points share an in-memory cache of successful recognitions, keyed
+by the exact rendered PNG. Unchanged handwriting skips inference; overlapping
+requests for the same image share one recognition attempt. Changed images miss
+the cache. Failures and empty results are not cached.
+
+The cache keeps at most 128 entries and 16 MiB of image keys, evicts least-recently
+used entries, and expires entries after 10 minutes of inactivity. It is cleared
+on server restart, so model/prompt changes cannot reuse old results. Under cache
+pressure an evicted in-flight entry can be recomputed. The cache does not write
+handwriting to disk; `EINK_OCR_DEBUG` still explicitly enables diagnostic PNGs.
+
+### Enable cloud OCR explicitly
+
+Create a private file containing only your OpenAI API key (restrict it with
+`chmod 600`). Keep it outside this repository. Configure the **server**, not the
+Android app:
+
+```bash
+export EINK_OCR_OPENAI_ENABLED=true
+export EINK_OPENAI_API_KEY_FILE="$HOME/.config/eink-bridge/openai-api-key"
+just run
+```
+
+For the systemd user service, add these settings with
+`systemctl --user edit eink-serve`, then restart `eink-serve`:
+
+```ini
+[Service]
+Environment=EINK_OCR_OPENAI_ENABLED=true
+Environment=EINK_OPENAI_API_KEY_FILE=%h/.config/eink-bridge/openai-api-key
+```
+
+| Server environment variable | Default | Purpose |
+|---|---|---|
+| `EINK_OCR_OPENAI_ENABLED` | unset/off | Set to `true` or `1` to opt into the race |
+| `EINK_OPENAI_API_KEY_FILE` | unset | Read the API key from a private file; takes precedence over environment keys |
+| `EINK_OPENAI_API_KEY` / `OPENAI_API_KEY` | unset | Alternative server-side API key; the EINK-prefixed value takes precedence |
+| `EINK_OPENAI_MODEL` | `gpt-4.1-mini` | Vision model for the Responses API |
+| `EINK_OPENAI_TIMEOUT_SECONDS` | `15` | Cloud deadline, 1–120 seconds; invalid values use 15 |
+| `EINK_OLLAMA_MODEL` | `qwen2.5vl:7b` | Local vision model |
+| `EINK_LLAMA_OCR_URL` | unset | Select a dedicated local llama-server instead of shared Ollama (e.g. `http://127.0.0.1:11435`) |
+
+On `amd-pc`, the `eink-ocr` system service runs the existing Qwen GGUF and
+projector with a 64–256 image-token budget, 16 CPU threads and one inference
+slot. This avoids Ollama's forced 1,024-image-token minimum for Qwen-VL. The
+service listens on loopback port 11435, shares the existing model files
+read-only, and leaves shared Ollama unchanged. The five small handwriting
+fixtures produced identical outputs at a 2.25 s median versus 12.40 s with
+the original token budget. This lower visual-detail budget is scoped to small
+handwriting crops, not general document understanding.
+
+The application cache and cloud race also apply to this backend. If a dedicated
+URL is configured but that service is unavailable, the local attempt fails and
+OpenAI may still win; it does not silently switch to shared Ollama. Unset the
+variable to restore the original local backend. For an explicit comparison:
+
+```bash
+EINK_LLAMA_OCR_URL=http://127.0.0.1:11435 just ocr-bench --compare
+```
+
+On an uncached image, local OCR and OpenAI start together. The first nonempty,
+bounded, completed transcription wins. An error, refusal, incomplete response,
+or empty text does **not** beat a still-running provider. If both fail, the
+request fails and can be retried. Missing/invalid cloud credentials disable the
+cloud provider with a startup warning while keeping local OCR available.
+
+The loser is cancelled by dropping its HTTP request, but remote computation and
+billing may continue. Each cache miss can incur a paid OpenAI call even when
+local OCR wins. Only the rendered handwriting crop and transcription prompt are
+sent, not the document, session metadata, or API key in an app payload. Requests
+use the Responses API with `store: false`; this is **not** a promise of zero data
+retention—OpenAI's applicable data policies still apply. Keys and remote error
+bodies are not logged. This server has no authentication: keep it on a trusted
+LAN, especially when cloud OCR can consume your API quota.
+
+"Valid" here means a completed, nonempty response, not verified correctness.
+Either model can still misread handwriting or invent text in a non-text mark.
+
+### Measure instead of guessing
+
+```bash
+just ocr-bench             # initial recognition, then concurrent cache hits
+just ocr-bench --compare   # uncached per-provider timings and text for five fixtures
+```
+
+`--compare` deliberately waits for both providers instead of cancelling the
+loser. With cloud OCR enabled it makes **five paid OpenAI requests**. Without
+cloud configuration it reports local-only results. Compare the text against
+the printed expected words, not just the timing. Fixture content is printed;
+normal server race logs record provider, result and latency rather than handwriting.
+
+One five-fixture comparison on this workstation (2026-10-15, CPU-only local
+Qwen vs. `gpt-4.1-mini`) measured:
+
+| Provider | Mean | Range |
+|---|---:|---:|
+| Local | 14.06 s | 12.34–18.25 s |
+| OpenAI | 1.47 s | 0.75–2.58 s |
+
+All calls completed. Both providers misread the ambiguous cursive “now?” as
+“mow?”, so speed is not a correctness guarantee. This is a small single run,
+not a production latency percentile; provider-internal caching can still apply
+even when the application cache is bypassed.
+
+Prometheus metrics at `/metrics` include:
+
+- `eink_ocr_cache_total{result="hit|miss|coalesced"}`
+- `eink_ocr_provider_requests_total{provider="local|openai",result="ok|error|cancelled"}`
+- `eink_ocr_provider_duration_seconds{provider,result}`
+- `eink_ocr_provider_wins_total{provider}`
+- `eink_ocr_provider_tokens_total{provider,kind="input|output"}`
+
+Token counts cover responses received, not unknown usage after cancellation,
+and are not an authoritative billing report. Existing aggregate OCR metrics
+remain available.
+
 ## API
 
 The full API reference lives in `docs/api.md`. The machine-readable OpenAPI document is available at `GET /api/openapi.json`.

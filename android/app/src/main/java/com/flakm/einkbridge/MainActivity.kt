@@ -91,7 +91,7 @@ class MainActivity : AppCompatActivity() {
         }
         WebView.setWebContentsDebuggingEnabled(true)
         sessionRepo = SessionRepository(this)
-        submissionManager = SubmissionManager(client)
+        submissionManager = SubmissionManager()
         docCache = DocumentCache(this)
         sessionViewModel = ViewModelProvider(this)[SessionViewModel::class.java]
         serverUrl = sessionViewModel.serverUrl
@@ -667,7 +667,7 @@ class MainActivity : AppCompatActivity() {
                     val annotationsJson = submissionManager.buildAnnotationsJson(
                         overlay.buf.strokes, overlay.bindGroups, elements
                     )
-                    val result = withTimeout(30_000) {
+                    val result = withTimeout(OCR_OPERATION_TIMEOUT_MS) {
                         withContext(Dispatchers.IO) {
                             submissionManager.submit(serverUrl, sessionId, annotationsJson, pngData, strokeJson)
                         }
@@ -763,7 +763,7 @@ class MainActivity : AppCompatActivity() {
                     )
                     Log.i(TAG, "requestUpdate: sending to server session=$sessionId")
                     annotationSentAt = SystemClock.elapsedRealtime()
-                    val ok = withTimeout(30_000) {
+                    val ok = withTimeout(OCR_OPERATION_TIMEOUT_MS) {
                         withContext(Dispatchers.IO) {
                             submissionManager.requestUpdate(serverUrl, sessionId, annotationsJson)
                         }

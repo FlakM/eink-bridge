@@ -78,6 +78,22 @@ pub static OCR_DURATION: LazyLock<Histogram> = LazyLock::new(|| {
 });
 pub static OCR_TOKENS: LazyLock<IntCounterVec> =
     LazyLock::new(|| reg!(counter_vec "eink_ocr_tokens_total", "Ollama token counts", &["kind"]));
+pub static OCR_CACHE: LazyLock<IntCounterVec> = LazyLock::new(
+    || reg!(counter_vec "eink_ocr_cache_total", "OCR cache lookups (hit, miss, coalesced)", &["result"]),
+);
+pub static OCR_PROVIDER_REQUESTS: LazyLock<IntCounterVec> = LazyLock::new(
+    || reg!(counter_vec "eink_ocr_provider_requests_total", "Provider outcomes (ok, error, cancelled)", &["provider", "result"]),
+);
+pub static OCR_PROVIDER_DURATION: LazyLock<HistogramVec> = LazyLock::new(|| {
+    reg!(histogram_vec "eink_ocr_provider_duration_seconds", "Provider duration including cancelled attempts", &["provider", "result"],
+        vec![0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0])
+});
+pub static OCR_PROVIDER_WINS: LazyLock<IntCounterVec> = LazyLock::new(
+    || reg!(counter_vec "eink_ocr_provider_wins_total", "Successful uncached OCR selections", &["provider"]),
+);
+pub static OCR_PROVIDER_TOKENS: LazyLock<IntCounterVec> = LazyLock::new(
+    || reg!(counter_vec "eink_ocr_provider_tokens_total", "Tokens reported by completed provider responses", &["provider", "kind"]),
+);
 pub static OCR_IMAGE_PIXELS: LazyLock<Histogram> = LazyLock::new(|| {
     reg!(
         histogram "eink_ocr_image_pixels",
@@ -133,6 +149,11 @@ pub fn init() {
     let _ = &*OCR_REQUESTS;
     let _ = &*OCR_DURATION;
     let _ = &*OCR_TOKENS;
+    let _ = &*OCR_CACHE;
+    let _ = &*OCR_PROVIDER_REQUESTS;
+    let _ = &*OCR_PROVIDER_DURATION;
+    let _ = &*OCR_PROVIDER_WINS;
+    let _ = &*OCR_PROVIDER_TOKENS;
     let _ = &*OCR_IMAGE_PIXELS;
     let _ = &*WS_CONNECTIONS_ACTIVE;
     let _ = &*LONG_POLL_TOTAL;

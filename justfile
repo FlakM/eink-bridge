@@ -43,6 +43,10 @@ eval:
 eval-update:
     cd {{server_dir}} && UPDATE_GOLDENS=1 cargo test --test eval_render_golden_test --test eval_contract_test -- --nocapture
 
+# OCR fixture benchmark; --compare runs both providers uncached (cloud calls are paid)
+ocr-bench *args='':
+    cd {{server_dir}} && cargo run --bin eink-ocr-bench -- {{args}}
+
 # ─── Coverage ─────────────────────────────────────────────────────────
 
 # run tests with coverage summary (text report)

@@ -2,13 +2,25 @@ use base64::Engine as _;
 use image::{ImageBuffer, Rgb, RgbImage};
 use std::io::Cursor;
 use std::time::Instant;
+use tokio::sync::Mutex;
 use tracing::info;
+
+mod cache;
+#[cfg(test)]
+mod http_tests;
+mod providers;
+mod race;
+
+pub use race::ProviderBenchmark;
 
 pub struct OcrEngine {
     debug_save: bool,
     client: reqwest::Client,
     ollama_url: String,
     ollama_model: String,
+    llama_url: Option<String>,
+    openai: Option<providers::OpenAi>,
+    cache: Mutex<cache::RecognitionCache>,
 }
 
 impl OcrEngine {
@@ -17,92 +29,108 @@ impl OcrEngine {
         let ollama_url = std::env::var("EINK_OLLAMA_URL")
             .unwrap_or_else(|_| "http://localhost:11434".to_string());
         let ollama_model =
-            std::env::var("EINK_OLLAMA_MODEL").unwrap_or_else(|_| "glm-ocr".to_string());
+            std::env::var("EINK_OLLAMA_MODEL").unwrap_or_else(|_| "qwen2.5vl:7b".to_string());
+        let llama_url = std::env::var("EINK_LLAMA_OCR_URL")
+            .ok()
+            .filter(|url| !url.trim().is_empty());
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .build()
             .map_err(|e| format!("failed to build HTTP client: {e}"))?;
         info!(ollama_url = %ollama_url, ollama_model = %ollama_model, "OCR engine initialized");
+        if let Some(url) = &llama_url {
+            info!(url, "Dedicated local OCR runtime selected");
+        }
         Ok(Self {
             debug_save,
             client,
             ollama_url,
             ollama_model,
+            llama_url,
+            openai: providers::OpenAi::from_env(),
+            cache: Mutex::new(cache::RecognitionCache::default()),
         })
     }
 
     pub async fn recognize_image(&self, png: &[u8]) -> Result<String, String> {
+        let t = Instant::now();
+        let cell = self.cache.lock().await.entry(png, Instant::now());
+        let hit = cell.get().is_some_and(Result::is_ok);
+        let mut initialized = false;
+        let result = cell
+            .get_or_init(|| {
+                initialized = true;
+                self.recognize_uncached(png)
+            })
+            .await;
+        if result.is_err() {
+            // Existing waiters share this failure, but a later request may retry.
+            self.cache.lock().await.discard(png, &cell);
+        }
+        crate::metrics::OCR_CACHE
+            .with_label_values(&[if hit {
+                "hit"
+            } else if initialized {
+                "miss"
+            } else {
+                "coalesced"
+            }])
+            .inc();
+        crate::metrics::OCR_REQUESTS
+            .with_label_values(&[if result.is_ok() { "ok" } else { "error" }])
+            .inc();
+        crate::metrics::OCR_DURATION.observe(t.elapsed().as_secs_f64());
+        result
+            .as_ref()
+            .map(|value| {
+                info!(
+                    provider = value.provider,
+                    cache_hit = hit,
+                    wall_ms = t.elapsed().as_millis(),
+                    "OCR complete"
+                );
+                value.text.clone()
+            })
+            .map_err(Clone::clone)
+    }
+
+    async fn recognize_uncached(&self, png: &[u8]) -> Result<race::Recognition, String> {
         if self.debug_save {
             let _ = save_debug_png(png).map(|path| info!(path = %path, "OCR debug PNG saved"));
         }
-        let t = Instant::now();
-        let b64 = base64::engine::general_purpose::STANDARD.encode(png);
-        let body = serde_json::json!({
-            "model": self.ollama_model,
-            "prompt": "Transcribe the handwritten text in this image exactly as written. Output only the transcribed text, nothing else.",
-            "images": [b64],
-            "stream": false,
-        });
-        let resp = match self
-            .client
-            .post(format!("{}/api/generate", self.ollama_url))
-            .json(&body)
-            .send()
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                crate::metrics::OCR_REQUESTS
-                    .with_label_values(&["error"])
-                    .inc();
-                return Err(format!("Ollama request: {e}"));
-            }
-        };
-        if !resp.status().is_success() {
-            crate::metrics::OCR_REQUESTS
-                .with_label_values(&["error"])
-                .inc();
-            return Err(format!("Ollama returned {}", resp.status()));
-        }
-        let json: serde_json::Value = match resp.json().await {
-            Ok(j) => j,
-            Err(e) => {
-                crate::metrics::OCR_REQUESTS
-                    .with_label_values(&["error"])
-                    .inc();
-                return Err(format!("Ollama parse: {e}"));
-            }
-        };
-        let text = json["response"].as_str().unwrap_or("").trim().to_string();
-        let elapsed = t.elapsed();
-        let eval_ms = json["eval_duration"]
-            .as_u64()
-            .map(|ns| ns / 1_000_000)
-            .unwrap_or(0);
-        let prompt_ms = json["prompt_eval_duration"]
-            .as_u64()
-            .map(|ns| ns / 1_000_000)
-            .unwrap_or(0);
-        let eval_tokens = json["eval_count"].as_u64().unwrap_or(0);
-        let prompt_tokens = json["prompt_eval_count"].as_u64().unwrap_or(0);
-        info!(
-            text = %text,
-            wall_ms = elapsed.as_millis(),
-            prompt_eval_ms = prompt_ms,
-            token_eval_ms = eval_ms,
-            "OCR complete"
-        );
-        crate::metrics::OCR_REQUESTS
-            .with_label_values(&["ok"])
+        let image = base64::engine::general_purpose::STANDARD.encode(png);
+        let local = race::observe("local", self.recognize_local(&image));
+        let result = if let Some(openai) = &self.openai {
+            race::first_valid(local, race::observe("openai", openai.recognize(&image))).await
+        } else {
+            local.await
+        }?;
+        crate::metrics::OCR_PROVIDER_WINS
+            .with_label_values(&[result.provider])
             .inc();
-        crate::metrics::OCR_DURATION.observe(elapsed.as_secs_f64());
-        crate::metrics::OCR_TOKENS
-            .with_label_values(&["prompt"])
-            .inc_by(prompt_tokens);
-        crate::metrics::OCR_TOKENS
-            .with_label_values(&["eval"])
-            .inc_by(eval_tokens);
-        Ok(text)
+        Ok(result)
+    }
+
+    async fn recognize_local(&self, image: &str) -> Result<String, String> {
+        if let Some(url) = &self.llama_url {
+            providers::llama(&self.client, url, image).await
+        } else {
+            providers::ollama(&self.client, &self.ollama_url, &self.ollama_model, image).await
+        }
+    }
+
+    /// Explicit benchmark: bypasses the cache and lets both providers finish.
+    /// Cloud calls still require EINK_OCR_OPENAI_ENABLED and a server-side key.
+    pub async fn compare_image(&self, png: &[u8]) -> Vec<ProviderBenchmark> {
+        let image = base64::engine::general_purpose::STANDARD.encode(png);
+        let local = race::benchmark("local", self.recognize_local(&image));
+        if let Some(openai) = &self.openai {
+            let (local, cloud) =
+                tokio::join!(local, race::benchmark("openai", openai.recognize(&image)));
+            vec![local, cloud]
+        } else {
+            vec![local.await]
+        }
     }
 
     pub async fn recognize_strokes(
@@ -174,19 +202,20 @@ fn render_strokes_to_png(
         return Err("no stroke points".into());
     }
 
-    // Cap scale so the longer side stays within MAX_SIDE
-    let natural_w = (max_x - min_x) * BASE_SCALE + 2.0 * PADDING as f64;
-    let natural_h = (max_y - min_y) * BASE_SCALE + 2.0 * PADDING as f64;
-    let scale = if natural_w.max(natural_h) > MAX_SIDE as f64 {
-        BASE_SCALE * MAX_SIDE as f64 / natural_w.max(natural_h)
+    // Reserve padding before scaling, otherwise clamping the image dimensions
+    // cuts off the final letters in wide or tall annotation groups.
+    let max_extent = (max_x - min_x).max(max_y - min_y);
+    let available = (MAX_SIDE - 2 * PADDING) as f64;
+    let scale = if max_extent * BASE_SCALE > available {
+        available / max_extent
     } else {
         BASE_SCALE
     };
     let stroke_width = 3.0 * scale;
 
-    let w = ((max_x - min_x) * scale) as u32 + 2 * PADDING;
+    let w = ((max_x - min_x) * scale).ceil() as u32 + 2 * PADDING;
     let w = w.clamp(MIN_DIM, MAX_SIDE);
-    let h = ((max_y - min_y) * scale) as u32 + 2 * PADDING;
+    let h = ((max_y - min_y) * scale).ceil() as u32 + 2 * PADDING;
     let h = h.clamp(MIN_DIM, MAX_SIDE);
 
     let mut img: RgbImage = ImageBuffer::from_pixel(w, h, Rgb([255, 255, 255]));
@@ -268,6 +297,111 @@ fn draw_thick_line(img: &mut RgbImage, from: (f64, f64), to: (f64, f64), width: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn mock_engine(
+        response: serde_json::Value,
+        model: &str,
+    ) -> (OcrEngine, tokio::sync::oneshot::Receiver<serde_json::Value>) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let sender = std::sync::Arc::new(tokio::sync::Mutex::new(Some(tx)));
+        let app = axum::Router::new().route(
+            "/api/generate",
+            axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+                let sender = sender.clone();
+                let response = response.clone();
+                async move {
+                    sender.lock().await.take().unwrap().send(body).unwrap();
+                    axum::Json(response)
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (
+            OcrEngine {
+                debug_save: false,
+                client: reqwest::Client::new(),
+                ollama_url: format!("http://{address}"),
+                ollama_model: model.into(),
+                llama_url: None,
+                openai: None,
+                cache: Mutex::new(cache::RecognitionCache::default()),
+            },
+            rx,
+        )
+    }
+
+    #[tokio::test]
+    async fn ocr_request_bounds_generation_without_cutting_off_markdown() {
+        let (engine, request) = mock_engine(
+            serde_json::json!({"response": "REMOVE IT", "done_reason": "stop"}),
+            "qwen2.5vl:7b",
+        )
+        .await;
+        assert_eq!(engine.recognize_image(b"png").await.unwrap(), "REMOVE IT");
+        let body = request.await.unwrap();
+        assert_eq!(body["model"], "qwen2.5vl:7b");
+        assert!(body["prompt"].as_str().unwrap().contains("handwritten"));
+        assert_eq!(body["options"]["num_predict"], 256);
+        assert!(body["options"]["stop"].is_null());
+        assert_eq!(body["images"][0], "cG5n");
+    }
+
+    #[tokio::test]
+    async fn empty_or_truncated_model_output_is_not_successful_ocr() {
+        for response in [
+            serde_json::json!({"response": "   ", "done_reason": "stop"}),
+            serde_json::json!({"response": "REMOVE REMOVE", "done_reason": "length"}),
+            serde_json::json!({"error": "model failed"}),
+        ] {
+            let (engine, _request) = mock_engine(response, "glm-ocr").await;
+            assert!(engine.recognize_image(b"png").await.is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn repeated_images_reuse_recognition_without_a_second_provider_call() {
+        let (engine, request) = mock_engine(
+            serde_json::json!({"response": "REMOVE IT", "done_reason": "stop"}),
+            "qwen2.5vl:7b",
+        )
+        .await;
+        assert_eq!(
+            engine.recognize_image(b"same image").await.unwrap(),
+            "REMOVE IT"
+        );
+        request.await.unwrap();
+        assert_eq!(
+            engine.recognize_image(b"same image").await.unwrap(),
+            "REMOVE IT"
+        );
+    }
+
+    #[test]
+    fn large_stroke_groups_keep_padding_on_the_right_and_bottom() {
+        for stroke in [
+            vec![[0.0, 0.0], [1000.0, 100.0]],
+            vec![[0.0, 0.0], [100.0, 1000.0]],
+        ] {
+            let png = render_strokes_to_png(&[stroke], &[]).unwrap();
+            let image = image::load_from_memory(&png).unwrap().to_rgb8();
+            let black: Vec<_> = image
+                .enumerate_pixels()
+                .filter(|(_, _, p)| p.0 == [0, 0, 0])
+                .collect();
+            let right = black.iter().map(|(x, _, _)| *x).max().unwrap();
+            let bottom = black.iter().map(|(_, y, _)| *y).max().unwrap();
+            assert!(
+                right < image.width() - PADDING / 2,
+                "right edge was clipped"
+            );
+            assert!(
+                bottom < image.height() - PADDING / 2,
+                "bottom edge was clipped"
+            );
+        }
+    }
 
     #[test]
     fn render_strokes_produces_valid_png() {

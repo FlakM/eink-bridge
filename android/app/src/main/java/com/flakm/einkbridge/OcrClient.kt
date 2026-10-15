@@ -18,12 +18,19 @@ import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
 private const val TAG = "OcrClient"
+internal const val OCR_OPERATION_TIMEOUT_MS = 140_000L
 
 internal class OcrClient(private val getServerUrl: () -> String) {
-    private val http = OkHttpClient.Builder()
-        .connectTimeout(3, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
-        .build()
+    private val http = buildHttpClient()
+
+    companion object {
+        internal fun buildHttpClient(): OkHttpClient = OkHttpClient.Builder()
+            .connectTimeout(3, TimeUnit.SECONDS)
+            // The server allows up to 120 seconds for a cold Ollama request.
+            .readTimeout(130, TimeUnit.SECONDS)
+            .callTimeout(135, TimeUnit.SECONDS)
+            .build()
+    }
 
     suspend fun recognize(strokes: List<Stroke>): String? {
         if (strokes.isEmpty()) return null
@@ -73,14 +80,15 @@ internal class OcrClient(private val getServerUrl: () -> String) {
                     .url("${getServerUrl()}/api/ocr")
                     .post(body)
                     .build()
-                val response = http.newCall(request).execute()
-                if (response.isSuccessful) {
-                    val text = JSONObject(response.body?.string() ?: return@withContext null)
-                        .optString("text")
-                    text.takeIf { it.isNotBlank() }
-                } else {
-                    Log.w(TAG, "server OCR returned ${response.code}")
-                    null
+                http.newCall(request).execute().use { response ->
+                    if (response.isSuccessful) {
+                        val text = JSONObject(response.body?.string() ?: return@withContext null)
+                            .optString("text")
+                        text.takeIf { it.isNotBlank() }
+                    } else {
+                        Log.w(TAG, "server OCR returned ${response.code}")
+                        null
+                    }
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "server OCR failed: ${e.javaClass.simpleName}: ${e.message}")
