@@ -1,161 +1,265 @@
 ---
 name: eink-pr
-description: Review a GitHub pull request on the Boox — check the PR out into a git worktree, open the diff in Neovim in a new herdr tab, analyze the wider impact of the changes, then send a distilled review to eink and mark the key locations with Neovim global named marks. Use for "/eink-pr", "review this PR on eink", "put this PR on the tablet", or any request to review a pull request (URL, number, or branch) on the e-ink reader.
+description: Review a pull request on the Boox with a parallel subagent workflow — check the code out into a git worktree, open the diff in Neovim in a new herdr tab, run several reviewers in parallel, filter their findings down to the few that matter, pass them through the brevity editor, then send a short actionable review to eink and mark the key lines with global marks. Use for "/eink-pr", "review this PR on eink", "put this PR on the tablet", "self-review my change on the tablet", or reviewing a PR link on the e-ink reader. Handles several PRs at once.
 ---
 
 # E-Ink PR Review
 
-Turn a pull request into something the user can read and annotate on the Boox, with
-the code open beside them in Neovim so a handwritten note can be acted on immediately.
+Turn a pull request into something short and worth reading on the Boox, with the code
+open beside the reader so a handwritten note becomes an edit immediately.
 
-This skill is the *setup + impact analysis* half. All e-ink delivery, document
-authoring, and feedback handling live in the **`eink`** skill — read it and follow its
-contract (request purpose when unclear, background observer with a confirmed
-handshake, `feedback_id`/`expected_version`/`consumed_annotations` on every rewrite,
-rearm before drafting). Do not duplicate or diverge from that protocol.
+Delivery, document protocol, and feedback acknowledgement belong to the **`eink`**
+skill — read it and follow its contract (ask the review purpose when unclear, a
+background observer with a confirmed handshake, `feedback_id` + `expected_version` +
+`consumed_annotations` on every rewrite, rearm before drafting). Locations and marks
+belong to the **`jump`** skill. This skill orchestrates them; it does not reimplement
+either.
+
+## Why a pipeline
+
+One prompt that reads a diff and writes a summary produces uneven reviews: many nits,
+repeated points, missed contracts. Split the work, and each stage is checkable:
+
+```
+resolve PR -> worktree -> Neovim tab
+                 |
+      parallel lens reviewers (subagents) -> findings.json
+                 |
+      review.py filter   (mechanical: only relevant, actionable findings)
+                 |
+      ihaveadhd          (model: brief and human)
+                 |
+      review.py lint     (mechanical gate: refuses verbose output)
+                 |
+      review.py render   (marks + brief) -> eink delivery -> feedback -> jump
+```
+
+Any stage can fail without failing the review: if the filter box keeps nothing, say the
+PR looks clean rather than padding the page.
 
 ## Preconditions
 
-Check once and report honestly rather than half-doing the setup:
-
 ```bash
 test "${HERDR_ENV:-}" = 1 && echo herdr-ok || echo herdr-missing
-command -v gh nvim git
+command -v gh nvim git jq
 ```
 
-- **Not inside herdr** (`HERDR_ENV != 1`): still create the worktree and analyze the
-  PR, but skip the tab and the marks, and tell the user the Neovim/ marks step needs a
-  herdr-managed pane. Per the herdr skill, do not drive herdr from outside.
-- **No `gh`**: ask for the PR URL and a base ref, or accept a local branch.
-- **No PR given**: ask which PR, or offer to review the current branch against its
-  base. Do not guess a number.
-- **No `nvim`**: skip marks; keep everything else.
+- **Not inside herdr**: still do the worktree, the review, the filter and the delivery;
+  skip the tab and the marks and say so. Do not drive herdr from outside a pane.
+- **No `gh`**: take a PR URL and a base ref, or review the current branch.
+- **No `nvim`**: skip marks; the brief still carries `file:line`.
 
-## 1. Resolve the PR and its base
+## 1. Resolve the review target
+
+Three shapes, same pipeline:
+
+- **Self-review of work just made** (Claude Code just wrote the change): no PR yet.
+  Use the current branch against its base — `git merge-base origin/HEAD HEAD` — and
+  title it `Changes: <short description>`. This is the "did I get it right?" pass.
+- **A PR link or number** (a teammate's): `gh pr view <pr> --json
+  number,title,url,baseRefName,headRefName,additions,deletions,changedFiles,author`.
+- **A branch name**: `git fetch origin <branch>` and review it against the merge base.
+
+Compute the **merge base**, not the base tip: the diff is
+`merge-base(base, head)..head`, so unrelated upstream commits stay out.
+
+Confirm the review focus in one line when it is not obvious from the PR title; do not
+re-interview the user. A PR title plus files changed is usually enough to state what to
+look at.
+
+## 2. Check the code out into a worktree
 
 ```bash
-gh pr view <pr> --json number,title,url,baseRefName,headRefName,additions,deletions,changedFiles,author
-gh pr diff <pr> --name-only
-```
-
-Compute the **merge base** with the target branch (`origin/<baseRefName>`), not the
-base tip: the review diff is `merge-base(base, head)..head`, so upstream commits that
-are not part of the PR stay out.
-
-## 2. Check the code out into a git worktree
-
-Use `refs/pull/<n>/head`, which works for fork PRs and needs no remote setup:
-
-```bash
-git fetch origin pull/<n>/head
+git fetch origin pull/<n>/head          # PRs, including forks
 git worktree add --detach "<worktree-dir>" FETCH_HEAD
 ```
 
-- **Stable, reviewable path**: `<repo-parent>/<repo>-worktrees/pr-<n>`.
-- **Reuse**: if the worktree already exists, `git -C <dir> fetch origin pull/<n>/head`
-  and `git -C <dir> checkout --detach FETCH_HEAD` instead of creating a second one.
-- **Track the exact revision** you analyzed (the commit sha) so later feedback refers
-  to a known state.
-- Prefer a worktree over checking out in place: the user's own working tree is never
-  disturbed, and `git worktree remove` cleans up.
+- Path: `<repo-parent>/<repo>-worktrees/pr-<n>` (or `.../self-<branch>`).
+- **Reuse** an existing worktree: fetch and `checkout --detach` instead of adding a second.
+- Record the **sha** you reviewed. Feedback later refers to a known state.
+- Never check out in the user's own working tree.
 
 ## 3. Open the diff in Neovim in a new herdr tab
 
-Only when `HERDR_ENV=1`. Read IDs from the JSON responses; never guess them.
+Only when `HERDR_ENV=1`. Read IDs from JSON; never guess them.
 
 ```bash
 herdr tab create --workspace "$HERDR_WORKSPACE_ID" --cwd "<worktree-dir>" \
-  --label "PR <n>: <short title>"
+  --label "PR <n>: <short title>" --no-focus
 # -> .result.root_pane.pane_id
-herdr pane run <pane_id> "nvim --listen <socket> -c 'DiffviewOpen <merge-base>..HEAD'"
+export EINK_PR_SOCKET=/tmp/eink-pr-<n>.sock
+herdr pane run <pane_id> "nvim --listen $EINK_PR_SOCKET -c 'DiffviewOpen <merge-base>..HEAD'"
 ```
 
-- **Always pass `--listen <socket>`** (e.g. `/tmp/eink-pr-<n>.sock`). Marks and later
-  navigation need a reachable Neovim; without it step 5 cannot work.
-- `DiffviewOpen <merge-base>..HEAD` shows the PR diff. Add changed paths as arguments
-  when the user wants only specific files.
-- Diff review only: `internal` is available as the base when the PR is already merged
-  or the user asks for a plain diff.
-- Wait for readiness (`herdr pane wait-output <pane_id> --match '<something nvim shows>'`
-  or poll for the socket) before setting marks — do not send commands into a shell that
-  has not started Neovim yet.
-- Keep the user's focus: this is a new tab the user asked for; do not steal focus from
-  their current pane without being asked.
+- **Always pass `--listen`** and export `EINK_PR_SOCKET`; marks and the `jump` skill
+  depend on it.
+- Wait for the socket (`until [ -S "$EINK_PR_SOCKET" ]`) before sending anything.
+- `--no-focus` keeps the user where they were. This is their editor, not yours.
 
-## 4. Understand the wider impact
+## 4. Run the lens reviewers in parallel
 
-The diff alone is a weak review; the value here is what the change *touches*. Work the
-diff hunk by hunk, and for every non-trivial change establish:
+Dispatch **separate subagents in the same turn** so they run concurrently. Give each
+one the worktree path, the diff range, and one lens. Cap at four lenses for a normal
+PR; add the conditional ones only when the diff warrants it.
 
-- **Callers and references** of changed public items (`rg`/grep for the symbol), so the
-  review can say who is affected, not just what changed.
-- **Interfaces and contracts** — public API, HTTP/proto schema, config keys, CLI flags,
-  on-disk formats. These break silently and deserve their own callout.
-- **Tests** that cover, or fail to cover, the new behavior.
-- **Risk shape** — concurrency, migrations, error handling, feature flags, defaults.
+| Lens | Looks for | When |
+|---|---|---|
+| correctness | logic errors, off-by-one, wrong default, unhandled error path, swallowed result | always |
+| contracts | public API/HTTP/proto/schema, config keys, CLI flags, on-disk formats, versioning | always for libraries/services |
+| tests | behavior with no test, tests that would pass with the bug present | always |
+| concurrency | locks across `await`, races, unbounded growth, retries without backoff | when async/shared state changes |
+| security | authz checks, injection, secrets in logs, unsafe deserialization | when trust boundaries move |
+| docs | stale doc comment, README/code drift | when docs change |
 
-For a large PR, delegate the survey to a subagent (`explore`/`general`) and keep only
-its conclusions. Finish with a ranked shortlist of the **most important pieces** — the
-few changes a reviewer must actually think about. Everything else is context.
+Each reviewer must return **only** findings in this shape, and nothing else:
 
-## 5. Send the review to eink and mark the jump points
+```json
+{"findings": [{
+  "lens": "correctness",
+  "severity": "critical|major|minor|nit",
+  "confidence": 0.0,
+  "file": "server/src/app.rs",
+  "line": 170,
+  "symbol": "expire_loop",
+  "tags": ["behavior-change", "public-api"],
+  "claim": "one factual problem statement",
+  "evidence": "what in the diff shows it",
+  "action": "what to change"
+}]}
+```
 
-Map the shortlist to Neovim **global named marks** (uppercase `A`–`Z`): they are
-jumpable across files and persist in shada, so the reader can note "B" on the tablet
-and the user can press `'B` to land in the file.
+Instruct them explicitly: a finding without a real `file`, a `line` inside that file, a
+claim and an action is not a finding — drop it rather than filling the quota. Inventing
+a problem to seem useful is worse than returning none, and it is the fastest way to
+lose the reader's trust. Give them the exact revision so the line numbers are stable.
+
+Collect every reviewer's findings into one file:
 
 ```bash
-python3 <skill-base>/scripts/nvim_marks.py --socket /tmp/eink-pr-<n>.sock \
-  --marks "A:src/app.rs:42,B:src/session.rs:118,C:proto/api.proto:9"
+python3 <skill-base>/scripts/review.py validate --findings findings.json   # schema check
 ```
 
-- Use **at most ~6** marks tied to the shortlist; more than that is not a priority list.
-- Point each mark at the line the reviewer must read, not the top of the file.
-- The helper sets marks buffer-targeted (the open diff view is untouched) and **fails
-  loudly** if a mark does not land — marks persist across sessions, so a silent failure
-  would be read back as a stale mark from an earlier review. Treat a non-zero exit as a
-  real failure and say so rather than claiming the marks are set.
-- If the socket is gone, reopen Neovim with `--listen` (step 3) and retry.
+## 5. Filter to only relevant feedback
 
-Then write the document and hand off to the `eink` skill for delivery:
+This is the step that keeps the tablet readable. Run it before anything is written for
+a human:
 
-- **Title**: `PR <n>: <title>`.
-- **Overview**: one or two bullets — what the PR does and why it matters.
-- **Important pieces**: one bullet per marked location, each starting with its mark
-  letter (e.g. `**B** — session expiry now also clears notifiers; check the miss path.`)
-  and phrased as *what to scrutinize*, not a restatement of the diff.
-- **Impact / risk**: callers and contracts from step 4, and anything you could not
-  verify.
-- **Marks legend**: a short line mapping `A`–`F` to `file:line`, so the marks are useful
-  even without the tablet.
-- Follow the `eink` skill's authoring rules (bullets over prose, at most one diagram)
-  and its delivery contract (background observer, confirmed handshake, `feedback_id` +
-  `expected_version` + `consumed_annotations`, rearm before drafting).
-- Suggest a `tags` entry such as `pr=<n>` when creating the session, so the review is
-  findable later.
+```bash
+python3 <skill-base>/scripts/review.py filter \
+  --findings findings.json --checkout "<worktree-dir>" --max 6 --out filtered.json
+```
 
-## 6. When the review comes back
+It drops, with a reason for each: invalid findings, anchors past the end of the file,
+nits, low-confidence non-critical claims, high-severity claims with no evidence, and
+near-duplicates (keeping the stronger one). It ranks by severity, then confidence, then
+blast radius and caps per file and in total. Read the printed reasons: if it drops
+something you believe is real, fix the finding (add evidence, correct the line) and
+re-run — do not bypass the filter.
 
-Handwritten notes arrive with an anchor to the nearby text (the mark letter is often
-part of it) and an index into the annotations array. Act on the note against the
-worktree checkout:
+When several reviewers found the same theme in different words, a short synthesis
+subagent may merge them into one finding **before** filtering; it must not add findings
+of its own. Skip it for small PRs.
 
-- Resolve "the thing marked B" through the marks legend, and read the line before
-  editing.
-- Make the requested change **in the worktree**, not the user's main checkout, unless
-  they ask otherwise.
-- Keep the same e-ink protocol: acknowledge only the annotations you actually handled,
-  and record the revision (sha) the feedback applied to.
+If nothing survives, the honest answer is "no actionable findings" — send a two-line
+brief saying so, or tell the user and stop.
 
-## Degradation summary
+## 6. Make it brief and human
+
+Two layers, and both must pass:
+
+1. **`ihaveadhd`** — rewrite the findings text the way a terse human would say it. Give
+   it the finding text, not the diff. It keeps every `file:line`, mark letter and
+   number, and cuts hedging, filler, restatement and non-actionable lines.
+2. **The lint gate** — mechanical, and it blocks delivery:
+
+```bash
+python3 <skill-base>/scripts/review.py render --findings filtered.json --out brief.md --marks-out marks.json
+python3 <skill-base>/scripts/review.py lint --file brief.md    # non-zero = fix it, do not send
+```
+
+Wire the `ihaveadhd` output back into `filtered.json` (`claim`/`action`) and re-render,
+so the renderer still owns letters and the legend. If lint fails, cut the words it
+names and re-run; never send a failing brief because it "mostly reads fine".
+
+## 7. Marks and jumpable links
+
+Render assigns `A`–`F` to the kept findings. Set them in the running Neovim and verify:
+
+```bash
+python3 <skill-base>/scripts/nvim_marks.py --socket "$EINK_PR_SOCKET" \
+  --marks "A:server/src/app.rs:170,B:proto/api.proto:12" --verify A,B
+```
+
+Then attach permalinks pinned to the reviewed sha, so the legend works away from the
+tablet (the `jump` skill covers this):
+
+```bash
+jump github-link --file server/src/app.rs --start-line 170 --end-line 176
+```
+
+Re-render with `--links links.json` to put the URLs in the legend. If the socket is
+gone, reopen Neovim with `--listen` and retry; if marks cannot be set, say so and still
+send the legend as text.
+
+## 8. Deliver, then hand the reader the wheel
+
+Create the session and deliver the brief through the `eink` skill's contract — its
+observer, its handshake, its version guard. Add `tags` with `pr=<n>` and `sha=<short>`
+so the review is findable.
+
+Tell the user, in one line: what is on the tablet, the session id, and that `A`–`F` jump
+to the important lines in the tab you opened. Nothing else.
+
+## 9. When feedback comes back
+
+A note arrives anchored to nearby text and often names a mark letter.
+
+1. Resolve it: `review.py`'s marks map, or `jump` — `nvim_marks.py --jump B` puts the
+   cursor on the line the reader meant.
+2. Read the line before changing anything.
+3. Edit **in the worktree**, never the user's main checkout, unless asked.
+4. Reply through `eink` (acknowledge only what you handled) and note the sha.
+5. If the note asks for an explanation rather than a change, answer it in the next
+   brief — still under `ihaveadhd`.
+
+## Several PRs at once
+
+Every per-PR resource is keyed by number, so reviews cannot collide:
+
+| Resource | Key |
+|---|---|
+| worktree | `pr-<n>` |
+| socket | `/tmp/eink-pr-<n>.sock` |
+| herdr tab | `PR <n>: <title>` |
+| eink session | one per PR, one observer each |
+
+Run the pipeline per PR; the parallel lens reviewers can span PRs in one turn. Record
+live reviews in `~/.local/state/eink-bridge/pr-reviews.json` (`pr`, `sha`, `session`,
+`socket`, `worktree`) so a second run reattaches instead of duplicating, and so cleanup
+knows what it owns. Clean up by removing only what you created: `herdr tab close`
+(before closing a tab you made), `git worktree remove`, and the socket file.
+
+## Testing this workflow
+
+```bash
+python3 harness/eink-pr/run_scenarios.py            # deterministic, run on every change
+python3 harness/eink-pr/run_scenarios.py --live     # agent-level, slower, opt-in
+just harness-test                                   # all harness tests
+```
+
+The scenarios cover a noisy self-review, a teammate PR with a contract change, a large
+noisy PR, a docs-only PR, a clean PR, and chatty agent output. `--list` shows them.
+When a scenario fails, fix the pipeline (or the scenario), never the assertion.
+
+## Degradation
 
 | Missing | Do |
 |---|---|
-| herdr pane | Worktree + analysis; print the exact nvim command; skip marks; say so. |
-| nvim | Worktree + analysis + eink review; skip marks; say so. |
-| socket | Reopen nvim with `--listen`, else skip marks. |
-| `gh` | Ask for URL/base, or review the current branch. |
-| eink server | Report the outage; the worktree and analysis still stand. |
+| herdr pane | worktree + review + delivery; skip tab and marks; say so |
+| nvim / socket | skip marks; keep the legend as text |
+| `gh` | ask for URL + base, or review the current branch |
+| subagents | run the lenses sequentially, say the review is narrower |
+| eink server | report the outage; leave the worktree and brief on disk |
 
-Never claim a step succeeded because a command exited zero: read the JSON, the socket,
-and the mark verification.
+Never claim a stage succeeded because a command exited zero: read the filter's reasons,
+the lint's output, and the mark verification.

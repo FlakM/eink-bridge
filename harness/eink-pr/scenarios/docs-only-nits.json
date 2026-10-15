@@ -1,0 +1,25 @@
+{
+  "name": "docs-only-nits",
+  "kind": "pipeline",
+  "description": "A docs-only PR that only yields nits: one is kept so the page is not empty.",
+  "limit": 6,
+  "checkout": { "README.md": 120 },
+  "pr": {
+    "number": 91,
+    "title": "Fix README links",
+    "summary": ["Repairs two broken links."],
+    "changed_files": 1
+  },
+  "findings": [
+    { "lens": "docs", "severity": "nit", "confidence": 0.5, "file": "README.md", "line": 10,
+      "claim": "the anchor is misspelled", "evidence": "e", "action": "fix the anchor", "tags": [] },
+    { "lens": "docs", "severity": "nit", "confidence": 0.9, "file": "README.md", "line": 60,
+      "claim": "the code sample is outdated", "evidence": "e", "action": "update the sample", "tags": [] }
+  ],
+  "expect": {
+    "kept_claims": ["the code sample is outdated"],
+    "dropped_reasons": ["nit"],
+    "marks": { "A": "README.md:60" },
+    "lint_ok": true
+  }
+}

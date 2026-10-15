@@ -164,6 +164,26 @@ test-android:
 test-delivery:
     python3 -m unittest discover -s harness/tests -v
 
+# all harness tests: delivery, marks, review core, registry, assets
+harness-test:
+    python3 -m unittest discover -s harness/tests -v
+
+# deterministic e-ink PR review scenarios (no model, no network)
+eink-pr-scenarios *args='':
+    python3 harness/eink-pr/run_scenarios.py {{args}}
+
+# agent-level PR review scenarios (slower; drives the claude CLI)
+eink-pr-live:
+    python3 harness/eink-pr/run_scenarios.py --live
+
+# tablet -> agent return path against the running server
+eink-pr-reader *args='':
+    python3 harness/eink-pr/reader_loop.py {{args}}
+
+# several PR reviews at once: isolation, reattach, cleanup
+eink-pr-multi *args='':
+    python3 harness/eink-pr/multi_pr.py {{args}}
+
 # run android unit tests with JaCoCo coverage report
 coverage-android:
     cd android && ./gradlew testDebugUnitTest jacocoTestReport

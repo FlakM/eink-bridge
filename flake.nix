@@ -87,9 +87,10 @@
           src = ./harness;
           phases = [ "installPhase" ];
           installPhase = ''
-            mkdir -p $out/skills $out/output-styles $out/channels
+            mkdir -p $out/skills $out/output-styles $out/channels $out/agents
             cp -r $src/skills/* $out/skills/
             cp -r $src/output-styles/* $out/output-styles/
+            cp -r $src/agents/* $out/agents/
           '';
         };
       in {

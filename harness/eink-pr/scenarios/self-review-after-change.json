@@ -1,0 +1,59 @@
+{
+  "name": "self-review-after-change",
+  "kind": "pipeline",
+  "description": "Claude just changed session expiry; the reviewer is noisy with a duplicate and nits.",
+  "prefix": "Changes",
+  "limit": 4,
+  "checkout": { "server/src/app.rs": 200, "server/src/session.rs": 664 },
+  "pr": {
+    "title": "Clear notifier state when a session expires",
+    "summary": ["Expiry now clears the notifier and WebSocket maps."],
+    "changed_files": 3,
+    "impact": ["Expiry is on a timer, so a leak here grows with uptime."]
+  },
+  "findings": [
+    {
+      "lens": "correctness", "severity": "major", "confidence": 0.9,
+      "file": "server/src/app.rs", "line": 170, "symbol": "expire_loop",
+      "tags": ["behavior-change"],
+      "claim": "expiry never clears notifiers",
+      "evidence": "the loop only calls expire_stale",
+      "action": "clear the notifier map for each expired id"
+    },
+    {
+      "lens": "correctness", "severity": "minor", "confidence": 0.6,
+      "file": "server/src/app.rs", "line": 171,
+      "tags": [],
+      "claim": "expiry never clears the notifier map",
+      "evidence": "same loop as above",
+      "action": "clear the notifier map when expiring"
+    },
+    {
+      "lens": "style", "severity": "nit", "confidence": 0.8,
+      "file": "server/src/app.rs", "line": 12,
+      "claim": "the variable name is unclear",
+      "evidence": "single letter name",
+      "action": "rename it"
+    },
+    {
+      "lens": "style", "severity": "nit", "confidence": 0.7,
+      "file": "server/src/session.rs", "line": 20,
+      "claim": "prefer an early return",
+      "evidence": "nested if at the end",
+      "action": "return early instead"
+    },
+    {
+      "lens": "performance", "severity": "minor", "confidence": 0.3,
+      "file": "server/src/app.rs", "line": 50,
+      "claim": "this could be slow",
+      "evidence": "",
+      "action": "measure it someday"
+    }
+  ],
+  "expect": {
+    "kept_claims": ["expiry never clears notifiers"],
+    "dropped_reasons": ["duplicate", "nit", "low confidence"],
+    "marks": { "A": "server/src/app.rs:170" },
+    "lint_ok": true
+  }
+}

@@ -32,6 +32,8 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--socket", required=True, help="Neovim --listen socket path")
 parser.add_argument("--marks", default="", help="comma list of LETTER:path:line")
 parser.add_argument("--verify", default="", help="comma list of letters to read back")
+parser.add_argument("--jump", metavar="LETTER", help="move the cursor to that global mark")
+parser.add_argument("--open", metavar="FILE:LINE", help="open a file at a line in the current window")
 args = parser.parse_args()
 
 if not os.path.exists(args.socket):
@@ -41,6 +43,11 @@ if not os.path.exists(args.socket):
 def nvim(*extra):
     return subprocess.run(["nvim", "--server", args.socket, *extra],
                           capture_output=True, text=True, timeout=20)
+
+
+def file_line_count(path):
+    with open(path, "rb") as handle:
+        return handle.read().count(b"\n") + 1
 
 
 def check(stdout, stderr, what):
@@ -134,3 +141,31 @@ if args.verify:
     for letter in filter(None, (s.strip() for s in args.verify.split(","))):
         buffer_number, line = position(letter)
         print(f"{letter}=unset" if not buffer_number else f"{letter}={buffer_path(buffer_number)}:{line}")
+
+if args.jump:
+    letter = args.jump.strip()
+    if len(letter) != 1 or not letter.isalpha():
+        sys.exit(f"mark letter must be a single letter: {letter!r}")
+    buffer_number, line = position(letter)
+    if not buffer_number:
+        sys.exit(f"mark {letter} is not set in this Neovim")
+    # `` opens exactly at the mark; ': jumps to the start of the line.
+    sent = nvim("--remote-send", f"<Cmd>normal! `{letter}<CR>")
+    check(sent.stdout, sent.stderr, "jump")
+    here = nvim("--remote-expr", "expand('%:p') .. ':' .. line('.')")
+    print(f"jumped to {here.stdout.strip()}")
+
+if args.open:
+    path, _, line = args.open.rpartition(":")
+    if not path or not line.isdigit():
+        sys.exit(f"--open expects FILE:LINE, got {args.open!r}")
+    resolved = os.path.realpath(os.path.abspath(path))
+    if not os.path.isfile(resolved):
+        sys.exit(f"no such file: {resolved}")
+    count = file_line_count(resolved)
+    if int(line) > count:
+        sys.exit(f"{resolved} has {count} lines, cannot open line {line}")
+    sent = nvim("--remote-send", f"<Cmd>edit +{int(line)} {resolved}<CR>")
+    check(sent.stdout, sent.stderr, "open")
+    here = nvim("--remote-expr", "expand('%:p') .. ':' .. line('.')")
+    print(f"opened {here.stdout.strip()}")

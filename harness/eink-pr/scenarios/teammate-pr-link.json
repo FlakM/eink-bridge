@@ -1,0 +1,64 @@
+{
+  "name": "teammate-pr-link",
+  "kind": "pipeline",
+  "description": "A teammate's PR adds pagination; a proto change, a missing test, one unsupported claim and one stale anchor.",
+  "limit": 6,
+  "checkout": {
+    "server/src/app.rs": 200,
+    "proto/api.proto": 40,
+    "server/tests/health_test.rs": 90
+  },
+  "pr": {
+    "number": 88,
+    "title": "Add pagination to list sessions",
+    "summary": ["Adds page tokens to the session list endpoint."],
+    "changed_files": 4,
+    "impact": ["The list response shape is part of the public API."]
+  },
+  "findings": [
+    {
+      "lens": "contracts", "severity": "critical", "confidence": 0.6,
+      "file": "proto/api.proto", "line": 9,
+      "tags": ["public-api"],
+      "claim": "the new field reuses tag 3",
+      "evidence": "",
+      "action": "pick an unused tag"
+    },
+    {
+      "lens": "contracts", "severity": "major", "confidence": 0.9,
+      "file": "proto/api.proto", "line": 12,
+      "tags": ["public-api", "behavior-change"],
+      "claim": "the new field is required and breaks old clients",
+      "evidence": "the field has no optional marker",
+      "action": "mark it optional or version the message"
+    },
+    {
+      "lens": "tests", "severity": "major", "confidence": 0.8,
+      "file": "server/tests/health_test.rs", "line": 40,
+      "tags": [],
+      "claim": "the pagination path has no test",
+      "evidence": "no test covers the last page",
+      "action": "cover the empty page and the last page"
+    },
+    {
+      "lens": "correctness", "severity": "minor", "confidence": 0.8,
+      "file": "server/src/app.rs", "line": 9999,
+      "tags": [],
+      "claim": "the cursor is not validated",
+      "evidence": "grep",
+      "action": "check the cursor"
+    }
+  ],
+  "expect": {
+    "kept_claims": [
+      "the new field is required and breaks old clients",
+      "the pagination path has no test"
+    ],
+    "dropped_reasons": ["no evidence", "stale anchor"],
+    "marks": {
+      "A": "proto/api.proto:12",
+      "B": "server/tests/health_test.rs:40"
+    },
+    "lint_ok": true
+  }
+}

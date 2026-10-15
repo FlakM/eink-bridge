@@ -1,0 +1,7 @@
+{
+  "name": "tight-agent-output",
+  "kind": "lint",
+  "description": "The shape the ihaveadhd pass should leave behind: short, actionable, no summary, no dumps.",
+  "brief": "briefs/good-brief.md",
+  "expect": { "lint_rules": [] }
+}

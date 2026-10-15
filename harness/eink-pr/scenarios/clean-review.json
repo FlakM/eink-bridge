@@ -1,0 +1,19 @@
+{
+  "name": "clean-review",
+  "kind": "pipeline",
+  "description": "A PR the reviewers found nothing actionable in: overview only, no marks.",
+  "checkout": { "src/lib.rs": 30 },
+  "pr": {
+    "number": 12,
+    "title": "Bump the formatter",
+    "summary": ["Only formatting changed."],
+    "changed_files": 1
+  },
+  "findings": [],
+  "expect": {
+    "kept_claims": [],
+    "dropped_reasons": [],
+    "marks": {},
+    "lint_ok": true
+  }
+}

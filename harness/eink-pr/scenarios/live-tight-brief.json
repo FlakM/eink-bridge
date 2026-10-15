@@ -1,0 +1,12 @@
+{
+  "name": "live-tight-brief",
+  "kind": "live",
+  "description": "The agent must turn raw findings into a lint-clean tablet brief, dropping the noise. Opt-in: run with --live.",
+  "live_timeout": 900,
+  "prompt": "You are producing the tablet brief for an e-ink code review, following the eink-pr skill's formatting and ihaveadhd brevity rules. Output ONLY the markdown brief - no preamble, no explanation, no code fences.\n\nReview focus: a PR that adds pagination to a sessions endpoint.\n\nRaw findings:\n1. critical, proto/api.proto:12 - the new pagination field is required, which breaks old clients; action: mark it optional or version the message.\n2. nit, server/src/app.rs:12 - the local variable name is unclear; action: rename it.\n3. nit, server/src/session.rs:20 - prefer an early return in a helper; action: return early.\n4. major, server/tests/health_test.rs:40 - the last-page path has no test; action: cover the empty page and the last page.\n5. nit, README.md:60 - a code sample is outdated; action: update the sample.\n\nRequirements:\n- Keep only what changes a decision. Drop the nits.\n- Assign mark letters A, B, C in rank order and include a Marks legend mapping each letter to file:line.\n- One short bullet per piece: state the problem, then the action.\n- No summary section, no filler, no hedging.",
+  "expect": {
+    "lint_ok": true,
+    "required": ["proto/api.proto:12", "server/tests/health_test.rs:40", "Marks"],
+    "forbidden": ["basically", "prefer an early return", "unclear"]
+  }
+}

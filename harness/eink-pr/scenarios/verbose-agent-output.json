@@ -1,0 +1,9 @@
+{
+  "name": "verbose-agent-output",
+  "kind": "lint",
+  "description": "A brief written the way a chatty agent writes: filler, hedging, a summary section, a diff dump and a non-actionable piece.",
+  "brief": "briefs/verbose-agent.md",
+  "expect": {
+    "lint_rules": ["filler", "hedge", "long-bullet", "not-actionable", "diff-dump", "summary-stack"]
+  }
+}
