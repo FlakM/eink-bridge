@@ -15,6 +15,26 @@ background observer with a confirmed handshake, `feedback_id` + `expected_versio
 belong to the **`jump`** skill. This skill orchestrates them; it does not reimplement
 either.
 
+## Two ways in
+
+1. **You are already in an agent session** (Claude or OpenCode) and want this review in
+   it: run the skill. It joins the review instead of starting a second one.
+2. **A request arrives** (a message plus a link): use the herdr widget — `prefix+shift+p`
+   runs `eink-pr-launch`. It resolves the repo, creates the worktree and a workspace for
+   the review, and starts OpenCode seeded with the request; the session then follows this
+   skill.
+
+Both paths share the same conventions, so they meet in the middle:
+
+- **one workspace per review**, keyed by PR number, recorded in
+  `~/.local/state/eink-bridge/pr-reviews.json` (`EINK_PR_REGISTRY` overrides it);
+- **worktrees live at `~/programming/<org>/worktrees/pr-<n>/<repo>`**, matching the
+  layout used for ticket work;
+- the widget passes the pasted request by **file** (`EINK_REVIEW_SEED`), never inline.
+
+So a review started from the widget is already set up: read the registry, reuse its
+workspace and worktree, and skip steps 2 and 3 below.
+
 ## Why a pipeline
 
 One prompt that reads a diff and writes a summary produces uneven reviews: many nits,
@@ -69,32 +89,39 @@ look at.
 
 ## 2. Check the code out into a worktree
 
+**First look in the registry** (`~/.local/state/eink-bridge/pr-reviews.json`): if this PR
+already has an entry, reuse its `worktree` and `socket` and skip to step 4. The widget
+creates both, and re-invoking the skill must not make a second copy.
+
 ```bash
 git fetch origin pull/<n>/head          # PRs, including forks
-git worktree add --detach "<worktree-dir>" FETCH_HEAD
+git worktree add --detach "~/programming/<org>/worktrees/pr-<n>/<repo>" FETCH_HEAD
 ```
 
-- Path: `<repo-parent>/<repo>-worktrees/pr-<n>` (or `.../self-<branch>`).
-- **Reuse** an existing worktree: fetch and `checkout --detach` instead of adding a second.
-- Record the **sha** you reviewed. Feedback later refers to a known state.
+- **Path**: `~/programming/<org>/worktrees/pr-<n>/<repo>` (the org is the parent
+  directory of the local checkout). `self-<branch>` for a review of your own work.
+- **Reuse**: fetch and `checkout --detach` instead of adding a second worktree.
+- **Record the sha** you reviewed and write the registry entry (`pr`, `sha`, `worktree`,
+  `socket`, workspace ids) so the other entry point finds it.
 - Never check out in the user's own working tree.
 
-## 3. Open the diff in Neovim in a new herdr tab
+## 3. Open the diff in Neovim in a review workspace
 
-Only when `HERDR_ENV=1`. Read IDs from JSON; never guess them.
+Only when `HERDR_ENV=1`. Read IDs from the JSON responses; never guess them.
 
 ```bash
-herdr tab create --workspace "$HERDR_WORKSPACE_ID" --cwd "<worktree-dir>" \
-  --label "PR <n>: <short title>" --no-focus
-# -> .result.root_pane.pane_id
-export EINK_PR_SOCKET=/tmp/eink-pr-<n>.sock
+herdr workspace create --cwd "<worktree-dir>" --label "PR <n>: <short title>" --focus
+# -> .result.workspace.workspace_id, .result.root_pane.pane_id
+export EINK_PR_SOCKET=/run/user/$(id -u)/jump-<repo>.sock
 herdr pane run <pane_id> "nvim --listen $EINK_PR_SOCKET -c 'DiffviewOpen <merge-base>..HEAD'"
 ```
 
+- **One workspace per review**, not a tab in someone else's workspace: the review owns its
+  editor, its marks and its agent, and closes cleanly. Reuse the registry's workspace if
+  one exists.
 - **Always pass `--listen`** and export `EINK_PR_SOCKET`; marks and the `jump` skill
-  depend on it.
+  depend on it. `jump <ref>` also works here and finds this editor on its own.
 - Wait for the socket (`until [ -S "$EINK_PR_SOCKET" ]`) before sending anything.
-- `--no-focus` keeps the user where they were. This is their editor, not yours.
 
 ## 4. Run the lens reviewers in parallel
 
