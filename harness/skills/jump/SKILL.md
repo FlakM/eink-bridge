@@ -8,10 +8,16 @@ description: Open a code reference in the running Neovim, or generate a GitHub p
 Two jobs: **go to a location** in the live editor, and **make a location linkable** for
 a document going to the tablet.
 
-The `jump` CLI resolves references and generates permalinks, but it *opens* files via a
-tmux session and `nvr`, so it fails when no tmux server is running. The eink-pr workflow
-runs Neovim in a herdr pane with an explicit `--listen` socket, which is the reliable
-route. Prefer the socket; use the CLI for link generation.
+The `jump` CLI resolves references and opens files. It supports two backends: **herdr**
+when it runs inside a herdr pane (it finds the project's Neovim pane and drives it over
+that editor's socket), and **tmux** otherwise. So `jump <ref>` works in a herdr desktop
+without a tmux server. Check what is available with `jump verify`, which reports the
+herdr backend alongside tmux and hyprland.
+
+The eink-pr workflow also opens Neovim with an explicit `--listen` socket. When you
+already know that socket, the marks helper is the more precise tool: it can set marks,
+jump to a mark, and read back where the cursor landed. Prefer it inside a review;
+use `jump` for one-off references and for link generation.
 
 ## Going to a location
 
@@ -49,9 +55,11 @@ directory, otherwise you jump into the wrong checkout.
 ### When there is no socket
 
 Report it. Offer to reopen Neovim with `--listen` (the eink-pr skill does this when it
-sets up the tab). Only fall back to the `jump` CLI when a tmux server is actually
-running — check with `jump verify` first, since a bare `jump <ref>` fails with an
-unhelpful `tmux command failed` otherwise.
+sets up the tab). The `jump` CLI needs no socket of its own: inside herdr it finds the
+editor pane itself and falls back to tmux, so `jump <ref>` is a reasonable last resort.
+If the editor is waiting at a prompt (a stale swap file leaves `E325 ATTENTION`), jump
+reports that instead of typing the command into the prompt — resolve the prompt (open the
+file read-only, or delete the stale swap file) and retry.
 
 ## Making a location linkable
 
