@@ -159,10 +159,11 @@ class RenderTests(unittest.TestCase):
         self.assertIn("- A → server/src/app.rs:10 — https://example/perm", markdown)
         self.assertIn("- B → server/src/app.rs:20", markdown)
 
-    def test_no_findings_still_produces_an_overview_without_a_marks_section(self):
+    def test_no_findings_still_produces_the_opening_without_a_marks_section(self):
         markdown, marks = review.render_brief({"number": 7, "title": "Docs only"}, [])
         self.assertEqual(marks, {})
         self.assertIn("# PR 7: Docs only", markdown)
+        self.assertIn("**What changed**", markdown)
         self.assertNotIn("## Marks", markdown)
         self.assertNotIn("## Important pieces", markdown)
 
@@ -171,15 +172,62 @@ class RenderTests(unittest.TestCase):
         self.assertIn("# Changes: Session expiry fix", markdown)
 
 
+OPENING = (
+    "**What changed** — Expiry clears the notifier map.\n"
+    "**Why** — Notifier entries leaked for every expired session.\n"
+    "**Wider system** — The expiry loop also drives metrics.\n\n"
+    "## Checks\n\n- All green: cargo test.\n"
+)
+
+
 class LintTests(unittest.TestCase):
-    def brief(self, body):
-        return f"# PR 1: thing\n\n{body}\n"
+    def brief(self, body, opening=True):
+        head = "# PR 1: thing\n\n" + (OPENING if opening else "")
+        return f"{head}\n{body}\n"
+
+    def test_context_opening_is_mandatory(self):
+        problems = review.lint_brief(self.brief("- **A** — Check the guard.", opening=False))
+        rules = {rule for _, rule, _ in problems}
+        self.assertIn("missing-opening", rules)
+        self.assertIn("missing-checks", rules)
+
+    def test_a_long_opening_line_is_rejected(self):
+        problems = review.lint_brief(self.brief(
+            "**What changed** — " + " ".join(["clause"] * 40) + ".\n"
+            "**Why** — Reason.\n**Wider system** — Callers.\n\n## Checks\n\n- All green.\n"))
+        self.assertIn("long-opening", {rule for _, rule, _ in problems})
+
+    def test_checks_report_a_failure_rather_than_claiming_green(self):
+        markdown, _ = review.render_brief(
+            {"number": 1, "title": "t", "what": "w", "why": "y", "wider": "x",
+             "checks": [{"name": "cargo test", "status": "pass"},
+                        {"name": "CI", "status": "fail", "detail": "proto lint"}]}, [])
+        self.assertIn("## Checks", markdown)
+        self.assertIn("**CI** fail", markdown)
+        self.assertNotIn("All green", markdown)
+
+    def test_checks_say_green_in_one_line_when_everything_passed(self):
+        markdown, _ = review.render_brief(
+            {"number": 1, "title": "t", "what": "w", "why": "y", "wider": "x",
+             "checks": [{"name": "cargo test", "status": "pass"}, {"name": "clippy", "status": "pass"}]}, [])
+        self.assertIn("- All green: cargo test, clippy.", markdown)
+
+    def test_an_unstated_why_is_admitted_not_invented(self):
+        markdown, _ = review.render_brief({"number": 1, "title": "t"}, [])
+        self.assertIn("**Why** — Not stated in the description", markdown)
 
     def test_a_tight_actionable_brief_passes(self):
         problems = review.lint_brief(self.brief(
             "## Important pieces\n\n"
             "- **A** — Expiry skips notifier cleanup. Clear it when a session expires.\n"
             "- **B** — Version check trusts the client. Verify the version before accept.\n"))
+        self.assertEqual(problems, [], problems)
+
+    def test_common_words_are_not_mistaken_for_filler(self):
+        """"every" must not trip the "very" rule, "adjust" must not trip "just"."""
+        problems = review.lint_brief(self.brief(
+            "## Important pieces\n\n"
+            "- **A** — Every session adjusts the map. Verify the guard.\n"))
         self.assertEqual(problems, [], problems)
 
     def test_accepts_natural_imperative_phrasing(self):

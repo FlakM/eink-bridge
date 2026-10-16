@@ -33,13 +33,20 @@ TAG_BOOST = {
 MARK_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 REQUIRED_FINDING_FIELDS = ("file", "line", "claim", "action")
 
-BANNED_PHRASES = (
-    "basically", "essentially", "simply", "just ", "very ", "really ",
-    "note that", "it should be noted", "in order to", "as you can see",
+# Single words are matched on word boundaries: a substring test flagged "every" as the
+# filler "very", and "adjust" as "just".
+BANNED_WORDS = (
+    "basically", "essentially", "simply", "just", "very", "really", "actually",
     "leverage", "utilize", "robust", "seamless", "delve", "landscape",
+)
+BANNED_PHRASES = (
+    "note that", "it should be noted", "in order to", "as you can see",
     "make sure to", "please note", "it is important to",
 )
-HEDGES = ("might ", "may ", "maybe", "possibly", "i think", "perhaps", "arguably")
+BANNED_WORD_PATTERN = re.compile(r"\b(" + "|".join(BANNED_WORDS) + r")\b")
+HEDGE_WORDS = ("might", "may", "maybe", "possibly", "perhaps", "arguably")
+HEDGE_PHRASES = ("i think",)
+HEDGE_WORD_PATTERN = re.compile(r"\b(" + "|".join(HEDGE_WORDS) + r")\b")
 ACTION_VERBS = (
     "check", "verify", "confirm", "decide", "change", "add", "remove", "delete",
     "drop", "clear", "clean", "test", "cover", "guard", "clamp", "bound", "cap",
@@ -237,6 +244,42 @@ def filter_findings(findings, checkout=None, limit=6, per_file=2, allow_nits=Fal
 
 # ── render ────────────────────────────────────────────────────────────────────
 
+def opening_text(pr, key):
+    """The opening lines come from the PR description and commits; a fallback states the
+    gap rather than inventing context."""
+    value = pr.get(key)
+    if isinstance(value, list):
+        value = " ".join(str(v) for v in value)
+    if value and str(value).strip():
+        return ensure_sentence(value)
+    fallbacks = {
+        "what": "The changed files and their diff.",
+        "why": "Not stated in the description — infer it from the linked issue or commits.",
+        "wider": "Callers and adjacent modules this touches.",
+    }
+    return fallbacks[key]
+
+
+def render_opening(pr):
+    return [f"**{label}** — {opening_text(pr, key)}" for label, key in OPENING]
+
+
+def render_checks(pr):
+    """Background checks are evidence: report failures, and say so briefly when clean."""
+    checks = pr.get("checks") or []
+    if not checks:
+        return ["## Checks", "", "- Not run — say so rather than implying the change is tested."]
+    interesting = [c for c in checks if str(c.get("status", "")).lower() not in ("pass", "passed", "green", "ok")]
+    if not interesting:
+        names = ", ".join(str(c.get("name")) for c in checks[:4])
+        return ["## Checks", "", f"- All green: {names}."]
+    lines = ["## Checks", ""]
+    for check in interesting[:4]:
+        detail = str(check.get("detail", "")).strip()
+        lines.append(f"- **{check.get('name')}** {check.get('status')}." + (f" {ensure_sentence(detail)}" if detail else ""))
+    return lines
+
+
 def ensure_sentence(text):
     text = " ".join(str(text).split())
     if text and text[0].islower():
@@ -244,6 +287,12 @@ def ensure_sentence(text):
     if text and text[-1] not in ".!?":
         text += "."
     return text
+
+
+# The three questions the reader needs answered before anything else. The brief always
+# opens with them, because a finding without its context is a guess the reader must
+# re-derive from the diff.
+OPENING = (("What changed", "what"), ("Why", "why"), ("Wider system", "wider"))
 
 
 def render_brief(pr, findings, links=None, title_prefix="PR"):
@@ -254,17 +303,10 @@ def render_brief(pr, findings, links=None, title_prefix="PR"):
     heading = f"{title_prefix} {number}: {title}" if number else f"{title_prefix}: {title}"
 
     lines = [f"# {heading}", ""]
-    overview = pr.get("summary") or []
-    if overview:
-        for item in overview[:2]:
-            lines.append(f"- {ensure_sentence(item)}")
-        lines.append("")
-    else:
-        changed = pr.get("changed_files")
-        bullet = "What changed and why it matters." if not changed else \
-            f"{changed} file(s) changed; what to look at first is below."
-        lines.append(f"- {bullet}")
-        lines.append("")
+    lines += render_opening(pr)
+    lines.append("")
+    lines += render_checks(pr)
+    lines.append("")
 
     marks = {}
     if findings:
@@ -279,13 +321,6 @@ def render_brief(pr, findings, links=None, title_prefix="PR"):
             lines.append(f"- **{letter}** — {claim}. {action}")
         lines.append("")
 
-    impact = pr.get("impact") or []
-    if impact:
-        lines.append("## Impact")
-        lines.append("")
-        for item in impact:
-            lines.append(f"- {ensure_sentence(item)}")
-        lines.append("")
 
     if marks:
         lines.append("## Marks")
@@ -333,13 +368,22 @@ def lint_brief(markdown, max_words=420, max_bullet_words=30, max_sentence_words=
         for phrase in BANNED_PHRASES:
             if phrase in lowered:
                 problems.append((number, "filler", f"drop {phrase.strip()!r}"))
-        for hedge in HEDGES:
-            if hedge in lowered:
-                problems.append((number, "hedge", f"commit or cut: {hedge.strip()!r}"))
+        for word in set(BANNED_WORD_PATTERN.findall(lowered)):
+            problems.append((number, "filler", f"drop {word!r}"))
+        for phrase in HEDGE_PHRASES:
+            if phrase in lowered:
+                problems.append((number, "hedge", f"commit or cut: {phrase!r}"))
+        for word in set(HEDGE_WORD_PATTERN.findall(lowered)):
+            problems.append((number, "hedge", f"commit or cut: {word!r}"))
         for sentence in re.split(r"[.!?]+\s+", stripped):
             if len(sentence.split()) > max_sentence_words:
                 problems.append((number, "long-sentence", f"{len(sentence.split())} words"))
 
+        for label, _key in OPENING:
+            if stripped.startswith(f"**{label}**"):
+                body = stripped.split("**", 2)[2]
+                if len(body.split()) > max_bullet_words:
+                    problems.append((number, "long-opening", f"{label}: {len(body.split())} words"))
         if stripped.startswith("-"):
             if len(words) > max_bullet_words:
                 problems.append((number, "long-bullet", f"{len(words)} words (max {max_bullet_words})"))
@@ -349,6 +393,12 @@ def lint_brief(markdown, max_words=420, max_bullet_words=30, max_sentence_words=
                 if not actionable:
                     problems.append((number, "not-actionable", "important piece has no action verb"))
 
+    if markdown.strip():
+        for label, _key in OPENING:
+            if f"**{label}**" not in markdown:
+                problems.append((0, "missing-opening", f"brief must state '{label}' before findings"))
+        if "## Checks" not in markdown:
+            problems.append((0, "missing-checks", "brief must say what was checked in the background"))
     for heading in headings:
         if heading in SUMMARY_HEADINGS:
             problems.append((0, "summary-stack", f"'{heading}' heading duplicates the overview"))

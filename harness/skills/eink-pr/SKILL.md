@@ -41,7 +41,9 @@ One prompt that reads a diff and writes a summary produces uneven reviews: many 
 repeated points, missed contracts. Split the work, and each stage is checkable:
 
 ```
-resolve PR -> worktree -> Neovim tab
+resolve PR -> worktree -> Neovim workspace + diff
+                 |
+      context: what / why / wider  +  background checks   <- read references/review-prompt.md
                  |
       parallel lens reviewers (subagents) -> findings.json
                  |
@@ -51,8 +53,14 @@ resolve PR -> worktree -> Neovim tab
                  |
       review.py lint     (mechanical gate: refuses verbose output)
                  |
-      review.py render   (marks + brief) -> eink delivery -> feedback -> jump
+      review.py render   (context opening + checks + marks) -> eink -> feedback -> jump
 ```
+
+**The brief always opens with what changed, why, and how it fits the wider system**, and
+it always states what was checked. `review.py lint` enforces both, so a brief cannot reach
+the tablet without them. How to collect that context, which checks to run in the
+background, and the calibrated writing prompt are in
+`references/review-prompt.md` — read it before writing any brief.
 
 Any stage can fail without failing the review: if the filter box keeps nothing, say the
 PR looks clean rather than padding the page.
@@ -123,7 +131,18 @@ herdr pane run <pane_id> "nvim --listen $EINK_PR_SOCKET -c 'DiffviewOpen <merge-
   depend on it. `jump <ref>` also works here and finds this editor on its own.
 - Wait for the socket (`until [ -S "$EINK_PR_SOCKET" ]`) before sending anything.
 
-## 4. Run the lens reviewers in parallel
+## 4. Collect context and start the checks
+
+Read `references/review-prompt.md` and follow it. In short: gather **why** (description,
+issue, commits), **what** (the diff), **wider system** (callers, contracts, migrations) and
+**checks** — in parallel, before reading the diff hunk by hunk — and write `context.json`.
+Start the background checks now so their results are ready when the brief is written; a
+check that cannot run is reported as such, never implied green.
+
+`why` is quoted from a human source, not invented. When the change is unexplained, that gap
+is itself worth the reader's attention.
+
+## 5. Run the lens reviewers in parallel
 
 Dispatch **separate subagents in the same turn** so they run concurrently. Give each
 one the worktree path, the diff range, and one lens. Cap at four lenses for a normal
@@ -166,7 +185,7 @@ Collect every reviewer's findings into one file:
 python3 <skill-base>/scripts/review.py validate --findings findings.json   # schema check
 ```
 
-## 5. Filter to only relevant feedback
+## 6. Filter to only relevant feedback
 
 This is the step that keeps the tablet readable. Run it before anything is written for
 a human:
@@ -190,7 +209,7 @@ of its own. Skip it for small PRs.
 If nothing survives, the honest answer is "no actionable findings" — send a two-line
 brief saying so, or tell the user and stop.
 
-## 6. Make it brief and human
+## 7. Make it brief and human
 
 Two layers, and both must pass:
 
@@ -208,7 +227,7 @@ Wire the `ihaveadhd` output back into `filtered.json` (`claim`/`action`) and re-
 so the renderer still owns letters and the legend. If lint fails, cut the words it
 names and re-run; never send a failing brief because it "mostly reads fine".
 
-## 7. Marks and jumpable links
+## 8. Marks and jumpable links
 
 Render assigns `A`–`F` to the kept findings. Set them in the running Neovim and verify:
 
@@ -228,7 +247,7 @@ Re-render with `--links links.json` to put the URLs in the legend. If the socket
 gone, reopen Neovim with `--listen` and retry; if marks cannot be set, say so and still
 send the legend as text.
 
-## 8. Deliver, then hand the reader the wheel
+## 9. Deliver, then hand the reader the wheel
 
 Create the session and deliver the brief through the `eink` skill's contract — its
 observer, its handshake, its version guard. Add `tags` with `pr=<n>` and `sha=<short>`
@@ -237,7 +256,7 @@ so the review is findable.
 Tell the user, in one line: what is on the tablet, the session id, and that `A`–`F` jump
 to the important lines in the tab you opened. Nothing else.
 
-## 9. When feedback comes back
+## 10. When feedback comes back
 
 A note arrives anchored to nearby text and often names a mark letter.
 

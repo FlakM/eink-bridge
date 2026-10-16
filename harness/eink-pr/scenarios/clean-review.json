@@ -2,12 +2,25 @@
   "name": "clean-review",
   "kind": "pipeline",
   "description": "A PR the reviewers found nothing actionable in: overview only, no marks.",
-  "checkout": { "src/lib.rs": 30 },
+  "checkout": {
+    "src/lib.rs": 30
+  },
   "pr": {
     "number": 12,
     "title": "Bump the formatter",
-    "summary": ["Only formatting changed."],
-    "changed_files": 1
+    "summary": [
+      "Only formatting changed."
+    ],
+    "changed_files": 1,
+    "what": "Only formatting changed.",
+    "why": "Keeps the formatter version consistent across the repo.",
+    "wider": "No behaviour change.",
+    "checks": [
+      {
+        "name": "cargo fmt --check",
+        "status": "pass"
+      }
+    ]
   },
   "findings": [],
   "expect": {
