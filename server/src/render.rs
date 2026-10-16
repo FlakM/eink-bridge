@@ -94,26 +94,36 @@ code {
     font-size: 16px;
     /* E-ink washes out thin strokes, so code carries real weight. */
     font-weight: 700;
-    background: #f4f4f4;
+    background: #ffffff;
     padding: 2px 5px;
-    border: 1px solid #888;
+    border: 1px solid #999;
     border-radius: 3px;
 }
 pre {
-    background: #f0f0f0;
-    border: 1px solid #ccc;
-    padding: 12px;
+    /* A grey fill reads as dirt on e-ink and costs a refresh; paper white with a rule
+       delimits the block just as clearly. Long lines wrap: a horizontal scrollbar is
+       unreachable with a pen. */
+    background: #ffffff;
+    border: 1px solid #b8b8b8;
+    border-left: 3px solid #6b6b6b;
+    padding: 12px 14px;
     margin: 16px 0;
-    overflow-x: auto;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    tab-size: 4;
 }
 pre code {
     border: none;
     padding: 0;
     background: none;
     font-family: 'Roboto Mono', 'Droid Sans Mono', 'DejaVu Sans Mono', monospace;
-    font-size: 18px;
+    /* One point above body text: monospace has no ascender slack, so equal px reads
+       smaller than the prose around it. */
+    font-size: 19px;
     font-weight: 700;
-    line-height: 1.5;
+    line-height: 1.55;
+    letter-spacing: 0.2px;
+    tab-size: 4;
 }
 blockquote {
     border-left: 3px solid #333;
@@ -2082,7 +2092,7 @@ mod tests {
     #[test]
     fn inline_code_has_strong_border() {
         assert!(
-            css_rule("code {").contains("border: 1px solid #888"),
+            css_rule("code {").contains("border: 1px solid #999"),
             "inline code needs a visible border"
         );
     }
@@ -2250,6 +2260,53 @@ mod tests {
         assert!(
             html.contains("step-next"),
             "needs a way forward on a touch screen"
+        );
+    }
+
+    #[test]
+    fn code_blocks_wrap_instead_of_scrolling() {
+        // A horizontal scrollbar cannot be dragged with a pen on e-ink.
+        let css = css_rule("pre {");
+        assert!(
+            css.contains("white-space: pre-wrap"),
+            "code must wrap: {css}"
+        );
+        assert!(
+            !css.contains("overflow-x: auto"),
+            "no horizontal scrolling: {css}"
+        );
+        assert!(
+            css.contains("background: #ffffff"),
+            "grey fill dithers on e-ink"
+        );
+    }
+
+    #[test]
+    fn block_code_is_a_point_larger_than_body_text() {
+        assert!(css_rule("pre code {").contains("font-size: 19px"));
+        assert!(css_rule("body {").contains("font-size: 18px"));
+    }
+
+    #[test]
+    fn comments_are_italic_and_keywords_bold() {
+        // Shape, not shade: the two only need to differ in weight and slant for the
+        // structure to read when the hues collapse in poor light.
+        let theme = include_str!("../assets/eink-theme.tmTheme");
+        let comment = theme
+            .split("<key>name</key>")
+            .find(|chunk| chunk.contains("Comment"))
+            .unwrap();
+        assert!(
+            comment.contains("<string>italic</string>"),
+            "comments should slant"
+        );
+        let keyword = theme
+            .split("<key>name</key>")
+            .find(|chunk| chunk.contains(">Keyword<"))
+            .unwrap();
+        assert!(
+            keyword.contains("<string>bold</string>"),
+            "keywords should be bold"
         );
     }
 
