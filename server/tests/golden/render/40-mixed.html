@@ -21,9 +21,9 @@
 <div class="diagram-body"><div class="diagram-placeholder">Rendering Diagram...</div></div>
 <script type="application/json" class="diagram-payload">{"kind":"mermaid","source":"sequenceDiagram\n  participant C as CLI\n  participant S as Server\n  participant A as App\n  C->>S: POST /api/sessions\n  A->>S: GET /session/{id}\n  A->>S: POST /submit\n  S-->>C: 200 result"}</script>
 </section><h2>Key Code</h2>
-<pre style="background-color:#ffffff;">
-<span style="font-weight:bold;color:#006600;">pub </span><span style="font-weight:bold;color:#0033cc;">fn </span><span style="font-weight:bold;color:#007777;">render</span><span style="color:#555555;">(</span><span style="font-style:italic;color:#cc0000;">markdown</span><span style="color:#555555;">: </span><span style="font-weight:bold;color:#333333;">&amp;</span><span style="font-weight:bold;color:#0033cc;">str</span><span style="color:#555555;">) -&gt;</span><span style="color:#222222;"> String </span><span style="color:#555555;">{
-</span><span style="color:#222222;">    </span><span style="font-weight:bold;color:#007777;">to_eink_html</span><span style="color:#555555;">(</span><span style="color:#222222;">markdown</span><span style="color:#555555;">, &quot;</span><span style="color:#008800;">preview</span><span style="color:#555555;">&quot;)
+<pre style="background-color:#9c2a00;">
+<span style="font-weight:bold;color:#0a6b38;">pub </span><span style="font-weight:bold;color:#0f3d8a;">fn </span><span style="font-weight:bold;color:#0b5c70;">render</span><span style="color:#555555;">(</span><span style="font-style:italic;color:#9c2a00;">markdown</span><span style="color:#555555;">: </span><span style="font-weight:bold;color:#333333;">&amp;</span><span style="font-weight:bold;color:#0f3d8a;">str</span><span style="color:#555555;">) -&gt;</span><span style="color:#1a1a1a;"> String </span><span style="color:#555555;">{
+</span><span style="color:#1a1a1a;">    </span><span style="font-weight:bold;color:#0b5c70;">to_eink_html</span><span style="color:#555555;">(</span><span style="color:#1a1a1a;">markdown</span><span style="color:#555555;">, &quot;</span><span style="color:#0a6b38;">preview</span><span style="color:#555555;">&quot;)
 </span><span style="color:#555555;">}
 </span></pre>
 <blockquote>

@@ -88,8 +88,12 @@ h2 { font-size: 24px; margin: 20px 0 10px; }
 h3 { font-size: 20px; font-weight: bold; margin: 16px 0 6px; }
 p { margin: 10px 0; }
 code {
-    font-family: 'Courier New', monospace;
+    /* Boox renders through an Android WebView: Courier New is not installed there and
+       falls back to a thin substitute. Name real Android mono faces, then 'monospace'. */
+    font-family: 'Roboto Mono', 'Droid Sans Mono', 'DejaVu Sans Mono', monospace;
     font-size: 16px;
+    /* E-ink washes out thin strokes, so code carries real weight. */
+    font-weight: 700;
     background: #f4f4f4;
     padding: 2px 5px;
     border: 1px solid #888;
@@ -102,7 +106,15 @@ pre {
     margin: 16px 0;
     overflow-x: auto;
 }
-pre code { border: none; padding: 0; background: none; }
+pre code {
+    border: none;
+    padding: 0;
+    background: none;
+    font-family: 'Roboto Mono', 'Droid Sans Mono', 'DejaVu Sans Mono', monospace;
+    font-size: 18px;
+    font-weight: 700;
+    line-height: 1.5;
+}
 blockquote {
     border-left: 3px solid #333;
     padding-left: 16px;
@@ -468,17 +480,19 @@ hr { border: none; border-top: 1px solid #333; margin: 24px 0; }
   overflow: hidden;
 }
 .snippet-block figcaption {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 13px;
-  color: #444;
+  font-family: 'Roboto Mono', 'Droid Sans Mono', 'DejaVu Sans Mono', monospace;
+  font-size: 14px;
+  font-weight: 700;
+  color: #333;
   background: #f4f4f4;
   border-bottom: 1px solid #e0e0e0;
   padding: 6px 10px;
 }
 .snippet-block pre { margin: 0; }
 .snippet-block mark.snippet-hit {
-  background: #fff3c4;
-  box-shadow: inset 3px 0 0 #c9a227;
+  background: #efe6b8;
+  box-shadow: inset 4px 0 0 #7a6410;
+  font-weight: 700;
   display: block;
 }
 .steps-block {
