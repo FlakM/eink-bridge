@@ -487,7 +487,8 @@ hr { border: none; border-top: 1px solid #333; margin: 24px 0; }
   margin: 16px 0;
   border: 1px solid #d0d0d0;
   border-radius: 4px;
-  overflow: hidden;
+  /* No overflow:hidden: the annotation highlight is an outline drawn outside the
+     element box, and clipping the wrapper hides it, so annotating code looked broken. */
 }
 .snippet-block figcaption {
   font-family: 'Roboto Mono', 'Droid Sans Mono', 'DejaVu Sans Mono', monospace;
@@ -514,6 +515,9 @@ hr { border: none; border-top: 1px solid #333; margin: 24px 0; }
   list-style: none;
   margin: 0;
   padding: 12px 14px;
+  /* Taps belong to the pen: they select and bind elements. Only the controls below
+     advance the sequence, so stepping never competes with annotating. */
+  pointer-events: none;
   counter-reset: step;
 }
 .steps-list li {
@@ -542,6 +546,7 @@ hr { border: none; border-top: 1px solid #333; margin: 24px 0; }
 .step-title { display: block; font-weight: 600; }
 .step-detail { display: block; font-size: 15px; color: #444; }
 .steps-controls { padding: 0 14px 12px; display: flex; gap: 8px; }
+.steps-controls button { pointer-events: auto; }
 .steps-controls button {
   font-size: 15px;
   padding: 6px 12px;
@@ -550,13 +555,16 @@ hr { border: none; border-top: 1px solid #333; margin: 24px 0; }
   background: #fff;
 }
 .diff-block {
-    font-family: monospace;
-    font-size: 16px;
+    font-family: 'Roboto Mono', 'Droid Sans Mono', monospace;
+    font-size: 17px;
     line-height: 1.5;
     border: 1px solid #ccc;
     border-radius: 4px;
-    overflow-x: auto;
     margin: 16px 0;
+    /* Wrap rather than scroll or clip: a diff cannot be scrolled with a pen, and an
+       outline highlight must be able to escape the block. */
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
 }
 .diff-add {
     border-left: 6px solid #2a2;
@@ -1972,10 +1980,6 @@ const ELEMENT_MAP_JS: &str = r#"
   document.addEventListener('DOMContentLoaded', function() {
     stepBlocks().forEach(function(block) {
       setStep(block, 0);
-      block.addEventListener('click', function(event) {
-        if (event.target.closest && event.target.closest('.steps-controls')) return;
-        advanceStep(block);
-      });
       var next = block.querySelector('[data-role="step-next"]');
       if (next) next.addEventListener('click', function(event) { event.stopPropagation(); advanceStep(block); });
       var reset = block.querySelector('[data-role="step-reset"]');
@@ -2308,6 +2312,24 @@ mod tests {
             keyword.contains("<string>bold</string>"),
             "keywords should be bold"
         );
+    }
+
+    #[test]
+    fn snippet_wrapper_does_not_clip_the_annotation_highlight() {
+        // The bind/flash highlight is an outline with outline-offset, drawn outside the
+        // element box; a clipping ancestor hides it and annotating code looks broken.
+        for selector in ["pre {", ".snippet-block {", ".diff-block {"] {
+            let css = css_rule(selector);
+            assert!(!css.contains("overflow: hidden"), "{selector} must not clip: {css}");
+        }
+    }
+
+    #[test]
+    fn the_pen_owns_taps_so_a_steps_block_does_not_steal_them() {
+        assert!(css_rule(".steps-list {").contains("pointer-events: none"),
+                "the list must not swallow the taps used to annotate");
+        assert!(css_rule(".steps-controls button {").contains("pointer-events: auto"),
+                "the sequence still needs its own controls");
     }
 
     #[test]
