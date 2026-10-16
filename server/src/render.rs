@@ -461,6 +461,70 @@ hr { border: none; border-top: 1px solid #333; margin: 24px 0; }
     font-size: 20px;
     color: #222;
 }
+.snippet-block {
+  margin: 16px 0;
+  border: 1px solid #d0d0d0;
+  border-radius: 4px;
+  overflow: hidden;
+}
+.snippet-block figcaption {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  color: #444;
+  background: #f4f4f4;
+  border-bottom: 1px solid #e0e0e0;
+  padding: 6px 10px;
+}
+.snippet-block pre { margin: 0; }
+.snippet-block mark.snippet-hit {
+  background: #fff3c4;
+  box-shadow: inset 3px 0 0 #c9a227;
+  display: block;
+}
+.steps-block {
+  margin: 16px 0;
+  border: 1px solid #d0d0d0;
+  border-radius: 4px;
+}
+.steps-list {
+  list-style: none;
+  margin: 0;
+  padding: 12px 14px;
+  counter-reset: step;
+}
+.steps-list li {
+  counter-increment: step;
+  padding: 8px 0 8px 34px;
+  position: relative;
+  opacity: 0.35;
+}
+/* The current step is the only one at full strength; tapping advances it. */
+.steps-list li[data-state="current"], .steps-list li[data-state="done"] { opacity: 1; }
+.steps-list li[data-state="current"]::before { background: #1a1a1a; color: #fff; }
+.steps-list li::before {
+  content: counter(step);
+  position: absolute;
+  left: 0;
+  top: 8px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #eee;
+  color: #444;
+  font-size: 13px;
+  text-align: center;
+  line-height: 22px;
+}
+.step-title { display: block; font-weight: 600; }
+.step-detail { display: block; font-size: 15px; color: #444; }
+.steps-controls { padding: 0 14px 12px; display: flex; gap: 8px; }
+.steps-controls button {
+  font-size: 15px;
+  padding: 6px 12px;
+  border: 1px solid #bbb;
+  border-radius: 3px;
+  background: #fff;
+}
 .diff-block {
     font-family: monospace;
     font-size: 16px;
@@ -1855,6 +1919,46 @@ const ELEMENT_MAP_JS: &str = r#"
     });
   };
 
+  // --- Step sequences: tap to advance. Degrades to a readable list without this. ---
+  function stepBlocks() { return Array.prototype.slice.call(document.querySelectorAll('.steps-block')); }
+
+  function setStep(block, index) {
+    var items = block.querySelectorAll('.steps-list li');
+    for (var i = 0; i < items.length; i++) {
+      items[i].setAttribute('data-state', i < index ? 'done' : (i === index ? 'current' : 'todo'));
+    }
+    block.setAttribute('data-step', String(index));
+  }
+
+  function advanceStep(block) {
+    var items = block.querySelectorAll('.steps-list li');
+    var current = parseInt(block.getAttribute('data-step') || '0', 10);
+    setStep(block, current + 1 >= items.length ? 0 : current + 1);
+  }
+
+  window.__einkStepNext = function() {
+    var blocks = stepBlocks();
+    if (blocks.length) advanceStep(blocks[0]);
+  };
+
+  window.__einkStepReset = function() {
+    stepBlocks().forEach(function(block) { setStep(block, 0); });
+  };
+
+  document.addEventListener('DOMContentLoaded', function() {
+    stepBlocks().forEach(function(block) {
+      setStep(block, 0);
+      block.addEventListener('click', function(event) {
+        if (event.target.closest && event.target.closest('.steps-controls')) return;
+        advanceStep(block);
+      });
+      var next = block.querySelector('[data-role="step-next"]');
+      if (next) next.addEventListener('click', function(event) { event.stopPropagation(); advanceStep(block); });
+      var reset = block.querySelector('[data-role="step-reset"]');
+      if (reset) reset.addEventListener('click', function(event) { event.stopPropagation(); setStep(block, 0); });
+    });
+  });
+
   window.__einkHighlightAll = function() {
     var map = window.__einkElementMap || [];
     for (var i = 0; i < map.length; i++) {
@@ -2088,6 +2192,52 @@ mod tests {
     }
 
     // --- Syntax highlighting ---
+
+    #[test]
+    fn snippet_block_carries_the_reference_caption_and_highlighted_line() {
+        let html = render(
+            "# t\n\n```snippet\nrust server/src/app.rs:170 | the expiry loop #L2\nfn main() {\n    notifiers.remove(&id);\n}\n```\n",
+        );
+        assert!(
+            html.contains("class=\"snippet-block\""),
+            "snippet block missing"
+        );
+        assert!(html.contains("data-lang=\"rust\""), "language not recorded");
+        assert!(
+            html.contains("server/src/app.rs:170 — the expiry loop"),
+            "caption should name the reference and the point"
+        );
+        assert!(
+            html.contains("mark class=\"snippet-hit\""),
+            "cited line not marked"
+        );
+    }
+
+    #[test]
+    fn snippet_with_a_blank_header_is_just_code() {
+        // Every part of the header is optional: an empty first line means no caption.
+        let html = render("# t\n\n```snippet\n\nlet x = 1;\n```\n");
+        assert!(html.contains("class=\"snippet-block\""));
+        assert!(html.contains("let x = 1"));
+        assert!(!html.contains("<figcaption>"), "no empty caption element");
+    }
+
+    #[test]
+    fn steps_block_is_readable_without_scripting() {
+        // The reveal is progressive enhancement: the words must be in the HTML, not
+        // injected by the script, or the brief is empty for a reader with JS off.
+        let html = render(
+            "# t\n\n```steps\nClient sends | the page token rides in the query\nQuery runs | the token becomes an OFFSET\n```\n",
+        );
+        assert!(html.contains("class=\"steps-block\""));
+        assert!(html.contains("the token becomes an OFFSET"));
+        assert!(html.contains("the page token rides in the query"));
+        assert!(html.contains("2 steps"));
+        assert!(
+            html.contains("step-next"),
+            "needs a way forward on a touch screen"
+        );
+    }
 
     #[test]
     fn code_blocks_get_syntax_highlighting() {

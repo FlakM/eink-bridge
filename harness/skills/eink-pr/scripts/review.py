@@ -326,8 +326,9 @@ def render_brief(pr, findings, links=None, title_prefix="PR"):
         lines.append("## Marks")
         lines.append("")
         for letter, spot in marks.items():
-            suffix = f" — {links[spot]}" if spot in links else ""
-            lines.append(f"- {letter} → {spot}{suffix}")
+            # Short references only: the reader navigates by pressing the letter in the
+            # editor, so a full permalink is noise. Long links belong in the PR comment.
+            lines.append(f"- {letter} → {spot}")
         lines.append("")
 
     return "\n".join(lines).rstrip() + "\n", marks
@@ -365,6 +366,9 @@ def lint_brief(markdown, max_words=420, max_bullet_words=30, max_sentence_words=
         words = stripped.split()
         total_words += len(words)
         lowered = stripped.lower()
+        for url in re.findall(r"https?://\S+", stripped):
+            if len(url) > 60:
+                problems.append((number, "long-link", f"{len(url)}-char URL belongs in the PR, not the tablet"))
         for phrase in BANNED_PHRASES:
             if phrase in lowered:
                 problems.append((number, "filler", f"drop {phrase.strip()!r}"))

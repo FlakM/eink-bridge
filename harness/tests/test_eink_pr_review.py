@@ -156,7 +156,7 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(marks, {"A": "server/src/app.rs:10", "B": "server/src/app.rs:20"})
         self.assertIn("# PR 42: Quiet notifications", markdown)
         self.assertIn("- **A** — ", markdown)
-        self.assertIn("- A → server/src/app.rs:10 — https://example/perm", markdown)
+        self.assertNotIn("http", markdown, "the legend must stay short, not carry permalinks")
         self.assertIn("- B → server/src/app.rs:20", markdown)
 
     def test_no_findings_still_produces_the_opening_without_a_marks_section(self):
@@ -221,6 +221,16 @@ class LintTests(unittest.TestCase):
             "## Important pieces\n\n"
             "- **A** — Expiry skips notifier cleanup. Clear it when a session expires.\n"
             "- **B** — Version check trusts the client. Verify the version before accept.\n"))
+        self.assertEqual(problems, [], problems)
+
+    def test_a_long_url_is_rejected(self):
+        problems = review.lint_brief(self.brief(
+            "- **A** — See https://github.com/acme/repo/blob/deadbeef1234567890/server/src/app.rs#L170-L176 for the context. Check it.\n"))
+        self.assertIn("long-link", {rule for _, rule, _ in problems})
+
+    def test_a_short_reference_is_fine(self):
+        problems = review.lint_brief(self.brief(
+            "- **A** — See server/src/app.rs:170. Check the guard.\n"))
         self.assertEqual(problems, [], problems)
 
     def test_common_words_are_not_mistaken_for_filler(self):

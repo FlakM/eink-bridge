@@ -78,7 +78,8 @@ Then `## Important pieces` — at most 6, ranked, each:
 Keep every file:line, number, flag and error string exactly as they are.
 One idea per line. ≤ 25 words per line. Say "check"/"verify"/"decide" — the reader acts.
 
-Then `## Marks` — `- A → path:line`, with a permalink when you have one.
+Then `## Marks` — `- A → path:line`. **No URLs**: the reader jumps by pressing the letter
+in the editor, so a permalink is a line of noise they cannot use. Long links go in the PR.
 
 Add at most one question the reader should answer, if the change leaves something genuinely open.
 ```
@@ -96,7 +97,51 @@ Not too much: if a piece does not change what the reader does, it is noise that 
 attention on the *other* pieces. Not too little: the reader cannot re-derive a finding from
 the diff mid-review, so a missing "why" or a bare file:line is a wasted round trip.
 
-## 4. The reader's question is the deliverable
+## 4. The presentation arsenal
+
+Pick the form that carries the idea with the least reading. A brief is a presentation, not
+a diff transcript.
+
+| Use | When |
+|---|---|
+| short bullets | the default; most findings |
+| **table** | two or more things compared on the same axes (before/after, options, cost) |
+| **`snippet`** | the reader must see the code: a call site, the changed lines, the guard |
+| **`steps`** | a sequence over time: a request lifecycle, a migration, a race |
+| **`mermaid`** | interaction or ordering between parts (sequence, state, flow) |
+| **`graph`** | how components relate; blast radius |
+| **`mindmap`** | decomposition of a plan or a chain of causes |
+| **`diff`** | a small, load-bearing diff only — the editor holds the rest |
+
+Two rules keep this from becoming decoration: **one diagram per brief** (two only if they
+answer different questions), and never a diagram where bullets say it faster.
+
+### Code: highlighted text, not screenshots
+
+Use a `snippet` block. Text stays crisp at any zoom, reflows to the column, is searchable,
+costs bytes instead of megabytes, and needs no image decode on an e-ink device — a
+screenshot of code is worse on every axis. Reserve images for what text cannot express: a
+rendered UI, a chart, a layout.
+
+```
+```snippet
+rust server/src/app.rs:170 | the expiry loop #L2
+for id in expired {
+    notifiers.remove(&id);
+}
+```
+```
+
+The first line is `LANG REF | CAPTION #L12,15` — all parts optional. The reference is what
+the reader needs to find it; the `#L` markers point at the exact line so they do not hunt.
+
+### Sequences: a tap-through, not an animation
+
+E-ink cannot animate smoothly and should not try. A `steps` block reads as a plain ordered
+list, and tapping advances which step is emphasised — the honest form of movement on this
+device. Keep it to 3–6 steps; a longer sequence is a document, not a step.
+
+## 5. The reader's question is the deliverable
 
 A review that ends with "all good" teaches nothing; a review that ends with a real
 question gets a considered answer. Prefer one sharp question over three soft ones, and

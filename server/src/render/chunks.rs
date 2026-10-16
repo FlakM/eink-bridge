@@ -52,6 +52,11 @@ pub(crate) fn parse_fence_start(line: &str) -> Option<&str> {
         "mindmap" => Some("mindmap"),
         "graph" => Some("graph"),
         "diff" => Some("diff"),
+        // Presentation primitives: a captioned code snippet, and a sequence the reader
+        // can step through by tapping (e-ink cannot animate, so a tap-through reveal is
+        // the honest form of movement).
+        "snippet" => Some("snippet"),
+        "steps" => Some("steps"),
         _ => None,
     }
 }
