@@ -63,7 +63,7 @@ class NoTestsRan(RuntimeError):
     """A test name that matches nothing proves nothing: it must not read as a pass."""
 
 
-def suite_is_green(test: str = "", target: str = "--lib") -> bool:
+def suite_is_green(test: str = "", target: str = "--lib") -> bool:  # noqa: D401
     proc = subprocess.run(
         ["cargo", "test", *target.split(), "--quiet", test],
         cwd=SERVER,
@@ -108,22 +108,30 @@ def text_edit(path: pathlib.Path, old: str, new: str):
         found = locate(body, old)
         assert found, f"anchor missing in {path}: {old[:70]!r}"
         start, end = found
+        saved["original"] = body
         saved["text"] = body[start:end]
         saved["start"] = start
         path.write_text(body[:start] + new + body[end:])
 
     def revert():
         body = path.read_text()
-        # A mutation that deletes text has nothing to search for, so undo it in place.
-        at = saved["start"] if not new else None
-        found = locate(body, new) if at is None else None
-        if found is None:
-            assert at is not None, f"mutation not present in {path}: {new[:70]!r}"
-            start = int(at)
-            end = start
+        # Undo at the offset that was mutated, not at the first match: a replacement that
+        # also appears elsewhere (a bare DELETE, say) would otherwise be restored into the
+        # wrong function and silently swap two behaviours.
+        at = int(saved["start"])
+        if new and body[at : at + len(new)] == new:
+            path.write_text(body[:at] + str(saved["text"]) + body[at + len(new) :])
+        elif not new:
+            path.write_text(body[:at] + str(saved["text"]) + body[at:])
         else:
+            found = locate(body, new)
+            assert found, f"mutation not present in {path}: {new[:70]!r}"
             start, end = found
-        path.write_text(body[:start] + str(saved["text"]) + body[end:])
+            path.write_text(body[:start] + str(saved["text"]) + body[end:])
+        restored = path.read_text()
+        assert restored == saved["original"], (
+            f"{path} did not come back byte for byte; the tree is no longer trustworthy"
+        )
 
     return apply, revert
 
@@ -548,8 +556,12 @@ CASES = [
         "the remove command forgets to ask for removal",
         text_edit(
             CLII,
-            'format!("{server}/api/sessions/{id}?remove=true")',
-            'format!("{server}/api/sessions/{id}")',
+            r"""    // `?remove=true` forgets the session and deletes its files; a bare DELETE cancels it.
+    let resp = client
+        .delete(format!("{server}/api/sessions/{id}?remove=true"))""",
+            r"""    // `?remove=true` forgets the session and deletes its files; a bare DELETE cancels it.
+    let resp = client
+        .delete(format!("{server}/api/sessions/{id}"))""",
         ),
         "cli_remove_takes_the_review_away_and_cancel_keeps_it",
     ),
@@ -576,6 +588,8 @@ def main() -> int:
         return 1
     print(f"all {len(CASES)} mutations were caught")
 
+    # No target filter: every test target, doc tests included. A gate that checks less
+    # than the mutations touch is how a swapped pair of commands once got through.
     if not suite_is_green():
         print("FAIL: the suite is not green after reverting every mutation")
         return 1
