@@ -194,6 +194,8 @@ Use `/coverage` skill for automated analysis of gaps.
 |---|---|
 | `render.rs` CSS or HTML output | `just test-render` then `just eval` |
 | Annotation / highlighting / tap behaviour | `just test-render` then `just test-mutations` |
+| Snippet, diff, steps or fence handling | `cargo test render::tests::parse_chunks` / `a_snippet` / `a_line_mark` |
+| Relocating notes after an edit | `cargo test reanchor::tests` |
 | `render.rs` diagram parsing | `cargo test render::tests::graph` / `mindmap` / `mermaid` |
 | `app.rs` handlers | `cargo test --test health_test` |
 | `session.rs` lifecycle | `cargo test --test session_lifecycle_test` |
@@ -224,6 +226,47 @@ class rather than the instance:
 Because a green test only shows the tests pass, `just test-mutations` reintroduces each
 defect and asserts the named test goes red. Add a case there whenever you add an
 invariant.
+
+### Snippets, fences and line marks
+
+The `snippet` block is a small format with several ways to lose information quietly, and
+each has a test:
+
+- **Fence length.** A block ends only at a fence at least as long as the one that opened
+  it, so a snippet can quote a fence of its own (use four backticks). Reading any closer
+  as the end truncated the snippet at the inner fence; rendering the code in a fence it
+  could contain produced a nested `<pre>`.
+- **Line marks.** Only the trailing `#L12,15` token is a mark. Taking the first `#L`
+  anywhere truncated a caption that mentioned a line ("fixes #L42 regression") and
+  highlighted the wrong line. `tests::a_line_mark_lands_on_the_line_it_names` pins the
+  line itself, not merely that some line is marked: the renderer emits a newline between
+  `<pre>` and the code, and counting it sent every reader one line too high.
+- **Markup.** Unwinding a marked line used to close its `<mark>` before the `<span>` that
+  carried the newline. Marked code must stay balanced, one rendered line per line of code.
+- **Headers.** The first token is a language only if it can be one; a path with an
+  annotation after it is a location, not a language, and reading it as one drops the file
+  name from the caption.
+
+Everything a reader sees in a block comes from a pasted brief, so caption, language badge
+and step text are escaped: `tests::review_text_in_a_snippet_or_step_block_is_escaped`.
+
+### Relocating notes after an edit (`reanchor.rs`)
+
+`targets()` decides which paragraph an existing note follows when the document changes.
+A note that lands on the *wrong* paragraph is worse than one that is left unplaced: the
+author is told the wrong thing with confidence. The rules, each with a test:
+
+- Exact matches are resolved before fuzzy guesses, and a guess may never take a paragraph
+  an exact match owns. Otherwise a deleted paragraph similar to a surviving one stole the
+  survivor's match and dropped its note.
+- An unchanged paragraph that survives still gets its note back, and reordered paragraphs
+  take their notes with them (position is not identity).
+- Two evenly good candidates, repeated text, an empty source, a changed tag and a short
+  label against a long paragraph are all left unplaced rather than guessed.
+
+`tests::a_relocated_note_never_lands_on_another_paragraph` asserts the property over 200
+deterministic document shapes: a note either follows its own paragraph or is left
+unplaced, never a neighbour.
 
 ### Deployment gap
 

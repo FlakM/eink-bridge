@@ -19,6 +19,8 @@ import sys
 SERVER = pathlib.Path(__file__).resolve().parent.parent
 RENDER = SERVER / "src/render.rs"
 DIAGRAMS = SERVER / "src/render/diagrams.rs"
+CHUNKS = SERVER / "src/render/chunks.rs"
+REANCHOR = SERVER / "src/reanchor.rs"
 THEME = SERVER / "assets/eink-theme.tmTheme"
 
 
@@ -193,6 +195,78 @@ CASES = [
             ".diagram-block, .snippet-block, .steps-block';",
         ),
         "every_block_kind_can_be_bound_by_a_tap",
+    ),
+    (
+        "the line marks are counted one line high",
+        text_edit(
+            DIAGRAMS,
+            "let inner = html[open_end + 1..close_start].strip_prefix('\\n').unwrap_or(\"\");",
+            "let inner = &html[open_end + 1..close_start];",
+        ),
+        "a_line_mark_lands_on_the_line_it_names",
+    ),
+    (
+        "the closing fence must be exactly three backticks",
+        text_edit(
+            CHUNKS,
+            "    let run = backtick_run(line);\n    run >= opening_run && line.trim()[run..].trim().is_empty()",
+            "    let _ = opening_run;\n    line.trim() == \"```\"",
+        ),
+        "parse_chunks_reads_a_shorter_fence_inside_a_longer_one",
+    ),
+    (
+        "a snippet wraps its code in a fence it can contain",
+        text_edit(
+            DIAGRAMS,
+            "let fence = \"`\".repeat(longest_backtick_run(&body).max(3) + usize::from(body.contains('`')));",
+            "let fence = \"```\".to_string();",
+        ),
+        "a_snippet_may_quote_a_fence_of_its_own",
+    ),
+    (
+        "any first token counts as a language",
+        text_edit(
+            DIAGRAMS,
+            "    !token.is_empty()\n        && !token.contains(['/', '\\\\', ':', '.', '#'])\n        && token.chars().all(|c| c.is_alphanumeric() || \"+-_\".contains(c))",
+            "    !token.is_empty()",
+        ),
+        "a_header_without_a_language_names_the_file_instead",
+    ),
+    (
+        "the caption is emitted unescaped",
+        text_edit(
+            DIAGRAMS,
+            "            \"<figcaption>{}</figcaption>\",\n            super::html_utils::escape_html(&title)",
+            "            \"<figcaption>{}</figcaption>\",\n            title.clone()",
+        ),
+        "review_text_in_a_snippet_or_step_block_is_escaped",
+    ),
+    (
+        "a single step is described as plural",
+        text_edit(
+            DIAGRAMS,
+            "let noun = if steps.len() == 1 { \"step\" } else { \"steps\" };",
+            "let noun = \"steps\";",
+        ),
+        "a_single_step_is_not_plural",
+    ),
+    (
+        "trailing tag scaffolding is counted as a line",
+        text_edit(
+            DIAGRAMS,
+            "    if pending {\n        lines.push(line);\n    }",
+            "    lines.push(line);",
+        ),
+        "a_marked_block_keeps_one_rendered_line_per_line_of_code",
+    ),
+    (
+        "a guess may take a paragraph an exact match owns",
+        text_edit(
+            REANCHOR,
+            "            || scores.get(1).is_some_and(|other| score - other.1 < 0.08)\n            || claimed.contains(&index)\n        {",
+            "            || scores.get(1).is_some_and(|other| score - other.1 < 0.08)\n        {",
+        ),
+        "a_relocated_note_never_lands_on_another_paragraph",
     ),
 ]
 

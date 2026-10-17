@@ -2230,6 +2230,262 @@ mod tests {
 
     // --- Syntax highlighting ---
 
+    /// Strip tags so an assertion compares what the reader sees: syntax highlighting
+    /// splits a line like `let y = 2;` across several spans.
+    fn visible_text(html: &str) -> String {
+        let mut out = String::new();
+        let mut rest = html;
+        while let Some(start) = rest.find('<') {
+            out.push_str(&rest[..start]);
+            match rest[start..].find('>') {
+                Some(end) => rest = &rest[start + end + 1..],
+                None => {
+                    rest = "";
+                }
+            }
+        }
+        out.push_str(rest);
+        out.replace("&quot;", "\"").replace("&#39;", "'")
+    }
+
+    fn marked_lines(html: &str) -> Vec<String> {
+        html.match_indices("<mark class=\"snippet-hit\">")
+            .map(|(start, tag)| {
+                visible_text(
+                    html[start + tag.len()..]
+                        .split("</mark>")
+                        .next()
+                        .unwrap_or(""),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_line_mark_lands_on_the_line_it_names() {
+        // The renderer emits a newline between <pre> and the code. Counting it as a line
+        // put every mark one line high, so the reader was sent above the cited line.
+        let html =
+            render("```snippet\nrust a.rs | note #L2\nlet x = 1;\nlet y = 2;\nlet z = 3;\n```\n");
+        let marked = marked_lines(&html);
+        assert_eq!(marked.len(), 1, "one line cited, one marked");
+        assert!(
+            marked[0].contains("let y = 2;"),
+            "marked the wrong line: {:?}",
+            marked[0]
+        );
+        assert!(!marked[0].contains("let x = 1;"), "{:?}", marked[0]);
+    }
+
+    #[test]
+    fn several_line_marks_land_on_their_own_lines() {
+        let html =
+            render("```snippet\nrust a.rs | note #L1,3\nlet x = 1;\nlet y = 2;\nlet z = 3;\n```\n");
+        let marked = marked_lines(&html);
+        assert_eq!(marked.len(), 2, "two lines cited, two marked: {marked:?}");
+        assert!(marked[0].contains("let x = 1;"), "{:?}", marked[0]);
+        assert!(marked[1].contains("let z = 3;"), "{:?}", marked[1]);
+    }
+
+    #[test]
+    fn a_marked_block_keeps_one_rendered_line_per_line_of_code() {
+        // Unwinding a line rebuilds it, and the scaffolding after the last newline is not
+        // a line: counting it added a trailing blank line to every marked block.
+        let html =
+            render("```snippet\nrust a.rs | note #L2\nlet x = 1;\nlet y = 2;\nlet z = 3;\n```\n");
+        let body = html.split("</style>").nth(1).expect("the page has a body");
+        let inner = body
+            .split("<pre")
+            .nth(1)
+            .expect("a code block")
+            .splitn(2, '>')
+            .nth(1)
+            .expect("the tag ends")
+            .split("</pre>")
+            .next()
+            .unwrap();
+        assert_eq!(
+            inner.split('\n').count(),
+            3,
+            "three lines of code, three lines rendered: {inner:?}"
+        );
+    }
+
+    #[test]
+    fn marked_code_is_well_formed_html() {
+        // A marked line used to close its <mark> before the span that carried the
+        // newline, leaving unbalanced markup and a highlight that spilled off the line.
+        let html = render(
+            "```snippet\nrust a.rs | note #L1,2,3\nspawn(async move {\n    let x = 1;\n}\n```\n",
+        );
+        let block = html
+            .split("<figure class=\"snippet-block\"")
+            .nth(1)
+            .expect("a snippet block")
+            .split("</figure>")
+            .next()
+            .unwrap();
+        assert_eq!(block.matches("<pre").count(), 1, "one code block: {block}");
+        assert_eq!(
+            block.matches("<span").count(),
+            block.matches("</span>").count(),
+            "unbalanced spans: {block}"
+        );
+        assert_eq!(
+            block.matches("<mark").count(),
+            block.matches("</mark>").count(),
+            "unbalanced marks: {block}"
+        );
+    }
+
+    #[test]
+    fn a_snippet_may_quote_a_fence_of_its_own() {
+        // Reviewing a markdown change means quoting a fence. With a shorter fence the
+        // inner ``` closed the block early: the snippet became an unhighlighted code
+        // block whose first line was the raw header.
+        let html = render(
+            "````snippet\nmarkdown docs/readme.md | a fence sample\nUse a fence:\n```rust\nlet x = 1;\n```\n````\n\n## After\n",
+        );
+        assert!(html.contains("class=\"snippet-block\""), "still a snippet");
+        assert!(
+            html.contains("docs/readme.md — a fence sample"),
+            "caption kept"
+        );
+        assert!(html.contains("let x = 1;"), "the quoted code renders");
+        assert!(html.contains("<h2>After</h2>"), "the document continues");
+        let block = html
+            .split("<figure class=\"snippet-block\"")
+            .nth(1)
+            .unwrap()
+            .split("</figure>")
+            .next()
+            .unwrap();
+        assert_eq!(
+            block.matches("<pre").count(),
+            1,
+            "no nested code block: {block}"
+        );
+    }
+
+    #[test]
+    fn a_caption_that_mentions_a_line_keeps_its_tail() {
+        // Only the trailing token is a line mark. Taking the first `#L` anywhere in the
+        // header truncated the caption at the mention and highlighted the wrong line.
+        let html = render("```snippet\nrust a.rs | fixes #L42 regression\nlet x = 1;\n```\n");
+        assert!(
+            html.contains("a.rs — fixes #L42 regression"),
+            "the caption keeps its tail: {html}"
+        );
+        assert!(!html.contains("snippet-hit\">"), "a mention is not a mark");
+    }
+
+    #[test]
+    fn a_reference_with_spaces_stays_in_the_caption() {
+        let html =
+            render("```snippet\nrust server/src/app.rs:170 (expiry) | note\nlet x = 1;\n```\n");
+        assert!(html.contains("server/src/app.rs:170 (expiry) — note"));
+        assert!(
+            html.contains("data-lang=\"rust\""),
+            "the language is still read"
+        );
+    }
+
+    #[test]
+    fn a_header_without_a_language_names_the_file_instead() {
+        // The reference is what is left of the head, so the gate has to look at the first
+        // token: a path with an annotation after it is a location, not a language, and
+        // reading it as one drops the path from the caption.
+        let html = render(
+            "```snippet\nserver/src/app.rs:170 (expiry) | the expiry loop\nlet x = 1;\n```\n",
+        );
+        assert!(
+            html.contains("server/src/app.rs:170 (expiry) — the expiry loop"),
+            "the file stays named: {html}"
+        );
+        assert!(
+            !html.contains("data-lang"),
+            "a path is a location, not a language"
+        );
+    }
+
+    #[test]
+    fn line_marks_outside_the_code_are_ignored() {
+        for header in ["rust a.rs | note #L99", "rust a.rs | note #Labc"] {
+            let html = render(&format!("```snippet\n{header}\nlet x = 1;\n```\n"));
+            assert!(
+                !html.contains("snippet-hit\">"),
+                "{header} should not mark a line"
+            );
+            assert!(
+                visible_text(&html).contains("let x = 1;"),
+                "{header} still renders its code"
+            );
+        }
+    }
+
+    #[test]
+    fn review_text_in_a_snippet_or_step_block_is_escaped() {
+        // The caption, the language badge and the steps come from a pasted brief.
+        let html = render("```snippet\nrust a.rs<script> | <b>caption</b>\nlet x = 1;\n```\n");
+        assert!(
+            html.contains("data-lang=\"rust\""),
+            "the real language is kept"
+        );
+        assert!(!html.contains("<b>caption</b>"), "caption markup escaped");
+        assert!(html.contains("&lt;b&gt;caption&lt;/b&gt;"));
+        assert!(!html.contains("a.rs<script>"));
+
+        let html = render("```steps\nUse <script>alert(1)</script> | the \"detail\"\n```\n");
+        assert!(!html.contains("<script>alert(1)</script>"));
+        assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+        assert!(html.contains("the &quot;detail&quot;"));
+    }
+
+    #[test]
+    fn a_single_step_is_not_plural() {
+        assert!(render("```steps\nOnly step | detail\n```\n").contains("1 step</span>"));
+        assert!(render("```steps\nOne | a\nTwo | b\n```\n").contains("2 steps</span>"));
+    }
+
+    #[test]
+    fn an_empty_steps_block_still_renders() {
+        let html = render("```steps\n```\n");
+        assert!(html.contains("class=\"steps-block\""));
+        assert!(html.contains("0 steps"));
+    }
+
+    #[test]
+    fn parse_chunks_closes_on_a_fence_at_least_as_long_as_the_opening() {
+        let chunks = parse_chunks("```diff\n+let x = 1;\n````\n## After\n");
+        match &chunks[0] {
+            Chunk::Diagram { source, .. } => assert_eq!(source, "+let x = 1;"),
+            _ => panic!("expected a diff diagram chunk"),
+        }
+        assert!(
+            matches!(chunks[1], Chunk::Markdown(_)),
+            "the heading is not swallowed"
+        );
+    }
+
+    #[test]
+    fn parse_chunks_reads_a_shorter_fence_inside_a_longer_one() {
+        let chunks = parse_chunks(
+            "````snippet\nmarkdown docs/x.md | note\nUse a fence:\n```rust\nlet x = 1;\n```\n````\n",
+        );
+        assert_eq!(chunks.len(), 1, "the inner fence does not close the block");
+        match &chunks[0] {
+            Chunk::Diagram { kind, source } => {
+                assert_eq!(kind, "snippet");
+                assert!(
+                    source.contains("```rust"),
+                    "the inner fence stays in the source"
+                );
+                assert!(source.contains("let x = 1;"));
+            }
+            _ => panic!("expected a snippet chunk"),
+        }
+    }
+
     #[test]
     fn snippet_block_carries_the_reference_caption_and_highlighted_line() {
         let html = render(
@@ -2676,9 +2932,15 @@ mod tests {
 
     #[test]
     fn parse_fence_start_recognizes_known_kinds() {
-        assert_eq!(parse_fence_start("```mermaid"), Some("mermaid"));
-        assert_eq!(parse_fence_start("```mindmap"), Some("mindmap"));
-        assert_eq!(parse_fence_start("```graph"), Some("graph"));
+        assert_eq!(
+            parse_fence_start("```mermaid").map(|(k, _)| k),
+            Some("mermaid")
+        );
+        assert_eq!(
+            parse_fence_start("```mindmap").map(|(k, _)| k),
+            Some("mindmap")
+        );
+        assert_eq!(parse_fence_start("```graph").map(|(k, _)| k), Some("graph"));
     }
 
     #[test]
@@ -2699,8 +2961,14 @@ mod tests {
 
     #[test]
     fn parse_fence_start_tolerates_surrounding_whitespace() {
-        assert_eq!(parse_fence_start("  ```mermaid  "), Some("mermaid"));
-        assert_eq!(parse_fence_start("\t```graph"), Some("graph"));
+        assert_eq!(
+            parse_fence_start("  ```mermaid  ").map(|(k, _)| k),
+            Some("mermaid")
+        );
+        assert_eq!(
+            parse_fence_start("\t```graph").map(|(k, _)| k),
+            Some("graph")
+        );
     }
 
     // --- parse_chunks ---
@@ -2833,7 +3101,7 @@ mod tests {
 
     #[test]
     fn diff_block_parses_from_fence() {
-        assert_eq!(parse_fence_start("```diff"), Some("diff"));
+        assert_eq!(parse_fence_start("```diff").map(|(k, _)| k), Some("diff"));
     }
 
     #[test]
