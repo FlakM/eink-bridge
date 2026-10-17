@@ -136,6 +136,12 @@ pub static HTTP_DURATION: LazyLock<HistogramVec> = LazyLock::new(|| {
 });
 
 /// Force-register all metrics so they appear in /metrics before any events occur.
+///
+/// A labelled metric with no children exports nothing at all: the encoder walks the
+/// children, so `eink_ocr_requests_total` is *absent* rather than zero until some code
+/// path sets a label. That leaves the runbook's queries and the Grafana panels empty on a
+/// quiet server, which reads as "the metric is gone". The fixed vocabularies below are
+/// the values this program actually uses, so they are seeded at zero.
 pub fn init() {
     let _ = &*SESSIONS_CREATED;
     let _ = &*SESSIONS_SUBMITTED;
@@ -160,6 +166,46 @@ pub fn init() {
     let _ = &*WEBHOOK_TOTAL;
     let _ = &*HTTP_REQUESTS;
     let _ = &*HTTP_DURATION;
+    seed_label_vocabularies();
+}
+
+/// The OCR providers the race can pick between.
+pub const PROVIDERS: [&str; 2] = ["local", "openai"];
+/// How a provider attempt can end, as recorded by the race.
+pub const PROVIDER_RESULTS: [&str; 3] = ["ok", "error", "cancelled"];
+
+fn seed_label_vocabularies() {
+    for result in ["hit", "miss", "coalesced"] {
+        OCR_CACHE.with_label_values(&[result]).inc_by(0);
+    }
+    for result in ["ok", "error"] {
+        OCR_REQUESTS.with_label_values(&[result]).inc_by(0);
+    }
+    for kind in ["prompt", "eval"] {
+        OCR_TOKENS.with_label_values(&[kind]).inc_by(0);
+    }
+    for result in ["notified", "timeout"] {
+        LONG_POLL_TOTAL.with_label_values(&[result]).inc_by(0);
+    }
+    for result in ["ok", "error"] {
+        WEBHOOK_TOTAL.with_label_values(&[result]).inc_by(0);
+    }
+    for provider in PROVIDERS {
+        OCR_PROVIDER_WINS.with_label_values(&[provider]).inc_by(0);
+        for kind in ["input", "output"] {
+            OCR_PROVIDER_TOKENS
+                .with_label_values(&[provider, kind])
+                .inc_by(0);
+        }
+        for result in PROVIDER_RESULTS {
+            OCR_PROVIDER_REQUESTS
+                .with_label_values(&[provider, result])
+                .inc_by(0);
+            // Not `observe(0.0)`: that would record a real observation and show up as a
+            // dur of zero in the panel. Touching the child is enough to export it.
+            let _ = OCR_PROVIDER_DURATION.with_label_values(&[provider, result]);
+        }
+    }
 }
 
 pub fn render() -> String {
@@ -168,4 +214,150 @@ pub fn render() -> String {
     let mut buf = Vec::new();
     encoder.encode(&families, &mut buf).unwrap_or_default();
     String::from_utf8(buf).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every gauge and counter with no labels, plus the histograms.
+    #[test]
+    fn unlabelled_metrics_are_present_before_any_event() {
+        init();
+        let exposed = render();
+        for name in [
+            "eink_sessions_created_total",
+            "eink_sessions_submitted_total",
+            "eink_sessions_cancelled_total",
+            "eink_sessions_expired_total",
+            "eink_sessions_active",
+            "eink_sessions_stored",
+            "eink_sessions_starred",
+            "eink_session_content_bytes",
+            "eink_session_annotation_images",
+            "eink_ocr_duration_seconds",
+            "eink_ocr_image_pixels",
+            "eink_ws_connections_active",
+        ] {
+            assert!(
+                exposed.contains(name),
+                "{name} is not exported before its first event"
+            );
+        }
+    }
+
+    /// The labelled metrics, which need their vocabulary seeded: without it the family
+    /// exports nothing and a scrape looks like the metric was deleted.
+    #[test]
+    fn labelled_metrics_export_their_whole_vocabulary_before_any_event() {
+        init();
+        let exposed = render();
+        let mut wanted: Vec<String> = vec![
+            "eink_ocr_requests_total{result=\"ok\"}".into(),
+            "eink_ocr_requests_total{result=\"error\"}".into(),
+            "eink_ocr_cache_total{result=\"hit\"}".into(),
+            "eink_ocr_cache_total{result=\"miss\"}".into(),
+            "eink_ocr_cache_total{result=\"coalesced\"}".into(),
+            "eink_ocr_tokens_total{kind=\"prompt\"}".into(),
+            "eink_ocr_tokens_total{kind=\"eval\"}".into(),
+            "eink_long_poll_total{result=\"notified\"}".into(),
+            "eink_long_poll_total{result=\"timeout\"}".into(),
+            "eink_webhook_total{result=\"ok\"}".into(),
+            "eink_webhook_total{result=\"error\"}".into(),
+        ];
+        for provider in PROVIDERS {
+            wanted.push(format!(
+                "eink_ocr_provider_wins_total{{provider=\"{provider}\"}}"
+            ));
+            for result in PROVIDER_RESULTS {
+                wanted.push(format!(
+                    "eink_ocr_provider_requests_total{{provider=\"{provider}\",result=\"{result}\"}}"
+                ));
+                wanted.push(format!(
+                    "eink_ocr_provider_duration_seconds_count{{provider=\"{provider}\",result=\"{result}\"}}"
+                ));
+            }
+            for kind in ["input", "output"] {
+                wanted.push(format!(
+                    "eink_ocr_provider_tokens_total{{provider=\"{provider}\",kind=\"{kind}\"}}"
+                ));
+            }
+        }
+        for series in wanted {
+            let (name, labels) = series.split_once('{').expect("a labelled series");
+            let labels = labels.trim_end_matches('}');
+            let found = exposed.lines().any(|line| {
+                line.starts_with(name) && labels.split(',').all(|pair| line.contains(pair))
+            });
+            assert!(
+                found,
+                "{series} is missing (label order is not significant): the panel that \
+                 selects on it would read 'no data' until the first event"
+            );
+        }
+    }
+
+    #[test]
+    fn seeding_does_not_invent_observations() {
+        // A histogram child is created by touching it, but nothing may be *recorded*: a
+        // seeded observation would put a spurious zero-duration sample in the panels.
+        init();
+        let exposed = render();
+        assert!(
+            exposed.contains(
+                "eink_ocr_provider_duration_seconds_count{provider=\"local\",result=\"ok\"} 0"
+            ),
+            "the seeded histogram should have no observations:\n{exposed}"
+        );
+    }
+
+    #[test]
+    fn the_metrics_the_runbook_names_are_the_ones_that_exist() {
+        // AGENTS.md tells the reader which metric to check for which symptom. A rename
+        // that leaves the runbook behind sends the next person to a metric that is gone.
+        init();
+        let exposed = render();
+        for name in documented_metrics(include_str!("../../AGENTS.md")) {
+            assert!(
+                exposed.contains(&name),
+                "the runbook names {name}, which no longer exists"
+            );
+        }
+    }
+
+    fn documented_metrics(doc: &str) -> Vec<String> {
+        let mut found: Vec<String> = doc
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .filter(|word| word.starts_with("eink_") && word.len() > "eink_".len())
+            .map(str::to_string)
+            .collect();
+        found.sort();
+        found.dedup();
+        found
+    }
+
+    #[test]
+    fn documented_metrics_are_read_from_the_runbook() {
+        // Guard the guard: if the parser stops finding names the test above passes empty.
+        let found = documented_metrics(include_str!("../../AGENTS.md"));
+        assert!(
+            found.len() >= 6,
+            "the runbook should name several metrics, found {found:?}"
+        );
+    }
+
+    #[test]
+    fn a_metric_renders_its_labels_ready_for_a_query() {
+        // A counter that never has its labels forced would render nothing at all, and the
+        // Grafana panels that select on them would be empty.
+        OCR_PROVIDER_REQUESTS
+            .with_label_values(&["local", "ok"])
+            .inc();
+        LONG_POLL_TOTAL.with_label_values(&["timeout"]).inc();
+        let exposed = render();
+        assert!(exposed.contains("eink_ocr_provider_requests_total{"));
+        assert!(exposed.contains("provider=\"local\""));
+        assert!(exposed.contains("result=\"ok\""));
+        assert!(exposed.contains("eink_long_poll_total{"));
+    }
 }

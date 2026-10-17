@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import pathlib
 import plistlib
+import re
 import subprocess
 import sys
 
@@ -21,12 +22,27 @@ RENDER = SERVER / "src/render.rs"
 DIAGRAMS = SERVER / "src/render/diagrams.rs"
 CHUNKS = SERVER / "src/render/chunks.rs"
 REANCHOR = SERVER / "src/reanchor.rs"
+CLII = SERVER / "src/cli.rs"
 THEME = SERVER / "assets/eink-theme.tmTheme"
 
 
-def suite_is_green(test: str = "") -> bool:
+# Tests in a binary crate are invisible to `--lib`; they run against the bin target.
+BIN_TARGETS = {
+    "a_review_exit_code_is_the_contract_a_pipeline_gates_on": "--bin eink-review",
+    "long_element_text_is_elided_without_panicking_on_a_character_boundary": "--bin eink-review",
+    "the_observer_url_follows_the_scheme_of_the_server": "--bin eink-review",
+    "a_session_row_shows_the_star_the_status_and_where_it_came_from": "--bin eink-review",
+    "a_submitted_review_renders_notes_anchors_and_images": "--bin eink-review",
+}
+
+
+def target_for(test: str) -> str:
+    return BIN_TARGETS.get(test, "--lib")
+
+
+def suite_is_green(test: str = "", target: str = "--lib") -> bool:
     proc = subprocess.run(
-        ["cargo", "test", "--lib", "--quiet", test],
+        ["cargo", "test", *target.split(), "--quiet", test],
         cwd=SERVER,
         capture_output=True,
         text=True,
@@ -34,16 +50,38 @@ def suite_is_green(test: str = "") -> bool:
     return proc.returncode == 0
 
 
+def locate(body: str, needle: str) -> tuple[int, int] | None:
+    """Find `needle`, ignoring how the formatter wrapped it."""
+    start = body.find(needle)
+    if start >= 0:
+        return start, start + len(needle)
+    pattern = re.compile(r"\s+".join(re.escape(part) for part in needle.split()))
+    match = pattern.search(body)
+    return (match.start(), match.end()) if match else None
+
+
 def text_edit(path: pathlib.Path, old: str, new: str):
+    """Swap `old` for `new`, remembering the exact text replaced.
+
+    Reverting writes back what was there, not the anchor as typed, so a run leaves the
+    tree byte-identical even when the formatter had rewrapped the code.
+    """
+    saved: dict[str, str] = {}
+
     def apply():
         body = path.read_text()
-        assert old in body, f"anchor missing in {path}: {old[:60]!r}"
-        path.write_text(body.replace(old, new, 1))
+        found = locate(body, old)
+        assert found, f"anchor missing in {path}: {old[:70]!r}"
+        start, end = found
+        saved["text"] = body[start:end]
+        path.write_text(body[:start] + new + body[end:])
 
     def revert():
         body = path.read_text()
-        assert new in body, f"mutation not present in {path}"
-        path.write_text(body.replace(new, old, 1))
+        found = locate(body, new)
+        assert found, f"mutation not present in {path}: {new[:70]!r}"
+        start, end = found
+        path.write_text(body[:start] + saved["text"] + body[end:])
 
     return apply, revert
 
@@ -200,8 +238,8 @@ CASES = [
         "the line marks are counted one line high",
         text_edit(
             DIAGRAMS,
-            "let inner = html[open_end + 1..close_start].strip_prefix('\\n').unwrap_or(\"\");",
-            "let inner = &html[open_end + 1..close_start];",
+            ".strip_prefix('\\n')",
+            ".strip_prefix('Z')",
         ),
         "a_line_mark_lands_on_the_line_it_names",
     ),
@@ -227,8 +265,12 @@ CASES = [
         "any first token counts as a language",
         text_edit(
             DIAGRAMS,
-            "    !token.is_empty()\n        && !token.contains(['/', '\\\\', ':', '.', '#'])\n        && token.chars().all(|c| c.is_alphanumeric() || \"+-_\".contains(c))",
-            "    !token.is_empty()",
+            r"""    !token.is_empty()
+        && !token.contains(['/', '\\', ':', '.', '#'])
+        && token
+            .chars()
+            .all(|c| c.is_alphanumeric() || "+-_".contains(c))""",
+            r"""    !token.is_empty()""",
         ),
         "a_header_without_a_language_names_the_file_instead",
     ),
@@ -268,6 +310,40 @@ CASES = [
         ),
         "a_relocated_note_never_lands_on_another_paragraph",
     ),
+    (
+        "the preview is cut at a byte offset",
+        text_edit(
+            CLII,
+            """    if text.chars().count() <= limit {
+        return text.to_string();
+    }
+    let kept: String = text.chars().take(limit).collect();
+    format!("{kept}…")""",
+            """    if text.len() <= limit {
+        return text.to_string();
+    }
+    text[..limit].to_string()""",
+        ),
+        "long_element_text_is_elided_without_panicking_on_a_character_boundary",
+    ),
+    (
+        "a review with changes exits zero",
+        text_edit(
+            CLII,
+            '        Some("changes") => 2,',
+            '        Some("changes") => 0,',
+        ),
+        "a_review_exit_code_is_the_contract_a_pipeline_gates_on",
+    ),
+    (
+        "the observer url keeps a trailing slash",
+        text_edit(
+            CLII,
+            "    let base = server\n        .trim_end_matches('/')",
+            "    let base = server",
+        ),
+        "the_observer_url_follows_the_scheme_of_the_server",
+    ),
 ]
 
 
@@ -276,7 +352,7 @@ def main() -> int:
     for label, (apply, revert), test in CASES:
         apply()
         try:
-            caught = not suite_is_green(test)
+            caught = not suite_is_green(test, target_for(test))
         finally:
             revert()
         print(f"  {'caught' if caught else 'MISSED':6} {test:52} <- {label}")

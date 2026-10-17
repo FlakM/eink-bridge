@@ -203,7 +203,11 @@ impl SessionResultResponse {
             verdict: session.verdict.as_ref().map(|v| v.as_str()),
             typed_notes: session.typed_notes.clone(),
             annotation_images: session.annotation_images.clone(),
-            has_annotation: !session.annotation_images.is_empty(),
+            // Any of the three carries ink. The rendered images are usually present, but
+            // a submission whose images were never written still has the strokes.
+            has_annotation: !session.annotation_images.is_empty()
+                || !session.annotations.is_empty()
+                || session.stroke_data.is_some(),
             review_duration_seconds,
             tags: session.tags.clone(),
             stroke_data: session.stroke_data.clone(),
@@ -520,7 +524,9 @@ pub fn openapi_spec() -> serde_json::Value {
                         "annotations": {
                             "type": "array",
                             "items": {"$ref": "#/components/schemas/AnnotationGroup"}
-                        }
+                        },
+                        "starred": {"type": "boolean"},
+                        "origin": {"$ref": "#/components/schemas/SessionOrigin"}
                     }
                 },
                 "AnnotationGroup": {
@@ -558,4 +564,244 @@ pub fn openapi_spec() -> serde_json::Value {
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::SessionManager;
+    use serde_json::Value;
+    use std::path::PathBuf;
+
+    /// A session with every field populated, built through the real constructor so the
+    /// defaults are the ones the server actually applies.
+    fn populated_session() -> Session {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = SessionManager::new(dir.path().to_path_buf());
+        let mut session = manager.create(
+            "# Review\n\nBody".into(),
+            Some("A title".into()),
+            Some("http://localhost:9999/hook".into()),
+            HashMap::from([("repo".to_string(), "eink-bridge".to_string())]),
+            true,
+            Some(SessionOrigin {
+                cwd: Some("/tmp".into()),
+                host: Some("amd-pc".into()),
+                tool: Some("eink-pr".into()),
+                git_branch: Some("main".into()),
+                git_remote: Some("github:FlakM/eink-bridge".into()),
+            }),
+        );
+        session.status = SessionStatus::Submitted;
+        session.typed_notes = Some("CHANGES: needs work".into());
+        session.verdict = Some(crate::verdict::Verdict::Changes);
+        session.annotation_images = vec!["/state/annotations/img_1.png".into()];
+        session.stroke_data = Some(serde_json::json!({"canvas_width": 992, "canvas_height": 1400}));
+        session.annotations = vec![AnnotationGroup {
+            anchor: Some(AnnotationAnchor::Explicit {
+                elements: vec![ElementRef {
+                    section_id: Some("s-1".into()),
+                    tag: "P".into(),
+                    text: "Body".into(),
+                }],
+            }),
+            strokes: vec![vec![[1.0, 2.0], [3.0, 4.0]]],
+            pressures: vec![vec![0.5, 0.5]],
+            recognized_text: Some("WRITE A TLDR".into()),
+            color: Some("#CC0000".into()),
+        }];
+        session.updated_at = session.created_at + chrono::Duration::seconds(75);
+        session
+    }
+
+    /// The properties a schema describes, following `allOf` and `$ref` one level deep,
+    /// which is how the detail response is written.
+    fn described_properties(spec: &Value, schema: &str) -> Vec<String> {
+        let node = &spec["components"]["schemas"][schema];
+        let mut names: Vec<String> = Vec::new();
+        let mut collect = |node: &Value, names: &mut Vec<String>| {
+            if let Some(props) = node.get("properties").and_then(Value::as_object) {
+                names.extend(props.keys().cloned());
+            }
+        };
+        collect(node, &mut names);
+        for part in node
+            .get("allOf")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+        {
+            if let Some(reference) = part.get("$ref").and_then(Value::as_str) {
+                let referenced = reference.rsplit('/').next().unwrap();
+                collect(&spec["components"]["schemas"][referenced], &mut names);
+            }
+            collect(&part, &mut names);
+        }
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    #[test]
+    fn every_field_a_response_sends_is_described_in_the_spec() {
+        // The spec is hand-written while the responses are serialised from structs, so
+        // nothing but a test keeps the two together. A field the spec forgets is a field
+        // the CLI and the app have no reason to read.
+        let spec = openapi_spec();
+        let session = populated_session();
+        let cases: Vec<(&str, Value)> = vec![
+            (
+                "SessionSummaryResponse",
+                serde_json::to_value(SessionSummaryResponse::from_session(&session)).unwrap(),
+            ),
+            (
+                "SessionDetailResponse",
+                serde_json::to_value(SessionDetailResponse::from_session(&session)).unwrap(),
+            ),
+            (
+                "SessionResultResponse",
+                serde_json::to_value(SessionResultResponse::from_session(&session)).unwrap(),
+            ),
+        ];
+        for (schema, body) in cases {
+            let described = described_properties(&spec, schema);
+            assert!(
+                !described.is_empty(),
+                "{schema} describes nothing, so this check would be vacuous"
+            );
+            for field in body.as_object().expect("an object").keys() {
+                assert!(
+                    described.contains(field),
+                    "{schema} sends '{field}' but the spec does not describe it: {described:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_review_with_ink_reports_that_it_has_one() {
+        // `has_annotation` is how a reader tells whether there is anything handwritten to
+        // look at. Deriving it from the rendered images alone said "no" for a review that
+        // carried strokes whose images were never rendered.
+        let mut session = populated_session();
+        session.annotations.clear();
+        session.stroke_data = None;
+        session.annotation_images.clear();
+        assert!(!SessionResultResponse::from_session(&session).has_annotation);
+
+        session.annotations = populated_session().annotations;
+        assert!(
+            SessionResultResponse::from_session(&session).has_annotation,
+            "strokes without rendered images are still ink"
+        );
+
+        session.annotations.clear();
+        session.stroke_data = Some(serde_json::json!({"strokes": []}));
+        assert!(
+            SessionResultResponse::from_session(&session).has_annotation,
+            "raw stroke data is still ink"
+        );
+
+        session.stroke_data = None;
+        session.annotation_images = vec!["/state/annotations/img_1.png".into()];
+        assert!(SessionResultResponse::from_session(&session).has_annotation);
+    }
+
+    #[test]
+    fn annotation_groups_round_trip_through_the_result() {
+        // The app posts this shape and the result echoes it back; a field dropped in the
+        // middle loses the pressure data or the anchor the note was bound to.
+        let session = populated_session();
+        let body = serde_json::to_value(SessionResultResponse::from_session(&session)).unwrap();
+        let group = &body["annotations"][0];
+        assert_eq!(group["color"], "#CC0000");
+        assert_eq!(group["recognized_text"], "WRITE A TLDR");
+        assert_eq!(group["strokes"][0][0][0], 1.0);
+        assert_eq!(group["pressures"][0][1], 0.5);
+        assert_eq!(group["anchor"]["type"], "explicit");
+        assert_eq!(group["anchor"]["elements"][0]["tag"], "P");
+    }
+
+    #[test]
+    fn a_submitted_review_reports_its_duration_and_a_live_one_does_not() {
+        let session = populated_session();
+        let result = SessionResultResponse::from_session(&session);
+        assert_eq!(result.review_duration_seconds, Some(75));
+        assert_eq!(result.verdict, Some("changes"));
+        // The display form is capitalised and every client reads it that way
+        // (SessionAdapter.kt, eink-channel.ts); the query filter is case-insensitive.
+        assert_eq!(result.status, "Submitted");
+
+        let mut active = session.clone();
+        active.status = SessionStatus::Active;
+        assert_eq!(
+            SessionResultResponse::from_session(&active).review_duration_seconds,
+            None,
+            "a review still being written has no duration"
+        );
+    }
+
+    #[test]
+    fn a_review_edited_before_submitting_never_reports_negative_time() {
+        // Clocks move: an update can land with an earlier timestamp than the create.
+        let mut session = populated_session();
+        session.updated_at = session.created_at - chrono::Duration::seconds(30);
+        assert_eq!(
+            SessionResultResponse::from_session(&session).review_duration_seconds,
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn the_summary_and_detail_agree_with_the_session_they_describe() {
+        let session = populated_session();
+        let summary = SessionSummaryResponse::from_session(&session);
+        assert_eq!(summary.id, session.id);
+        assert_eq!(summary.title.as_deref(), Some("A title"));
+        assert_eq!(summary.status, "Submitted");
+        assert!(summary.starred, "a pinned review stays pinned");
+        assert_eq!(summary.schema_version, SCHEMA_VERSION);
+
+        let detail = SessionDetailResponse::from_session(&session);
+        assert_eq!(detail.version, session.version);
+        assert_eq!(
+            detail.callback_url.as_deref(),
+            Some("http://localhost:9999/hook")
+        );
+        assert_eq!(
+            detail.tags.get("repo").map(String::as_str),
+            Some("eink-bridge")
+        );
+    }
+
+    #[test]
+    fn an_empty_session_omits_the_optional_fields_rather_than_sending_nulls() {
+        // `origin` and `annotations` are skipped when absent, so a client can tell
+        // "no origin recorded" from "origin with every field null".
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = SessionManager::new(PathBuf::from(dir.path()));
+        let session = manager.create("body".into(), None, None, HashMap::new(), false, None);
+        let body = serde_json::to_value(SessionResultResponse::from_session(&session)).unwrap();
+        assert!(body.get("origin").is_none());
+        assert!(body.get("annotations").is_none());
+        assert_eq!(body["has_annotation"], false);
+        assert_eq!(body["schema_version"], SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn legacy_payloads_without_schema_version_are_accepted() {
+        // An older CLI or app posts without the version field; the server must keep
+        // working rather than reject the review.
+        let request: CreateSessionRequest =
+            serde_json::from_str(r#"{"content": "hello"}"#).unwrap();
+        assert_eq!(request.schema_version, None);
+        assert_eq!(request.content, "hello");
+        assert!(request.tags.is_empty());
+
+        let review: SubmitReviewRequest =
+            serde_json::from_str(r#"{"typed_notes": "LGTM"}"#).unwrap();
+        assert_eq!(review.typed_notes, "LGTM");
+        assert!(review.annotations.is_empty());
+        assert_eq!(review.verdict, None);
+    }
 }

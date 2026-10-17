@@ -174,6 +174,9 @@
             "type": "boolean"
           },
           "id": "<id>",
+          "origin": {
+            "$ref": "#/components/schemas/SessionOrigin"
+          },
           "review_duration_seconds": {
             "type": [
               "integer",
@@ -182,6 +185,9 @@
           },
           "schema_version": {
             "type": "integer"
+          },
+          "starred": {
+            "type": "boolean"
           },
           "status": {
             "type": "string"

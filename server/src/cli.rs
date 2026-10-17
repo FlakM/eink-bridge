@@ -444,6 +444,7 @@ async fn cmd_update(server: &str, id: &str, file: &str) -> anyhow::Result<()> {
 
 fn ws_url(server: &str, path: &str) -> String {
     let base = server
+        .trim_end_matches('/')
         .replacen("http://", "ws://", 1)
         .replacen("https://", "wss://", 1);
     format!("{base}{path}")
@@ -526,91 +527,115 @@ async fn cmd_list(client: &Client, server: &str, status: Option<String>) -> anyh
     }
 
     for s in &sessions {
-        let id = s["id"].as_str().unwrap_or("?");
-        let title = s["title"].as_str().unwrap_or("(untitled)");
-        let status = s["status"].as_str().unwrap_or("?");
-        let star = if s["starred"].as_bool().unwrap_or(false) {
-            "*"
-        } else {
-            " "
-        };
-        let cwd = s["origin"]["cwd"].as_str().unwrap_or("");
-        if cwd.is_empty() {
-            println!("{star} {id}  {status:<12}  {title}");
-        } else {
-            println!("{star} {id}  {status:<12}  {title}  [{cwd}]");
-        }
+        println!("{}", format_list_row(s));
     }
     Ok(())
 }
 
 fn exit_for_verdict(body: &serde_json::Value) {
-    let code = match body["verdict"].as_str() {
-        Some("lgtm") => 0,
-        Some("changes") => 2,
-        Some("reject") => 3,
-        Some("question") => 4,
-        _ => return, // no verdict → keep default exit 0
-    };
+    let code = verdict_exit_code(body);
     if code != 0 {
         std::process::exit(code);
     }
 }
 
-fn print_result(id: &str, body: &serde_json::Value) {
-    println!("--- review notes (session {id}) ---");
-    println!();
+/// The exit code a submitted review carries, which is what a pipeline gates on.
+/// 0 = lgtm (or no verdict at all), 2 = changes, 3 = reject, 4 = question.
+fn verdict_exit_code(body: &serde_json::Value) -> i32 {
+    match body["verdict"].as_str() {
+        Some("changes") => 2,
+        Some("reject") => 3,
+        Some("question") => 4,
+        _ => 0,
+    }
+}
+
+/// How many characters of an anchored element to show before eliding.
+const ELEMENT_PREVIEW_CHARS: usize = 60;
+
+fn format_result(id: &str, body: &serde_json::Value) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("--- review notes (session {id}) ---\n\n"));
     if let Some(v) = body["verdict"].as_str() {
-        println!("Verdict: {}", v.to_uppercase());
-        println!();
+        out.push_str(&format!("Verdict: {}\n\n", v.to_uppercase()));
     }
     if let Some(notes) = body["typed_notes"].as_str()
         && !notes.is_empty()
     {
-        println!("## Typed Notes");
-        println!("{notes}");
-        println!();
+        out.push_str(&format!("## Typed Notes\n{notes}\n\n"));
     }
     if let Some(annotations) = body["annotations"].as_array()
         && !annotations.is_empty()
     {
-        println!("## Annotations");
+        out.push_str("## Annotations\n");
         for ann in annotations {
-            if let Some(anchor) = ann.get("anchor") {
-                let elements = anchor["elements"].as_array();
-                let anchor_type = anchor["type"].as_str().unwrap_or("unknown");
-                if let Some(elems) = elements {
-                    let label: Vec<String> = elems
-                        .iter()
-                        .map(|e| {
-                            let tag = e["tag"].as_str().unwrap_or("?");
-                            let text = e["text"].as_str().unwrap_or("");
-                            let preview = if text.len() > 60 { &text[..60] } else { text };
-                            format!("{tag}: {preview}")
-                        })
-                        .collect();
-                    println!("### On {} ({})", label.join(", "), anchor_type);
+            match ann.get("anchor") {
+                Some(anchor) => {
+                    let anchor_type = anchor["type"].as_str().unwrap_or("unknown");
+                    if let Some(elems) = anchor["elements"].as_array() {
+                        let label: Vec<String> = elems
+                            .iter()
+                            .map(|e| {
+                                let tag = e["tag"].as_str().unwrap_or("?");
+                                let text = e["text"].as_str().unwrap_or("");
+                                format!("{tag}: {}", elide(text, ELEMENT_PREVIEW_CHARS))
+                            })
+                            .collect();
+                        out.push_str(&format!("### On {} ({})\n", label.join(", "), anchor_type));
+                    }
                 }
-            } else {
-                println!("### Unanchored");
+                None => out.push_str("### Unanchored\n"),
             }
             if let Some(text) = ann["recognized_text"].as_str()
                 && !text.is_empty()
             {
-                println!("> {text}");
+                out.push_str(&format!("> {text}\n"));
             }
-            println!();
+            out.push('\n');
         }
     }
     if let Some(images) = body["annotation_images"].as_array()
         && !images.is_empty()
     {
-        println!("## Attached Images");
+        out.push_str("## Attached Images\n");
         for img in images {
             if let Some(path) = img.as_str() {
-                println!("{path}");
+                out.push_str(&format!("{path}\n"));
             }
         }
+    }
+    out
+}
+
+/// Shorten to at most `limit` characters, counting characters rather than bytes: slicing
+/// a string at a byte offset panics when it lands inside a multi-byte character, and the
+/// notes here are prose in whatever language the reviewer writes.
+fn elide(text: &str, limit: usize) -> String {
+    if text.chars().count() <= limit {
+        return text.to_string();
+    }
+    let kept: String = text.chars().take(limit).collect();
+    format!("{kept}…")
+}
+
+fn print_result(id: &str, body: &serde_json::Value) {
+    print!("{}", format_result(id, body));
+}
+
+fn format_list_row(session: &serde_json::Value) -> String {
+    let id = session["id"].as_str().unwrap_or("?");
+    let title = session["title"].as_str().unwrap_or("(untitled)");
+    let status = session["status"].as_str().unwrap_or("?");
+    let star = if session["starred"].as_bool().unwrap_or(false) {
+        "*"
+    } else {
+        " "
+    };
+    let cwd = session["origin"]["cwd"].as_str().unwrap_or("");
+    if cwd.is_empty() {
+        format!("{star} {id}  {status:<12}  {title}")
+    } else {
+        format!("{star} {id}  {status:<12}  {title}  [{cwd}]")
     }
 }
 
@@ -705,7 +730,151 @@ fn extract_title(markdown: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::extract_title;
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_review_exit_code_is_the_contract_a_pipeline_gates_on() {
+        // 0 passes, so a wrong code here silently lets "changes" through CI.
+        assert_eq!(verdict_exit_code(&json!({"verdict": "lgtm"})), 0);
+        assert_eq!(verdict_exit_code(&json!({"verdict": "changes"})), 2);
+        assert_eq!(verdict_exit_code(&json!({"verdict": "reject"})), 3);
+        assert_eq!(verdict_exit_code(&json!({"verdict": "question"})), 4);
+    }
+
+    #[test]
+    fn a_review_without_a_verdict_passes() {
+        // Only typed notes, no tag: nothing to gate on, so the pipeline must not fail.
+        assert_eq!(
+            verdict_exit_code(&json!({"typed_notes": "just some notes"})),
+            0
+        );
+        assert_eq!(verdict_exit_code(&json!({"verdict": null})), 0);
+        assert_eq!(verdict_exit_code(&json!({})), 0);
+        assert_eq!(verdict_exit_code(&json!({"verdict": "LGTM"})), 0);
+    }
+
+    #[test]
+    fn long_element_text_is_elided_without_panicking_on_a_character_boundary() {
+        // Slicing at byte 60 panicked when the cut landed inside a multi-byte character,
+        // and these notes are prose in whatever language the reviewer writes.
+        let text = format!("{}ł{}", "a".repeat(59), "b".repeat(20));
+        assert!(text.len() > 60, "the fixture must be long enough in bytes");
+        let body = json!({
+            "annotations": [{
+                "anchor": {"type": "explicit", "elements": [{"tag": "P", "text": text}]},
+            }],
+        });
+        let rendered = format_result("abc", &body);
+        assert!(rendered.contains("P: "), "{rendered}");
+        assert!(
+            rendered.contains('…'),
+            "the reader should see that it was cut"
+        );
+        assert!(
+            !rendered.contains(&"b".repeat(20)),
+            "the tail should be elided: {rendered}"
+        );
+    }
+
+    #[test]
+    fn eliding_counts_characters_not_bytes() {
+        assert_eq!(elide("short", 60), "short");
+        assert_eq!(elide(&"x".repeat(60), 60), "x".repeat(60));
+        let long = "x".repeat(61);
+        assert_eq!(elide(&long, 60).chars().count(), 61); // 60 kept + the ellipsis
+        assert_eq!(elide("ł".repeat(70).as_str(), 60).chars().count(), 61);
+    }
+
+    #[test]
+    fn a_submitted_review_renders_notes_anchors_and_images() {
+        let body = json!({
+            "verdict": "changes",
+            "typed_notes": "CHANGES: the retry budget is wrong",
+            "annotations": [
+                {"anchor": {"type": "proximity", "elements": [{"tag": "P", "text": "the retry loop"}]},
+                 "recognized_text": "WRITE A TLDR"},
+                {"recognized_text": "freehand note"},
+            ],
+            "annotation_images": ["/state/annotations/img_1.png"],
+        });
+        let out = format_result("abc123", &body);
+        assert!(out.starts_with("--- review notes (session abc123) ---"));
+        assert!(out.contains("Verdict: CHANGES"));
+        assert!(out.contains("## Typed Notes"));
+        assert!(out.contains("CHANGES: the retry budget is wrong"));
+        assert!(out.contains("## Annotations"));
+        assert!(out.contains("### On P: the retry loop (proximity)"));
+        assert!(out.contains("> WRITE A TLDR"));
+        assert!(
+            out.contains("### Unanchored"),
+            "an unbound note still shows"
+        );
+        assert!(out.contains("/state/annotations/img_1.png"));
+    }
+
+    #[test]
+    fn an_empty_review_renders_only_its_heading() {
+        // Nothing to report: no verdict, no notes, no ink. It must not print empty
+        // section headings, which read like a review that lost its content.
+        let out = format_result("abc", &json!({}));
+        assert_eq!(out, "--- review notes (session abc) ---\n\n");
+        assert!(!out.contains("## Typed Notes"));
+        assert!(!out.contains("## Annotations"));
+        assert!(!out.contains("## Attached Images"));
+    }
+
+    #[test]
+    fn an_empty_note_is_not_printed_as_a_section() {
+        let body = json!({"typed_notes": "", "annotation_images": [], "annotations": []});
+        let out = format_result("abc", &body);
+        assert!(!out.contains("## Typed Notes"));
+        assert!(!out.contains("## Attached Images"));
+    }
+
+    #[test]
+    fn a_session_row_shows_the_star_the_status_and_where_it_came_from() {
+        let row = format_list_row(&json!({
+            "id": "abc123", "title": "Review the retry loop", "status": "Submitted",
+            "starred": true, "origin": {"cwd": "/home/flakm/programming/x"},
+        }));
+        assert_eq!(
+            row,
+            "* abc123  Submitted     Review the retry loop  [/home/flakm/programming/x]"
+        );
+
+        let unstared = format_list_row(&json!({"id": "abc123", "status": "Active"}));
+        assert!(unstared.starts_with("  abc123  Active"));
+        assert!(
+            unstared.contains("(untitled)"),
+            "a missing title is named as one"
+        );
+        assert!(!unstared.contains('['), "no cwd recorded, no bracket");
+    }
+
+    #[test]
+    fn a_row_survives_a_session_missing_its_optional_fields() {
+        let row = format_list_row(&json!({"id": "abc123"}));
+        assert!(row.contains("abc123"));
+        assert!(row.contains('?'), "an unknown status is visible, not blank");
+    }
+
+    #[test]
+    fn the_observer_url_follows_the_scheme_of_the_server() {
+        assert_eq!(
+            ws_url("http://localhost:3333", "/ws/abc"),
+            "ws://localhost:3333/ws/abc"
+        );
+        assert_eq!(
+            ws_url("https://review.example.com", "/ws/abc"),
+            "wss://review.example.com/ws/abc"
+        );
+        // A trailing slash must not produce a double slash, which some proxies reject.
+        assert_eq!(
+            ws_url("http://localhost:3333/", "/ws/abc"),
+            "ws://localhost:3333/ws/abc"
+        );
+    }
 
     #[test]
     fn finds_h1_on_first_line() {
