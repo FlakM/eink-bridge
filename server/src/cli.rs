@@ -497,8 +497,9 @@ async fn cmd_cancel(client: &Client, server: &str, id: &str) -> anyhow::Result<(
 }
 
 async fn cmd_remove(client: &Client, server: &str, id: &str) -> anyhow::Result<()> {
+    // `?remove=true` forgets the session and deletes its files; a bare DELETE cancels it.
     let resp = client
-        .delete(format!("{server}/api/sessions/{id}"))
+        .delete(format!("{server}/api/sessions/{id}?remove=true"))
         .send()
         .await?;
 

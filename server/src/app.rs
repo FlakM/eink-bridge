@@ -150,6 +150,10 @@ type SubmitPayload = (
 type SubmitError = (StatusCode, String);
 
 pub fn build_app(state: AppState) -> Router {
+    // Export the metrics from the first scrape rather than from the first event: a
+    // labelled series has no children until something sets a label, so a quiet server
+    // would answer /metrics with an empty document.
+    crate::metrics::init();
     let assets_dir = state.assets_dir.clone();
     Router::new()
         .route("/metrics", get(metrics_handler))
@@ -385,14 +389,38 @@ async fn get_session(
     }
 }
 
+#[derive(Deserialize)]
+struct DeleteParams {
+    /// `?remove=true` forgets the session and deletes its files; the default only
+    /// cancels it. `eink-review remove` sends this, and without it the command silently
+    /// cancelled instead, leaving the review and its images on disk for good.
+    #[serde(default)]
+    remove: bool,
+}
+
 async fn delete_session(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> impl IntoResponse {
+    Query(params): Query<DeleteParams>,
+) -> Response {
+    if params.remove {
+        let removed = state.sessions.write().await.delete(&id);
+        if !removed {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        // A tablet or observer still holding the id must stop waiting on it.
+        state.notify_and_cleanup(&id).await;
+        state.ws_cleanup(&id).await;
+        let mgr = state.sessions.read().await;
+        crate::metrics::SESSIONS_STORED.set(mgr.count() as i64);
+        crate::metrics::SESSIONS_STARRED.set(mgr.starred_count() as i64);
+        tracing::info!(id = %id, "session removed");
+        return StatusCode::OK.into_response();
+    }
     let (was_active, webhook) = {
         let mut mgr = state.sessions.write().await;
         if mgr.get(&id).is_none() {
-            return StatusCode::NOT_FOUND;
+            return StatusCode::NOT_FOUND.into_response();
         }
         let was_active = mgr.cancel(&id);
         if was_active {
@@ -420,7 +448,7 @@ async fn delete_session(
         }
     }
     state.ws_cleanup(&id).await;
-    StatusCode::OK
+    StatusCode::OK.into_response()
 }
 
 async fn purge_sessions(State(state): State<AppState>) -> Json<serde_json::Value> {
@@ -914,6 +942,7 @@ async fn parse_multipart_submit(
     let mut images = Vec::new();
     let mut stroke_data: Option<serde_json::Value> = None;
     let mut annotations: Vec<AnnotationGroup> = Vec::new();
+    let mut verdict_text: Option<String> = None;
 
     while let Some(field) = multipart.next_field().await.map_err(|error| {
         (
@@ -967,11 +996,24 @@ async fn parse_multipart_submit(
                     })?;
                 }
             }
+            // The JSON path already accepts an explicit verdict; a multipart post that
+            // carries one must not have it silently dropped, and an unusable tag must be
+            // reported rather than ignored.
+            "verdict" => {
+                let text = field.text().await.map_err(|error| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        format!("failed to read verdict: {error}"),
+                    )
+                })?;
+                verdict_text = Some(text);
+            }
             _ => {}
         }
     }
 
-    Ok((typed_notes, images, None, stroke_data, annotations))
+    let verdict = parse_verdict_override(verdict_text)?;
+    Ok((typed_notes, images, verdict, stroke_data, annotations))
 }
 
 fn parse_verdict_override(verdict: Option<String>) -> Result<Option<Verdict>, SubmitError> {

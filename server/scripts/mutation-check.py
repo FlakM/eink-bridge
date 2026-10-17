@@ -24,6 +24,7 @@ CHUNKS = SERVER / "src/render/chunks.rs"
 REANCHOR = SERVER / "src/reanchor.rs"
 CLII = SERVER / "src/cli.rs"
 APII = SERVER / "src/api.rs"
+APPI = SERVER / "src/app.rs"
 METRICS = SERVER / "src/metrics.rs"
 WSI = SERVER / "src/ws.rs"
 THEME = SERVER / "assets/eink-theme.tmTheme"
@@ -37,6 +38,10 @@ TARGETS = {
     "a_session_row_shows_the_star_the_status_and_where_it_came_from": "--bin eink-review",
     "a_submitted_review_renders_notes_anchors_and_images": "--bin eink-review",
     "the_connection_gauge_counts_up_and_back_down_to_zero": "--test ws_metrics_test",
+    "remove_forgets_the_session_and_deletes_its_files": "--test api_edge_test",
+    "a_submission_with_a_broken_field_is_told_which_field": "--test api_edge_test",
+    "an_acknowledgement_must_name_the_feedback_it_consumes": "--test api_edge_test",
+    "metrics_are_served_in_the_format_prometheus_scrapes": "--test api_edge_test",
     "a_client_that_connects_after_an_update_still_receives_it": "--test ws_test",
     "an_unreadable_message_does_not_break_the_connection": "--test ws_test",
 }
@@ -417,6 +422,51 @@ CASES = [
         consumed_annotations: Vec<i32>,""",
         ),
         "an_empty_acknowledgement_does_not_send_empty_arrays",
+    ),
+    (
+        "the remove request goes back to only cancelling",
+        text_edit(
+            APPI,
+            """    Query(params): Query<DeleteParams>,
+) -> Response {
+    if params.remove {""",
+            """    Query(params): Query<DeleteParams>,
+) -> Response {
+    if false && params.remove {""",
+        ),
+        "remove_forgets_the_session_and_deletes_its_files",
+    ),
+    (
+        "a multipart verdict is dropped again",
+        text_edit(
+            APPI,
+            """            "verdict" => {""",
+            """            "verdict_ignored" => {""",
+        ),
+        "a_submission_with_a_broken_field_is_told_which_field",
+    ),
+    (
+        "the app forgets to register its metrics",
+        text_edit(
+            APPI,
+            """    crate::metrics::init();
+""",
+            "",
+        ),
+        "metrics_are_served_in_the_format_prometheus_scrapes",
+    ),
+    (
+        "an out-of-range annotation index is accepted",
+        text_edit(
+            APPI,
+            """            else {
+                return bad_request("consumed annotation index is out of range".into());
+            };""",
+            """            else {
+                continue;
+            };""",
+        ),
+        "an_acknowledgement_must_name_the_feedback_it_consumes",
     ),
 ]
 
