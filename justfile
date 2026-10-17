@@ -19,6 +19,10 @@ test:
 test-render:
     cd {{server_dir}} && cargo test render::tests
 
+# prove the render invariants bite: reintroduce each known bug, expect a test to fail
+test-mutations:
+    python3 {{server_dir}}/scripts/mutation-check.py
+
 # run a single test by name
 test-one name:
     cd {{server_dir}} && cargo test {{name}}
@@ -105,6 +109,37 @@ deploy: nix-build
     systemctl --user restart eink-serve
     @echo "restarted eink-serve"
     @systemctl --user is-active eink-serve
+    @just verify-deploy
+
+# prove the running server is the build we just made
+#
+# The systemd user unit runs the repository's `result` binary, so a system rebuild
+# (`nixos-rebuild switch`) does NOT deploy a server change. That mismatch is invisible
+# from the tests -- they compile from source and pass -- and it hid the whole
+# presentation layer for a day: the tablet was served by an older renderer.
+verify-deploy:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    built=$(readlink -f {{server_dir}}/../result/bin/eink-serve)
+    running=""
+    for _ in $(seq 1 30); do
+        running=$(curl -fsS --max-time 2 http://127.0.0.1:3333/api/health 2>/dev/null \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["exe"])' 2>/dev/null || true)
+        [[ -n "$running" ]] && break
+        sleep 0.5
+    done
+    if [[ -z "$running" ]]; then
+        echo "the server did not answer /api/health after the restart; check 'just logs'" >&2
+        exit 1
+    fi
+    if [[ "$built" != "$running" ]]; then
+        echo "STALE DEPLOY: the service is serving a different build than 'result'." >&2
+        echo "  built:   $built" >&2
+        echo "  running: $running" >&2
+        echo "run 'just deploy' (or restart eink-serve) before trusting the tablet." >&2
+        exit 1
+    fi
+    echo "running server matches the build: $running"
 
 # build and deploy all components in parallel (server, CLI, APK)
 deploy-all host='localhost:3333':

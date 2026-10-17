@@ -144,7 +144,8 @@ hr { border: none; border-top: 1px solid #333; margin: 24px 0; }
     border: 2px solid #888;
     border-radius: 10px;
     background: #fff;
-    overflow: hidden;
+    /* No overflow:hidden. It clipped the annotation outline of any element inside the
+       block (the notes panel holds a <pre>), and the header rounds its own corners. */
 }
 .diagram-header {
     display: flex;
@@ -154,6 +155,7 @@ hr { border: none; border-top: 1px solid #333; margin: 24px 0; }
     padding: 11px 16px;
     border-bottom: 1px solid #c0c0c0;
     background: #f0f0f0;
+    border-radius: 8px 8px 0 0;
     font-size: 17px;
     font-weight: 700;
     line-height: 1.4;
@@ -269,7 +271,10 @@ hr { border: none; border-top: 1px solid #333; margin: 24px 0; }
     padding: 10px;
     margin: 10px 0;
     border-radius: 4px;
-    overflow-x: auto;
+    /* Wraps instead of scrolling: a pen cannot drag a scrollbar, and overflow-x
+       also clips the annotation outline of this <pre>. */
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
 }
 .diagram-details-notes pre code {
     font-size: 18px;
@@ -524,10 +529,11 @@ hr { border: none; border-top: 1px solid #333; margin: 24px 0; }
   counter-increment: step;
   padding: 8px 0 8px 34px;
   position: relative;
-  opacity: 0.35;
+  opacity: 1;
 }
-/* The current step is the only one at full strength; tapping advances it. */
-.steps-list li[data-state="current"], .steps-list li[data-state="done"] { opacity: 1; }
+/* Only the not-yet-reached steps recede, and only once the page has marked them, so a
+   reader without script sees every step at full strength rather than a faint list. */
+.steps-list li[data-state="todo"] { opacity: 0.35; }
 .steps-list li[data-state="current"]::before { background: #1a1a1a; color: #fff; }
 .steps-list li::before {
   content: counter(step);
@@ -1529,7 +1535,10 @@ const ELEMENT_MAP_JS: &str = r#"
   var _nextId = 0;
   var _popup = null;
 
-  var QUERY = 'h1, h2, h3, p, li, pre, blockquote, td, th, table, ul, ol, .diagram-block, img';
+  // Everything a tap can bind to. A rendered block has to be reachable this way, or a
+  // reader cannot annotate it at all, so every block kind names its wrapper here.
+  // `tests::every_block_kind_can_be_bound_by_a_tap` holds this to account.
+  var QUERY = 'h1, h2, h3, p, li, pre, blockquote, td, th, table, ul, ol, img, .diagram-block, .snippet-block, .steps-block, .diff-block';
 
   function slugify(s) {
     return 's-' + s.trim().toLowerCase().replace(/[^\w\s-]/g, '').replace(/\s+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
@@ -2314,22 +2323,303 @@ mod tests {
         );
     }
 
+    /// Every rule in the stylesheet, as (selector, declarations).
+    ///
+    /// At-rule preludes are dropped and their contents parsed as ordinary rules, so a
+    /// `@media` block cannot hide a rule from the invariants below.
+    fn css_rules() -> Vec<(String, String)> {
+        let mut rules = Vec::new();
+        let cleaned = strip_css_comments(EINK_CSS);
+        let mut rest = cleaned.as_str();
+        while let Some(open) = rest.find('{') {
+            let selector = rest[..open].trim().to_string();
+            let Some(close) = rest[open..].find('}') else {
+                break;
+            };
+            let body = rest[open + 1..open + close].to_string();
+            if selector.starts_with('@') {
+                // Descend into the at-rule and keep parsing its contents.
+                rest = &rest[open + 1..];
+                continue;
+            }
+            rest = &rest[open + close + 1..];
+            if !selector.is_empty() {
+                rules.push((selector, body));
+            }
+        }
+        rules
+    }
+
+    fn strip_css_comments(css: &str) -> String {
+        // Comments can hold braces, which would confuse the rule walk below.
+        let mut out = String::with_capacity(css.len());
+        let mut rest = css;
+        while let Some(start) = rest.find("/*") {
+            out.push_str(&rest[..start]);
+            match rest[start..].find("*/") {
+                Some(end) => rest = &rest[start + end + 2..],
+                None => return out,
+            }
+        }
+        out.push_str(rest);
+        out
+    }
+
+    /// Everything the e-ink page ships. The stylesheet and the page script are separate
+    /// constants, and the invariants below span both.
+    fn page_source() -> String {
+        format!("{EINK_CSS}\n{TOC_JS}\n{BOOTSTRAP_JS}\n{ELEMENT_MAP_JS}")
+    }
+
+    /// The selectors a tap can bind to, read from the page's own element map so this
+    /// stays true when a new block kind is added.
+    fn annotatable_selectors() -> Vec<String> {
+        let page = page_source();
+        let query = page
+            .split("var QUERY = '")
+            .nth(1)
+            .expect("the element map declares a QUERY")
+            .split('\'')
+            .next()
+            .unwrap();
+        query.split(',').map(|s| s.trim().to_string()).collect()
+    }
+
+    /// The subject of a selector: the rightmost compound, whose box an outline wraps.
+    fn subject(selector: &str) -> String {
+        selector
+            .split(',')
+            .last()
+            .unwrap()
+            .split_whitespace()
+            .last()
+            .unwrap_or("")
+            .to_string()
+    }
+
     #[test]
-    fn snippet_wrapper_does_not_clip_the_annotation_highlight() {
-        // The bind/flash highlight is an outline with outline-offset, drawn outside the
-        // element box; a clipping ancestor hides it and annotating code looks broken.
-        for selector in ["pre {", ".snippet-block {", ".diff-block {"] {
-            let css = css_rule(selector);
-            assert!(!css.contains("overflow: hidden"), "{selector} must not clip: {css}");
+    fn the_highlight_is_an_outline_that_a_clipping_ancestor_would_hide() {
+        // This is the premise of the two tests below. If the highlight ever becomes an
+        // inset shadow or an overlay, revisit them: their reasoning changes with it.
+        let page = page_source();
+        assert!(
+            page.contains("outline = '4px solid '"),
+            "the bind/flash highlight is expected to be an outline"
+        );
+        assert!(
+            page.contains("outlineOffset = '3px'"),
+            "the outline sits outside the element box, so ancestors can clip it"
+        );
+    }
+
+    #[test]
+    fn only_viewports_clip_their_contents() {
+        // Clipping hides annotation outlines drawn outside an element, so every clipping
+        // rule is a deliberate exception and has to be named here. Adding
+        // `overflow: hidden` to a content wrapper is what broke annotating code twice.
+        const ALLOWED: &[&str] = &[
+            // Pan/zoom canvases hold a single SVG and no annotatable content; they must
+            // scroll or the diagram is unreachable on a small screen.
+            ".mindmap-viewport",
+            ".graph-viewport",
+        ];
+        for (selector, body) in css_rules() {
+            let clips =
+                body.split(';')
+                    .filter_map(|decl| decl.split_once(':'))
+                    .any(|(prop, value)| {
+                        prop.trim().starts_with("overflow")
+                            && matches!(value.trim(), "hidden" | "auto" | "scroll")
+                    });
+            if clips {
+                assert!(
+                    ALLOWED.contains(&subject(&selector).as_str()),
+                    "'{selector}' clips its contents, which hides an annotation outline \
+                     inside it. If that is intended, add it to ALLOWED with a reason."
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn content_that_can_be_annotated_is_never_clipped() {
+        // The same rule stated from the reader's side: for every element a tap can bind
+        // to, and every wrapper we render around one, the box must be free to draw.
+        let mut checked = annotatable_selectors();
+        checked.push(".snippet-block".into());
+        checked.push(".diff-block".into());
+        checked.push(".steps-block".into());
+        for selector in checked {
+            let tag = selector.trim_start_matches('.');
+            for (rule_selector, body) in css_rules() {
+                if subject(&rule_selector) != selector && subject(&rule_selector) != tag {
+                    continue;
+                }
+                assert!(
+                    !body.contains("overflow: hidden"),
+                    "'{rule_selector}' wraps annotatable {selector} and clips its outline"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_syntax_colour_is_readable_on_paper() {
+        // "The colours are not visible" was a canvas that had gone dark, not a missing
+        // palette. Measure the theme the renderer actually loads: the sheet must stay
+        // light, and every ink must clear WCAG AA against it.
+        let theme = syntect::highlighting::ThemeSet::load_from_reader(&mut std::io::Cursor::new(
+            include_bytes!("../assets/eink-theme.tmTheme").to_vec(),
+        ))
+        .expect("the shipped theme parses");
+        let bg = theme.settings.background.expect("the theme sets a canvas");
+        assert!(
+            luminance(bg) > 0.75,
+            "the code canvas must stay paper light, not {:?}",
+            (bg.r, bg.g, bg.b)
+        );
+        let mut inks: Vec<(f64, String)> = Vec::new();
+        let mut collect = |name: &str, c: syntect::highlighting::Color| {
+            inks.push((contrast(c, bg), name.to_string()))
+        };
+        if let Some(fg) = theme.settings.foreground {
+            collect("default ink", fg);
+        }
+        for scope in &theme.scopes {
+            if let Some(c) = scope.style.foreground {
+                let name = scope
+                    .scope
+                    .selectors
+                    .iter()
+                    .map(|s| s.path.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                collect(&name, c);
+            }
+        }
+        assert!(inks.len() > 20, "the theme should carry a real palette");
+        for (ratio, name) in inks {
+            assert!(
+                ratio >= 4.5,
+                "'{name}' is too faint on the canvas (contrast {ratio:.2})"
+            );
+        }
+    }
+
+    fn luminance(c: syntect::highlighting::Color) -> f64 {
+        fn channel(value: u8) -> f64 {
+            let v = value as f64 / 255.0;
+            if v <= 0.03928 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        }
+        0.2126 * channel(c.r) + 0.7152 * channel(c.g) + 0.0722 * channel(c.b)
+    }
+
+    fn contrast(a: syntect::highlighting::Color, b: syntect::highlighting::Color) -> f64 {
+        let (hi, lo) = {
+            let (la, lb) = (luminance(a), luminance(b));
+            if la > lb { (la, lb) } else { (lb, la) }
+        };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    #[test]
+    fn every_block_kind_can_be_bound_by_a_tap() {
+        // A block the element map cannot see is a block nobody can annotate. New kinds
+        // are the likely way this breaks, so each one is rendered and checked here.
+        let samples: &[(&str, &str)] = &[
+            ("paragraph", "A paragraph.\n"),
+            ("heading", "## Heading\n"),
+            ("quote", "> quoted\n"),
+            ("list", "- one\n- two\n"),
+            ("table", "| a | b |\n|---|---|\n| 1 | 2 |\n"),
+            ("image", "![alt](diagram.png)\n"),
+            ("code", "```rust\nfn main() {}\n```\n"),
+            (
+                "snippet",
+                "```snippet\nrust a.rs:1 | note\nlet x = 1;\n```\n",
+            ),
+            ("steps", "```steps\nFirst | one\n```\n"),
+            ("diff", "```diff\n+let x = 1;\n```\n"),
+            ("mermaid", "```mermaid\nflowchart LR\n  A --> B\n```\n"),
+            (
+                "mindmap",
+                "```mindmap\nroot: Plan\nnodes:\n  - label: Step\n```\n",
+            ),
+            (
+                "graph",
+                "```graph\nnodes:\n  - id: a\n    label: A\nedges: []\n```\n",
+            ),
+        ];
+        let selectors = annotatable_selectors();
+        for (kind, markdown) in samples {
+            let html = render(markdown);
+            let mut body = html.split("</style>").nth(1).unwrap_or("").to_string();
+            while let (Some(open), Some(close)) = (body.find("<script"), body.find("</script>")) {
+                body.replace_range(open..close + "</script>".len(), "");
+            }
+            let bound = selectors
+                .iter()
+                .any(|selector| match selector.strip_prefix('.') {
+                    Some(class) => body.contains(&format!("class=\"{class}\"")),
+                    None => body.contains(&format!("<{selector}")),
+                });
+            assert!(
+                bound,
+                "a {kind} block renders with nothing a tap can bind to; add its wrapper \
+                 to QUERY in ELEMENT_MAP_JS"
+            );
         }
     }
 
     #[test]
     fn the_pen_owns_taps_so_a_steps_block_does_not_steal_them() {
-        assert!(css_rule(".steps-list {").contains("pointer-events: none"),
-                "the list must not swallow the taps used to annotate");
-        assert!(css_rule(".steps-controls button {").contains("pointer-events: auto"),
-                "the sequence still needs its own controls");
+        assert!(
+            css_rule(".steps-list {").contains("pointer-events: none"),
+            "the list must not swallow the taps used to annotate"
+        );
+        assert!(
+            css_rule(".steps-controls button {").contains("pointer-events: auto"),
+            "the sequence still needs its own controls"
+        );
+        let page = page_source();
+        assert!(
+            !page.contains("block.addEventListener('click'"),
+            "a click handler on the whole block swallows the taps used to select elements"
+        );
+        assert!(
+            page.contains("next.addEventListener('click'"),
+            "advancing belongs to the controls and nowhere else"
+        );
+    }
+
+    #[test]
+    fn a_steps_block_still_reads_without_script() {
+        // The sequence is progressive enhancement: every step must be legible before the
+        // page marks one current, otherwise a reader without script gets a faint list.
+        let html = render("```steps\nFirst | one\nSecond | two\n```");
+        let list = html
+            .split("<ol class=\"steps-list\">")
+            .nth(1)
+            .expect("a steps list renders")
+            .split("</ol>")
+            .next()
+            .unwrap();
+        assert!(
+            !list.contains("data-state"),
+            "the markup must not pre-dim any step; the script adds the state"
+        );
+        assert!(
+            css_rule(".steps-list li {").contains("opacity: 1"),
+            "steps read at full strength by default"
+        );
+        assert!(
+            css_rule(".steps-list li[data-state=\"todo\"] {").contains("opacity: 0.35"),
+            "only unreached steps recede"
+        );
     }
 
     #[test]

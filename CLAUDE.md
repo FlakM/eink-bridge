@@ -106,8 +106,10 @@ Use `just` for all common operations. Run `just` to see all recipes.
 just test          # all server tests
 just test-render   # render unit tests only (~0.02s)
 just test-one NAME # single test by name
+just test-mutations # reintroduce each known render bug, expect a test to fail
 just lint          # fmt + clippy
-just deploy        # nix build + restart service
+just deploy        # nix build + restart service + verify the restart took
+just verify-deploy # prove the running server is the build in ./result
 just ci            # full CI check
 ```
 
@@ -191,6 +193,7 @@ Use `/coverage` skill for automated analysis of gaps.
 | Change area | Run |
 |---|---|
 | `render.rs` CSS or HTML output | `just test-render` then `just eval` |
+| Annotation / highlighting / tap behaviour | `just test-render` then `just test-mutations` |
 | `render.rs` diagram parsing | `cargo test render::tests::graph` / `mindmap` / `mermaid` |
 | `app.rs` handlers | `cargo test --test health_test` |
 | `session.rs` lifecycle | `cargo test --test session_lifecycle_test` |
@@ -198,6 +201,39 @@ Use `/coverage` skill for automated analysis of gaps.
 | CLI `push`/`result`/`cancel` | `cargo test --test cli_integration_test` |
 | API response shapes | `just eval` |
 | Full round-trip | `cargo test --test e2e_test` |
+| After any `just deploy` | `just verify-deploy` (automatic at the end of `just deploy`) |
+
+### Presentation invariants
+
+Three classes of bug have bitten the e-ink view, and each now has a test aimed at the
+class rather than the instance:
+
+- **A clipping ancestor hides the annotation highlight.** The bind/flash highlight is an
+  `outline` with `outline-offset`, drawn outside the element's box, so any ancestor with
+  `overflow: hidden|auto|scroll` clips it and annotating that element looks broken. Only
+  the pan/zoom viewports may clip; `tests::only_viewports_clip_their_contents` fails on
+  any new clipping rule, and `tests::content_that_can_be_annotated_is_never_clipped`
+  checks it from the reader's side.
+- **The syntax palette goes unreadable.** `tests::every_syntax_colour_is_readable_on_paper`
+  loads the shipped `tmTheme` the way the renderer does and requires a paper-light canvas
+  and WCAG AA contrast for every ink. Edit the theme with `plistlib`, never by text
+  substitution — a blanket `#ffffff` replacement once took the canvas with it.
+- **A block cannot be annotated at all.** Every block kind must contain something the
+  element map sees; `tests::every_block_kind_can_be_bound_by_a_tap` renders one of each.
+
+Because a green test only shows the tests pass, `just test-mutations` reintroduces each
+defect and asserts the named test goes red. Add a case there whenever you add an
+invariant.
+
+### Deployment gap
+
+The `eink-serve` systemd **user override runs the repository's `result` binary**, so
+`sudo nixos-rebuild switch` does **not** deploy server changes — the tests compile from
+source and pass while the tablet is served by an older renderer. Server changes need
+`just deploy`; server and harness changes need both. `just verify-deploy` (run
+automatically by `just deploy`) compares `./result/bin/eink-serve` with the `exe` the
+running server reports on `/api/health` and fails loudly on a mismatch.
+
 
 ## Build
 
