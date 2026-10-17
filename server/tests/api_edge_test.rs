@@ -13,6 +13,7 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 use common::test_app;
+use eink_bridge::app::{AppState, build_app};
 
 async fn create(app: &axum::Router, body: &str) -> String {
     let resp = app
@@ -619,4 +620,48 @@ async fn an_uploaded_annotation_is_stored_and_served_back_byte_for_byte() {
     // nothing serves it over HTTP.
     let stored = std::fs::read(path).expect("the image was written");
     assert_eq!(stored.as_slice(), png, "the bytes landed changed");
+}
+
+#[tokio::test]
+async fn server_side_ocr_is_optional_and_says_so() {
+    // The tablet can ask the server to read its handwriting. Where no engine is
+    // configured the answer must be a clear "not available" rather than an empty
+    // transcription, which would look like the reader wrote nothing.
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = AppState::with_config(dir.path().to_path_buf(), 5);
+    state.ocr_engine = None;
+    let app = build_app(state);
+
+    let (status, body) = send(
+        &app,
+        Request::post("/api/ocr")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"strokes": [[[1.0, 2.0], [3.0, 4.0]]]}"#))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(String::from_utf8_lossy(&body).contains("not available"));
+}
+
+#[tokio::test]
+async fn server_side_ocr_of_an_empty_canvas_is_an_empty_answer() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = AppState::with_config(dir.path().to_path_buf(), 5);
+    state.ocr_engine = Some(std::sync::Arc::new(
+        eink_bridge::ocr::OcrEngine::new().expect("an HTTP client can be built"),
+    ));
+    let app = build_app(state);
+
+    let (status, body) = send(
+        &app,
+        Request::post("/api/ocr")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"strokes": [], "pressures": []}"#))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let reply: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(reply["text"], "");
 }

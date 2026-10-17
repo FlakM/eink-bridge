@@ -1090,3 +1090,153 @@ async fn cli_update_http_put_increments_version() {
         "expected updated content in HTML, got: {html}"
     );
 }
+
+/// Run the CLI against the test server and return its output.
+async fn run_cli(server_url: &str, args: &[&str]) -> std::process::Output {
+    tokio::process::Command::new(env!("CARGO_BIN_EXE_eink-review"))
+        .args(["--server", server_url])
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap()
+        .wait_with_output()
+        .await
+        .unwrap()
+}
+
+/// Push a document and return the session id the CLI printed.
+async fn push_document(server_url: &str, content: &str) -> String {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(tmp.path(), content).unwrap();
+    let output = run_cli(
+        server_url,
+        &["push", "--async", tmp.path().to_str().unwrap()],
+    )
+    .await;
+    assert!(output.status.success());
+    // `push --async` prints the session id on its own line.
+    String::from_utf8(output.stdout).unwrap().trim().to_string()
+}
+
+#[tokio::test]
+async fn cli_star_and_unstar_pin_a_review() {
+    // Pinning is what keeps a finished review through purge, expiry and restart, so the
+    // command has to reach the server.
+    let (server_url, _handle) = start_server().await;
+    let id = push_document(&server_url, "# Pinned review").await;
+
+    let starred = run_cli(&server_url, &["star", &id]).await;
+    assert!(starred.status.success());
+    assert!(String::from_utf8_lossy(&starred.stderr).contains("starred"));
+
+    let listed = run_cli(&server_url, &["list"]).await;
+    let stdout = String::from_utf8_lossy(&listed.stdout).to_string();
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line.starts_with('*') && line.contains(&id)),
+        "the pinned review should be marked: {stdout}"
+    );
+
+    let unstarred = run_cli(&server_url, &["unstar", &id]).await;
+    assert!(unstarred.status.success());
+    assert!(String::from_utf8_lossy(&unstarred.stderr).contains("unstarred"));
+    let listed = run_cli(&server_url, &["list"]).await;
+    let stdout = String::from_utf8_lossy(&listed.stdout).to_string();
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line.starts_with(' ') && line.contains(&id)),
+        "the star should be gone: {stdout}"
+    );
+}
+
+#[tokio::test]
+async fn cli_remove_takes_the_review_away_and_cancel_keeps_it() {
+    // These two commands used to do the same thing, so a "removed" review kept its files
+    // for good. The difference is the point of the command.
+    let (server_url, _handle) = start_server().await;
+    let client = reqwest::Client::new();
+
+    let cancelled = push_document(&server_url, "# Cancelled review").await;
+    let removed = push_document(&server_url, "# Removed review").await;
+
+    assert!(
+        run_cli(&server_url, &["cancel", &cancelled])
+            .await
+            .status
+            .success()
+    );
+    assert!(
+        run_cli(&server_url, &["remove", &removed])
+            .await
+            .status
+            .success()
+    );
+
+    let listed = run_cli(&server_url, &["list"]).await;
+    let stdout = String::from_utf8_lossy(&listed.stdout).to_string();
+    assert!(
+        stdout.contains(&cancelled),
+        "a cancelled review stays: {stdout}"
+    );
+    assert!(stdout.contains("Cancelled"));
+    assert!(
+        !stdout.contains(&removed),
+        "a removed review is gone: {stdout}"
+    );
+
+    // The cancelled one can still be read back; the removed one cannot.
+    let cancelled_result = client
+        .get(format!("{server_url}/api/sessions/{cancelled}/result"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cancelled_result.status(), 410);
+    let removed_result = client
+        .get(format!("{server_url}/api/sessions/{removed}/result"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(removed_result.status(), 404);
+
+    // And removing something that is not there is reported as such.
+    let again = run_cli(&server_url, &["remove", &removed]).await;
+    assert!(!again.status.success());
+    assert!(String::from_utf8_lossy(&again.stderr).contains("not found"));
+}
+
+#[tokio::test]
+async fn cli_update_replaces_the_document_and_bumps_the_version() {
+    let (server_url, _handle) = start_server().await;
+    let client = reqwest::Client::new();
+    let id = push_document(&server_url, "# Original").await;
+
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(tmp.path(), "# Rewritten\n\nThe second draft").unwrap();
+    let output = run_cli(&server_url, &["update", &id, tmp.path().to_str().unwrap()]).await;
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("version updated to 2"));
+
+    let body: serde_json::Value = client
+        .get(format!("{server_url}/api/sessions/{id}/content"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(body["version"], 2);
+    assert!(body["content"].as_str().unwrap().contains("second draft"));
+
+    // Updating something that does not exist is an error the operator can act on.
+    let missing = run_cli(
+        &server_url,
+        &["update", "does-not-exist", tmp.path().to_str().unwrap()],
+    )
+    .await;
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("not found"));
+}

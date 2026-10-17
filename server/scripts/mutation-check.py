@@ -27,6 +27,8 @@ APII = SERVER / "src/api.rs"
 APPI = SERVER / "src/app.rs"
 METRICS = SERVER / "src/metrics.rs"
 WSI = SERVER / "src/ws.rs"
+OCRI = SERVER / "src/ocr.rs"
+PROVIDERSI = SERVER / "src/ocr/providers.rs"
 THEME = SERVER / "assets/eink-theme.tmTheme"
 
 
@@ -42,6 +44,12 @@ TARGETS = {
     "a_submission_with_a_broken_field_is_told_which_field": "--test api_edge_test",
     "an_acknowledgement_must_name_the_feedback_it_consumes": "--test api_edge_test",
     "metrics_are_served_in_the_format_prometheus_scrapes": "--test api_edge_test",
+    "server_side_ocr_is_optional_and_says_so": "--test api_edge_test",
+    "cli_remove_takes_the_review_away_and_cancel_keeps_it": "--test cli_integration_test",
+    "a_label_value_cannot_break_the_pushed_body": "--bin eink-review",
+    "the_cloud_timeout_stays_inside_a_usable_range": "--lib",
+    "a_local_runtime_http_error_is_reported_with_its_status": "--lib",
+    "handwriting_with_nothing_drawn_makes_no_request": "--lib",
     "a_client_that_connects_after_an_update_still_receives_it": "--test ws_test",
     "an_unreadable_message_does_not_break_the_connection": "--test ws_test",
 }
@@ -51,6 +59,10 @@ def target_for(test: str) -> str:
     return TARGETS.get(test, "--lib")
 
 
+class NoTestsRan(RuntimeError):
+    """A test name that matches nothing proves nothing: it must not read as a pass."""
+
+
 def suite_is_green(test: str = "", target: str = "--lib") -> bool:
     proc = subprocess.run(
         ["cargo", "test", *target.split(), "--quiet", test],
@@ -58,6 +70,16 @@ def suite_is_green(test: str = "", target: str = "--lib") -> bool:
         capture_output=True,
         text=True,
     )
+    if test:
+        ran = sum(
+            int(match.group(1))
+            for match in re.finditer(r"test result: \w+\. (\d+) passed", proc.stdout)
+        )
+        if ran == 0 and proc.returncode == 0:
+            raise NoTestsRan(
+                f"'{test}' ran no tests in {target}: it lives in another target, so this "
+                f"mutation would have looked caught without being run"
+            )
     return proc.returncode == 0
 
 
@@ -467,6 +489,69 @@ CASES = [
             };""",
         ),
         "an_acknowledgement_must_name_the_feedback_it_consumes",
+    ),
+    (
+        "an empty canvas is still sent to be read",
+        text_edit(
+            OCRI,
+            """        if strokes.is_empty() {
+            return Ok(String::new());
+        }""",
+            """        if strokes.is_empty() {
+            return self.recognize_image(&[]).await;
+        }""",
+        ),
+        "handwriting_with_nothing_drawn_makes_no_request",
+    ),
+    (
+        "a zero cloud timeout is accepted",
+        text_edit(
+            PROVIDERSI,
+            "        .filter(|v| (1..=120).contains(v))",
+            "        .filter(|v| (0..=120).contains(v))",
+        ),
+        "the_cloud_timeout_stays_inside_a_usable_range",
+    ),
+    (
+        "the local runtime error loses its status",
+        text_edit(
+            PROVIDERSI,
+            """            "local llama OCR returned HTTP {}",
+            response.status().as_u16()""",
+            """            "local llama OCR returned HTTP {}",
+            response.status().is_success()""",
+        ),
+        "a_local_runtime_http_error_is_reported_with_its_status",
+    ),
+    (
+                "pushed metric labels are not escaped",
+        text_edit(
+            CLII,
+            r"""            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            other => out.push(other),""",
+            """            other => out.push(other),""",
+        ),
+        "a_label_value_cannot_break_the_pushed_body",
+    ),
+    (
+        "the ocr endpoint answers an empty transcription without an engine",
+        text_edit(
+            APPI,
+            """            return (StatusCode::SERVICE_UNAVAILABLE, "OCR engine not available").into_response();""",
+            """            return Json(serde_json::json!({ "text": "" })).into_response();""",
+        ),
+        "server_side_ocr_is_optional_and_says_so",
+    ),
+    (
+        "the remove command forgets to ask for removal",
+        text_edit(
+            CLII,
+            'format!("{server}/api/sessions/{id}?remove=true")',
+            'format!("{server}/api/sessions/{id}")',
+        ),
+        "cli_remove_takes_the_review_away_and_cancel_keeps_it",
     ),
 ]
 

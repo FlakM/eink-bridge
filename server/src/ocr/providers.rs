@@ -129,11 +129,7 @@ impl OpenAi {
             return None;
         };
         let model = std::env::var("EINK_OPENAI_MODEL").unwrap_or_else(|_| "gpt-4.1-mini".into());
-        let seconds = std::env::var("EINK_OPENAI_TIMEOUT_SECONDS")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .filter(|v| (1..=120).contains(v))
-            .unwrap_or(15);
+        let seconds = timeout_seconds(std::env::var("EINK_OPENAI_TIMEOUT_SECONDS").ok().as_deref());
         match Self::new(
             key.trim(),
             model,
@@ -210,6 +206,15 @@ fn enabled(value: Option<&str>) -> bool {
     matches!(value, Some("1" | "true"))
 }
 
+/// The cloud timeout, bounded to something usable. A zero would time out every request
+/// before it was sent, which reads as "the cloud provider never answers".
+fn timeout_seconds(value: Option<&str>) -> u64 {
+    value
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|v| (1..=120).contains(v))
+        .unwrap_or(15)
+}
+
 fn parse_openai(body: &Value) -> Result<String, String> {
     if body["status"] != "completed" || body.get("error").is_some_and(|v| !v.is_null()) {
         return Err("openai OCR response was not completed".into());
@@ -280,6 +285,47 @@ mod tests {
         }
         assert!(enabled(Some("true")));
         assert!(enabled(Some("1")));
+    }
+
+    #[test]
+    fn the_cloud_timeout_stays_inside_a_usable_range() {
+        assert_eq!(timeout_seconds(None), 15, "the default");
+        assert_eq!(timeout_seconds(Some("5")), 5);
+        assert_eq!(
+            timeout_seconds(Some(" 7 ")),
+            7,
+            "surrounding space is not a value"
+        );
+        assert_eq!(timeout_seconds(Some("1")), 1);
+        assert_eq!(timeout_seconds(Some("120")), 120);
+        for unusable in ["0", "121", "99999", "abc", "", "-5", "5.5"] {
+            assert_eq!(
+                timeout_seconds(Some(unusable)),
+                15,
+                "{unusable:?} would break every request rather than fall back"
+            );
+        }
+    }
+
+    #[test]
+    fn a_key_that_cannot_be_a_header_is_refused_rather_than_sent() {
+        // A key pasted with a newline or a stray character must disable the provider
+        // instead of producing a malformed Authorization header.
+        assert!(
+            OpenAi::new(
+                "sk-ok",
+                "m".into(),
+                Duration::from_secs(1),
+                "http://x".into()
+            )
+            .is_ok()
+        );
+        for bad in ["bad\nkey", "bad\r\nkey", "bad\u{7}key"] {
+            assert!(
+                OpenAi::new(bad, "m".into(), Duration::from_secs(1), "http://x".into()).is_err(),
+                "{bad:?} should not become a header"
+            );
+        }
     }
 
     #[test]

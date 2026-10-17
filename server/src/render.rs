@@ -2230,6 +2230,12 @@ mod tests {
 
     // --- Syntax highlighting ---
 
+    /// The rendered page without its stylesheet, so an assertion is about markup rather
+    /// than about a selector that happens to share a name with it.
+    fn body_of(html: &str) -> &str {
+        html.split("</style>").nth(1).unwrap_or("")
+    }
+
     /// Strip tags so an assertion compares what the reader sees: syntax highlighting
     /// splits a line like `let y = 2;` across several spans.
     fn visible_text(html: &str) -> String {
@@ -2439,6 +2445,59 @@ mod tests {
         assert!(!html.contains("<script>alert(1)</script>"));
         assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
         assert!(html.contains("the &quot;detail&quot;"));
+    }
+
+    #[test]
+    fn a_snippet_header_may_name_just_the_file_or_just_the_point() {
+        // Both are legitimate briefs: a file reference with no comment, or a caption
+        // standing on its own when the file is obvious from the section.
+        let reference_only = render("```snippet\nrust server/src/app.rs:170\nlet x = 1;\n```\n");
+        assert!(
+            reference_only.contains("<figcaption>server/src/app.rs:170</figcaption>"),
+            "a bare reference is the caption: {reference_only}"
+        );
+        assert!(reference_only.contains("data-lang=\"rust\""));
+
+        let caption_only = render("```snippet\n| the expiry loop\nlet x = 1;\n```\n");
+        assert!(
+            caption_only.contains("<figcaption>the expiry loop</figcaption>"),
+            "a caption with no reference: {caption_only}"
+        );
+        assert!(!caption_only.contains("data-lang"), "no language was given");
+    }
+
+    #[test]
+    fn a_step_may_be_a_title_with_no_detail() {
+        // Not every step needs a supporting clause, and a missing one must not leave an
+        // empty span behind.
+        let html = render("```steps\nAsk for the diff\nRead it\n```\n");
+        let body = body_of(&html);
+        assert!(body.contains("class=\"steps-block\""));
+        assert!(body.contains("<span class=\"step-title\">Ask for the diff</span>"));
+        assert!(!body.contains("step-detail"), "no empty details: {body}");
+        assert!(body.contains("2 steps"));
+    }
+
+    #[test]
+    fn code_in_a_language_the_highlighter_does_not_know_still_renders() {
+        // A brief may quote any language; an unknown one must fall back to plain text
+        // rather than dropping the code or panicking.
+        let html = render("```brainfuck\n+++[->+++<]\n```\n");
+        let body = body_of(&html);
+        assert!(body.contains("<pre"), "the code block renders: {body}");
+        assert!(
+            body.contains("+++[-&gt;+++&lt;]"),
+            "escaped, not dropped: {body}"
+        );
+        // The text renders in the default ink, and no palette colour is invented for a
+        // language the highlighter has never seen.
+        assert!(body.contains("color:#1a1a1a"), "default ink: {body}");
+        for palette_colour in ["#0f3d8a", "#0a6b38", "#8a4b00", "#4b2a8f", "#0b5c70"] {
+            assert!(
+                !body.contains(palette_colour),
+                "{palette_colour} is syntax highlighting the highlighter did not recognise: {body}"
+            );
+        }
     }
 
     #[test]

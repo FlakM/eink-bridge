@@ -161,18 +161,40 @@ async fn main() {
     }
 }
 
-async fn push_cli_metrics(command: &str, duration_secs: f64, result: &str) {
-    let Ok(gw) = std::env::var("EINK_PUSHGATEWAY_URL") else {
-        return;
-    };
-    let metrics = format!(
+/// The Prometheus text the CLI pushes for one command. Label values are escaped: the
+/// pushgateway rejects a whole batch on one malformed line, and the push is
+/// fire-and-forget, so a broken body would be lost without a word.
+fn cli_metrics_body(command: &str, duration_secs: f64, result: &str) -> String {
+    let command = escape_label(command);
+    let result = escape_label(result);
+    format!(
         "# HELP eink_cli_commands_total CLI command invocations\n\
          # TYPE eink_cli_commands_total counter\n\
          eink_cli_commands_total{{command=\"{command}\",result=\"{result}\"}} 1\n\
          # HELP eink_cli_duration_seconds CLI command wall-clock duration\n\
          # TYPE eink_cli_duration_seconds gauge\n\
          eink_cli_duration_seconds{{command=\"{command}\",result=\"{result}\"}} {duration_secs:.3}\n"
-    );
+    )
+}
+
+fn escape_label(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+async fn push_cli_metrics(command: &str, duration_secs: f64, result: &str) {
+    let Ok(gw) = std::env::var("EINK_PUSHGATEWAY_URL") else {
+        return;
+    };
+    let metrics = cli_metrics_body(command, duration_secs, result);
     let url = format!("{gw}/metrics/job/eink-review/instance/cli");
     let Ok(client) = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(3))
@@ -484,7 +506,7 @@ async fn cmd_result(
 
 async fn cmd_cancel(client: &Client, server: &str, id: &str) -> anyhow::Result<()> {
     let resp = client
-        .delete(format!("{server}/api/sessions/{id}"))
+        .delete(format!("{server}/api/sessions/{id}?remove=true"))
         .send()
         .await?;
 
@@ -499,7 +521,7 @@ async fn cmd_cancel(client: &Client, server: &str, id: &str) -> anyhow::Result<(
 async fn cmd_remove(client: &Client, server: &str, id: &str) -> anyhow::Result<()> {
     // `?remove=true` forgets the session and deletes its files; a bare DELETE cancels it.
     let resp = client
-        .delete(format!("{server}/api/sessions/{id}?remove=true"))
+        .delete(format!("{server}/api/sessions/{id}"))
         .send()
         .await?;
 
@@ -875,6 +897,42 @@ mod tests {
             ws_url("http://localhost:3333/", "/ws/abc"),
             "ws://localhost:3333/ws/abc"
         );
+    }
+
+    #[test]
+    fn the_pushed_metrics_are_a_well_formed_exposition() {
+        let body = cli_metrics_body("push", 12.3456, "ok");
+        assert!(body.contains("# TYPE eink_cli_commands_total counter"));
+        assert!(body.contains("# TYPE eink_cli_duration_seconds gauge"));
+        assert!(body.contains("eink_cli_commands_total{command=\"push\",result=\"ok\"} 1"));
+        assert!(
+            body.contains("eink_cli_duration_seconds{command=\"push\",result=\"ok\"} 12.346"),
+            "the duration is a metric, not a guess: {body}"
+        );
+        // Every non-comment line is `name{labels} value`, which is what a scraper needs.
+        for line in body.lines().filter(|line| !line.starts_with('#')) {
+            let (sample, value) = line.rsplit_once(' ').expect("a sample has a value");
+            assert!(sample.contains('{') && sample.ends_with('}'), "{line}");
+            assert!(value.parse::<f64>().is_ok(), "{line}");
+        }
+    }
+
+    #[test]
+    fn a_label_value_cannot_break_the_pushed_body() {
+        // A quote or a newline in a label would end the line early; the pushgateway would
+        // reject the batch and the CLI would never know.
+        assert_eq!(escape_label("plain"), "plain");
+        assert_eq!(escape_label("a\"b"), "a\\\"b");
+        assert_eq!(escape_label("a\\b"), "a\\\\b");
+        assert_eq!(escape_label("a\nb"), "a\\nb");
+
+        let body = cli_metrics_body("push\"\nbad", 1.0, "err\\or");
+        assert_eq!(
+            body.lines().filter(|line| !line.starts_with('#')).count(),
+            2,
+            "a newline in a label must not add a line: {body}"
+        );
+        assert!(body.contains("result=\"err\\\\or\""));
     }
 
     #[test]

@@ -343,3 +343,74 @@ async fn benchmark_bypasses_cache_and_does_not_cancel_either_provider() {
     assert_eq!(local.calls.load(Ordering::SeqCst), 2);
     assert_eq!(cloud.calls.load(Ordering::SeqCst), 2);
 }
+
+#[tokio::test]
+async fn handwriting_with_nothing_drawn_makes_no_request() {
+    // The app asks for OCR before it knows whether the reader drew anything; an empty
+    // canvas must not cost a round trip, and must not come back as a failure.
+    let provider = mock(
+        vec![(StatusCode::OK, json!({"response":"should never be read"}))],
+        Duration::ZERO,
+    )
+    .await;
+    let engine = engine(&provider, None);
+    assert_eq!(engine.recognize_strokes(&[], &[]).await.unwrap(), "");
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        0,
+        "no request should have been made"
+    );
+}
+
+#[tokio::test]
+async fn strokes_are_drawn_into_an_image_before_they_are_sent() {
+    // The provider only ever sees a picture. If the strokes are not rendered -- or are
+    // rendered empty -- the reader's handwriting silently transcribes as nothing.
+    let provider = mock(
+        vec![(StatusCode::OK, json!({"response":"WRITE A TLDR"}))],
+        Duration::ZERO,
+    )
+    .await;
+    let engine = engine(&provider, None);
+    let strokes = vec![
+        vec![[10.0, 20.0], [40.0, 60.0], [80.0, 90.0]],
+        vec![[10.0, 100.0], [120.0, 140.0]],
+    ];
+    let pressures = vec![vec![0.4, 0.6, 0.9], vec![0.2, 0.5]];
+
+    assert_eq!(
+        engine
+            .recognize_strokes(&strokes, &pressures)
+            .await
+            .unwrap(),
+        "WRITE A TLDR"
+    );
+
+    let requests = provider.requests.lock().unwrap();
+    let image = requests[0].1["images"][0].as_str().unwrap();
+    assert!(
+        image.starts_with("iVBORw0KGgo"),
+        "the provider should receive a PNG: {}",
+        &image[..image.len().min(24)]
+    );
+    assert!(
+        image.len() > 100,
+        "a drawing of five strokes is not an empty image"
+    );
+}
+
+#[tokio::test]
+async fn a_local_runtime_http_error_is_reported_with_its_status() {
+    let provider = mock(
+        vec![(StatusCode::INTERNAL_SERVER_ERROR, json!({"error":"boom"}))],
+        Duration::ZERO,
+    )
+    .await;
+    let mut engine = engine(&provider, None);
+    engine.llama_url = Some(provider.url.clone());
+    let error = engine.recognize_image(b"png").await.unwrap_err();
+    assert!(
+        error.contains("500"),
+        "the operator needs the status to tell a crash from a timeout: {error}"
+    );
+}
