@@ -47,6 +47,8 @@ TARGETS = {
     "server_side_ocr_is_optional_and_says_so": "--test api_edge_test",
     "cli_remove_takes_the_review_away_and_cancel_keeps_it": "--test cli_integration_test",
     "a_label_value_cannot_break_the_pushed_body": "--bin eink-review",
+    "the_webhook_metric_counts_what_actually_happened": "--test api_edge_test",
+    "the_cli_pushes_its_own_command_metrics": "--test cli_integration_test",
     "the_cloud_timeout_stays_inside_a_usable_range": "--lib",
     "a_local_runtime_http_error_is_reported_with_its_status": "--lib",
     "handwriting_with_nothing_drawn_makes_no_request": "--lib",
@@ -564,6 +566,42 @@ CASES = [
         .delete(format!("{server}/api/sessions/{id}"))""",
         ),
         "cli_remove_takes_the_review_away_and_cancel_keeps_it",
+    ),
+    (
+        "the fallback for a missing leading newline deletes the code",
+        text_edit(
+            DIAGRAMS,
+            ".unwrap_or(inner);",
+            '.unwrap_or("");',
+        ),
+        "a_block_without_a_trailing_newline_still_counts_its_last_line",
+    ),
+    (
+        "a delivered webhook is not counted",
+        text_edit(
+            APPI,
+            """            Ok(resp) if resp.status().is_success() => {
+                crate::metrics::WEBHOOK_TOTAL
+                    .with_label_values(&["ok"])
+                    .inc();""",
+            """            Ok(resp) if resp.status().is_success() => {
+                let _ = resp;""",
+        ),
+        "the_webhook_metric_counts_what_actually_happened",
+    ),
+    (
+        "the cli stops reporting its commands",
+        text_edit(
+            CLII,
+            """    let Ok(gw) = std::env::var("EINK_PUSHGATEWAY_URL") else {
+        return;
+    };""",
+            """    let Ok(gw) = std::env::var("EINK_PUSHGATEWAY_URL") else {
+        return;
+    };
+    return;""",
+        ),
+        "the_cli_pushes_its_own_command_metrics",
     ),
 ]
 

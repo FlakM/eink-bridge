@@ -245,9 +245,11 @@ fn mark_lines(html: &str, hits: &[usize]) -> String {
     let prefix = &html[..open_end + 1];
     // The renderer always emits a newline straight after the `<pre>`; it separates the
     // tag from the code and is not a line, but counting it shifted every mark by one.
-    let inner = html[open_end + 1..close_start]
-        .strip_prefix('\n')
-        .unwrap_or("");
+    let inner = &html[open_end + 1..close_start];
+    // `unwrap_or(inner)`, not `unwrap_or("")`: the fallback for "there is no leading
+    // newline" is the text itself. An empty fallback deleted the whole code block, which
+    // stayed invisible only because the markdown renderer always emits that newline.
+    let inner = inner.strip_prefix('\n').unwrap_or(inner);
     let suffix = &html[close_start..];
 
     let mut lines: Vec<String> = Vec::new();
@@ -371,4 +373,57 @@ pub(crate) fn render_steps(source: &str) -> String {
         items = items.join(""),
         payload = payload
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ONE_BLOCK: &str = "<pre style=\"background-color:#ffffff;\">\n<span>first</span>\n<span>second</span>\n<span>third</span>\n</pre>";
+
+    #[test]
+    fn without_a_citation_the_markup_is_left_alone() {
+        assert_eq!(mark_lines(ONE_BLOCK, &[]), ONE_BLOCK);
+    }
+
+    #[test]
+    fn a_cited_line_is_wrapped_and_the_rest_is_not() {
+        let marked = mark_lines(ONE_BLOCK, &[2]);
+        assert!(marked.contains("<mark class=\"snippet-hit\"><span>second</span></mark>"));
+        assert!(!marked.contains("<mark class=\"snippet-hit\"><span>first</span>"));
+        assert!(!marked.contains("<mark class=\"snippet-hit\"><span>third</span>"));
+    }
+
+    #[test]
+    fn a_citation_past_the_end_marks_nothing() {
+        // A hand-edited header can name a line the code no longer has.
+        let marked = mark_lines(ONE_BLOCK, &[99]);
+        assert!(!marked.contains("<mark"), "{marked}");
+        assert!(marked.contains("first") && marked.contains("third"));
+    }
+
+    #[test]
+    fn markup_that_is_not_a_single_code_block_is_not_touched() {
+        // The safe answer: rather than guess which block the citation belongs to, leave
+        // the page as rendered. Rebalancing the wrong fragment produces broken HTML.
+        for html in [
+            "<p>no code at all</p>",
+            "<pre>one</pre><pre>two</pre>",
+            "<pre style=\"x\">unclosed",
+        ] {
+            assert_eq!(mark_lines(html, &[1]), html, "{html}");
+        }
+    }
+
+    #[test]
+    fn a_block_without_a_trailing_newline_still_counts_its_last_line() {
+        // The renderer normally emits one, but a hand-built fragment may not; the last
+        // line must still be numbered and must not gain a phantom line after it.
+        let html = "<pre>alpha\nbeta</pre>";
+        let marked = mark_lines(html, &[2]);
+        assert_eq!(
+            marked,
+            "<pre>alpha\n<mark class=\"snippet-hit\">beta</mark></pre>"
+        );
+    }
 }

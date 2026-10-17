@@ -661,3 +661,63 @@ mod tests {
         assert_eq!(s.status, SessionStatus::Active);
     }
 }
+
+#[cfg(test)]
+mod disk_trouble {
+    use super::*;
+
+    /// A state directory that cannot be created, because something else is already there.
+    fn blocked_state_dir() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("not-a-directory");
+        fs::write(&path, b"in the way").unwrap();
+        (dir, path)
+    }
+
+    #[test]
+    fn a_state_directory_that_cannot_be_written_still_serves_the_review() {
+        // Disk trouble must degrade, not take the server down: the reader's page is in
+        // memory and a review that cannot be persisted is still better than no server.
+        let (_dir, blocked) = blocked_state_dir();
+        let mut manager = SessionManager::new(blocked.clone());
+        let session = manager.create(
+            "# Review".into(),
+            Some("title".into()),
+            None,
+            HashMap::new(),
+            false,
+            None,
+        );
+        assert!(manager.get(&session.id).is_some(), "the session is usable");
+        assert!(manager.list().len() == 1);
+        assert!(session.state_dir.starts_with(&blocked));
+    }
+
+    #[test]
+    fn an_annotation_that_cannot_be_written_still_reports_a_path() {
+        let (_dir, blocked) = blocked_state_dir();
+        let mut manager = SessionManager::new(blocked);
+        let session = manager.create("# Review".into(), None, None, HashMap::new(), false, None);
+        let path = session.save_annotation(b"\x89PNG");
+        assert!(
+            path.contains("annotations/img_"),
+            "the caller is given a name to record, whatever the disk did: {path}"
+        );
+    }
+
+    #[test]
+    fn a_session_whose_directory_is_gone_can_still_be_removed() {
+        // The state dir can be cleaned up under the server's feet; removal must not fail
+        // on a missing directory.
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = SessionManager::new(dir.path().to_path_buf());
+        let session = manager.create("# Review".into(), None, None, HashMap::new(), false, None);
+        fs::remove_dir_all(&session.state_dir).unwrap();
+        assert!(manager.delete(&session.id), "removal should still succeed");
+        assert!(manager.get(&session.id).is_none());
+        assert!(
+            !manager.delete(&session.id),
+            "removing twice is not a success"
+        );
+    }
+}

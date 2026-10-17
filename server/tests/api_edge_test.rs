@@ -665,3 +665,121 @@ async fn server_side_ocr_of_an_empty_canvas_is_an_empty_answer() {
     let reply: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(reply["text"], "");
 }
+
+#[tokio::test]
+async fn the_webhook_metric_counts_what_actually_happened() {
+    // The runbook sends the reader to eink_webhook_total when a callback does not arrive.
+    // A push is fire-and-forget, so the counter is the only evidence either way.
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    eink_bridge::metrics::init();
+
+    let hits = Arc::new(AtomicUsize::new(0));
+    let counted = hits.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let app = axum::Router::new().route(
+            "/hook",
+            axum::routing::post(move || {
+                let counted = counted.clone();
+                async move {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    StatusCode::OK
+                }
+            }),
+        );
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let dir = tempfile::tempdir().unwrap();
+    let app = test_app(dir.path().to_path_buf());
+    let listening = format!(
+        "/api/sessions?callback_url={}",
+        urlencoding::encode(&format!("http://127.0.0.1:{port}/hook"))
+    );
+    let resp = app
+        .clone()
+        .oneshot(Request::post(listening).body(Body::from("# Hook")).unwrap())
+        .await
+        .unwrap();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let mp = "--b\r\nContent-Disposition: form-data; name=\"typed_notes\"\r\n\r\nLGTM\r\n--b--\r\n";
+    send(
+        &app,
+        Request::post(format!("/api/sessions/{id}/submit"))
+            .header("content-type", "multipart/form-data; boundary=b")
+            .body(Body::from(mp))
+            .unwrap(),
+    )
+    .await;
+
+    // The push is spawned, so wait for the counter rather than for a sleep.
+    let mut counted_metric = false;
+    for _ in 0..40 {
+        let (_, metrics) = send(&app, Request::get("/metrics").body(Body::empty()).unwrap()).await;
+        let text = String::from_utf8_lossy(&metrics);
+        if text.contains("eink_webhook_total{result=\"ok\"} 1") {
+            counted_metric = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        counted_metric,
+        "a delivered webhook must be counted; the receiver saw {}",
+        hits.load(Ordering::SeqCst)
+    );
+    assert_eq!(hits.load(Ordering::SeqCst), 1, "exactly one delivery");
+
+    // And a callback that nobody answers is counted as a failure, not silently dropped.
+    let dead = {
+        let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        port
+    };
+    let dead_url = format!(
+        "/api/sessions?callback_url={}",
+        urlencoding::encode(&format!("http://127.0.0.1:{dead}/hook"))
+    );
+    let resp = app
+        .clone()
+        .oneshot(Request::post(dead_url).body(Body::from("# Hook")).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // Cancelling also fires the callback.
+    send(
+        &app,
+        Request::delete(format!("/api/sessions/{id}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    let mut counted_failure = false;
+    for _ in 0..40 {
+        let (_, metrics) = send(&app, Request::get("/metrics").body(Body::empty()).unwrap()).await;
+        if String::from_utf8_lossy(&metrics).contains("eink_webhook_total{result=\"error\"} 1") {
+            counted_failure = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        counted_failure,
+        "an undeliverable webhook must be counted as an error"
+    );
+}

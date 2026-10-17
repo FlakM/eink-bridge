@@ -1240,3 +1240,70 @@ async fn cli_update_replaces_the_document_and_bumps_the_version() {
     assert!(!missing.status.success());
     assert!(String::from_utf8_lossy(&missing.stderr).contains("not found"));
 }
+
+#[tokio::test]
+async fn the_cli_pushes_its_own_command_metrics() {
+    // The CLI reports its commands to a pushgateway so that "did the review machine
+    // actually run" is answerable. The body has to be a well-formed exposition or the
+    // pushgateway rejects it, and the command is fire-and-forget.
+    use std::sync::{Arc, Mutex};
+
+    let received: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = received.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let pushgateway = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        let app = axum::Router::new().fallback(move |uri: axum::http::Uri, body: String| {
+            let sink = sink.clone();
+            async move {
+                if let Ok(mut sink) = sink.lock() {
+                    sink.push((uri.path().to_string(), body));
+                }
+                axum::http::StatusCode::OK
+            }
+        });
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let (server_url, _handle) = start_server().await;
+    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_eink-review"))
+        .args(["--server", &server_url, "list"])
+        .env("EINK_PUSHGATEWAY_URL", &pushgateway)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap()
+        .wait_with_output()
+        .await
+        .unwrap();
+    assert!(output.status.success());
+
+    let posted = {
+        let mut guard = received.lock().unwrap();
+        // The push happens after the command, so give it a moment.
+        for _ in 0..40 {
+            if !guard.is_empty() {
+                break;
+            }
+            drop(guard);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            guard = received.lock().unwrap();
+        }
+        guard.clone()
+    };
+    let (path, body) = posted.first().expect("the CLI should push its metrics");
+    assert_eq!(path, "/metrics/job/eink-review/instance/cli");
+    assert!(
+        body.contains("eink_cli_commands_total{command=\"list\",result=\"ok\"} 1"),
+        "the push should name the command that ran: {body}"
+    );
+    assert!(body.contains("eink_cli_duration_seconds{command=\"list\",result=\"ok\"} "));
+    for line in body.lines().filter(|line| !line.starts_with('#')) {
+        assert!(
+            line.rsplit_once(' ')
+                .is_some_and(|(_, value)| value.parse::<f64>().is_ok()),
+            "malformed line would be rejected wholesale: {line}"
+        );
+    }
+}
