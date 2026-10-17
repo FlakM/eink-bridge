@@ -1,5 +1,5 @@
 use eink_bridge::app::{AppState, build_app};
-use futures_util::StreamExt;
+use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 use std::time::Duration;
 use tokio::net::TcpListener;
@@ -264,4 +264,91 @@ async fn ws_content_update_via_http_notifies_version() {
     let msg = next_text(&mut ws).await;
     assert_eq!(msg["type"].as_str().unwrap(), "version_updated");
     assert_eq!(msg["version"].as_u64().unwrap(), 2);
+}
+
+#[tokio::test]
+async fn a_client_that_connects_after_an_update_still_receives_it() {
+    // The observer reconnects constantly; an update written while nobody was attached
+    // must still arrive, or the note the reader wrote is lost to the reconnecting CLI.
+    let (url, _handle) = start_server().await;
+    let id = create_session(&url).await;
+
+    reqwest::Client::new()
+        .put(format!("{url}/api/sessions/{id}/content"))
+        .header("Content-Type", "text/plain")
+        .body("# Updated before anyone watched\n\nv2")
+        .send()
+        .await
+        .unwrap();
+
+    let (mut ws, _) = connect_async(ws_url(&url, &format!("/ws/{id}")))
+        .await
+        .unwrap();
+    let msg = next_text(&mut ws).await;
+    assert_eq!(msg["type"].as_str().unwrap(), "version_updated");
+    assert_eq!(msg["version"].as_u64().unwrap(), 2);
+}
+
+#[tokio::test]
+async fn an_unreadable_message_does_not_break_the_connection() {
+    // The CLI and the app both send freely; a frame the server does not understand must
+    // not drop the socket, because that socket is the way feedback comes back.
+    let (url, _handle) = start_server().await;
+    let id = create_session(&url).await;
+
+    let (mut ws, _) = connect_async(ws_url(&url, &format!("/ws/{id}")))
+        .await
+        .unwrap();
+    ws.send(Message::Text("not json at all".into()))
+        .await
+        .unwrap();
+    ws.send(Message::Text(r#"{"type":"something_new"}"#.into()))
+        .await
+        .unwrap();
+
+    reqwest::Client::new()
+        .put(format!("{url}/api/sessions/{id}/content"))
+        .header("Content-Type", "text/plain")
+        .body("# Still connected\n\nv2")
+        .send()
+        .await
+        .unwrap();
+
+    let msg = next_text(&mut ws).await;
+    assert_eq!(
+        msg["type"].as_str().unwrap(),
+        "version_updated",
+        "the connection survived the junk frames: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn a_submitted_session_replays_nothing_to_a_late_watcher() {
+    // Replaying an update to a session that is already finished would look like the
+    // review was reopened.
+    let (url, _handle) = start_server().await;
+    let id = create_session(&url).await;
+
+    reqwest::Client::new()
+        .put(format!("{url}/api/sessions/{id}/content"))
+        .header("Content-Type", "text/plain")
+        .body("# left behind\n\nv2")
+        .send()
+        .await
+        .unwrap();
+    reqwest::Client::new()
+        .post(format!("{url}/api/sessions/{id}/submit"))
+        .json(&json!({"typed_notes": "done"}))
+        .send()
+        .await
+        .unwrap();
+
+    let (mut ws, _) = connect_async(ws_url(&url, &format!("/ws/{id}")))
+        .await
+        .unwrap();
+    let quiet = tokio::time::timeout(Duration::from_millis(400), ws.next()).await;
+    assert!(
+        quiet.is_err() || quiet.unwrap().is_none(),
+        "a finished session should not replay a stale update"
+    );
 }

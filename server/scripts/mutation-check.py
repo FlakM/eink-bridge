@@ -23,21 +23,27 @@ DIAGRAMS = SERVER / "src/render/diagrams.rs"
 CHUNKS = SERVER / "src/render/chunks.rs"
 REANCHOR = SERVER / "src/reanchor.rs"
 CLII = SERVER / "src/cli.rs"
+APII = SERVER / "src/api.rs"
+METRICS = SERVER / "src/metrics.rs"
+WSI = SERVER / "src/ws.rs"
 THEME = SERVER / "assets/eink-theme.tmTheme"
 
 
 # Tests in a binary crate are invisible to `--lib`; they run against the bin target.
-BIN_TARGETS = {
+TARGETS = {
     "a_review_exit_code_is_the_contract_a_pipeline_gates_on": "--bin eink-review",
     "long_element_text_is_elided_without_panicking_on_a_character_boundary": "--bin eink-review",
     "the_observer_url_follows_the_scheme_of_the_server": "--bin eink-review",
     "a_session_row_shows_the_star_the_status_and_where_it_came_from": "--bin eink-review",
     "a_submitted_review_renders_notes_anchors_and_images": "--bin eink-review",
+    "the_connection_gauge_counts_up_and_back_down_to_zero": "--test ws_metrics_test",
+    "a_client_that_connects_after_an_update_still_receives_it": "--test ws_test",
+    "an_unreadable_message_does_not_break_the_connection": "--test ws_test",
 }
 
 
 def target_for(test: str) -> str:
-    return BIN_TARGETS.get(test, "--lib")
+    return TARGETS.get(test, "--lib")
 
 
 def suite_is_green(test: str = "", target: str = "--lib") -> bool:
@@ -52,6 +58,8 @@ def suite_is_green(test: str = "", target: str = "--lib") -> bool:
 
 def locate(body: str, needle: str) -> tuple[int, int] | None:
     """Find `needle`, ignoring how the formatter wrapped it."""
+    if not needle:
+        return None
     start = body.find(needle)
     if start >= 0:
         return start, start + len(needle)
@@ -66,7 +74,7 @@ def text_edit(path: pathlib.Path, old: str, new: str):
     Reverting writes back what was there, not the anchor as typed, so a run leaves the
     tree byte-identical even when the formatter had rewrapped the code.
     """
-    saved: dict[str, str] = {}
+    saved: dict[str, object] = {}
 
     def apply():
         body = path.read_text()
@@ -74,14 +82,21 @@ def text_edit(path: pathlib.Path, old: str, new: str):
         assert found, f"anchor missing in {path}: {old[:70]!r}"
         start, end = found
         saved["text"] = body[start:end]
+        saved["start"] = start
         path.write_text(body[:start] + new + body[end:])
 
     def revert():
         body = path.read_text()
-        found = locate(body, new)
-        assert found, f"mutation not present in {path}: {new[:70]!r}"
-        start, end = found
-        path.write_text(body[:start] + saved["text"] + body[end:])
+        # A mutation that deletes text has nothing to search for, so undo it in place.
+        at = saved["start"] if not new else None
+        found = locate(body, new) if at is None else None
+        if found is None:
+            assert at is not None, f"mutation not present in {path}: {new[:70]!r}"
+            start = int(at)
+            end = start
+        else:
+            start, end = found
+        path.write_text(body[:start] + str(saved["text"]) + body[end:])
 
     return apply, revert
 
@@ -343,6 +358,65 @@ CASES = [
             "    let base = server",
         ),
         "the_observer_url_follows_the_scheme_of_the_server",
+    ),
+    (
+        "ink without rendered images reports itself as empty",
+        text_edit(
+            APII,
+            """            has_annotation: !session.annotation_images.is_empty()
+                || !session.annotations.is_empty()
+                || session.stroke_data.is_some(),""",
+            """            has_annotation: !session.annotation_images.is_empty(),""",
+        ),
+        "a_review_with_ink_reports_that_it_has_one",
+    ),
+    (
+        "the spec forgets a field the result sends",
+        text_edit(
+            APII,
+            """                        "starred": {"type": "boolean"},
+                        "origin": {"$ref": "#/components/schemas/SessionOrigin"}
+                    }
+                },
+                "AnnotationGroup": {""",
+            """                        "starred": {"type": "boolean"}
+                    }
+                },
+                "AnnotationGroup": {""",
+        ),
+        "every_field_a_response_sends_is_described_in_the_spec",
+    ),
+    (
+        "a labelled metric ships no vocabulary",
+        text_edit(
+            METRICS,
+            """    for result in ["ok", "error"] {
+        OCR_REQUESTS.with_label_values(&[result]).inc_by(0);
+    }""",
+            "",
+        ),
+        "labelled_metrics_export_their_whole_vocabulary_before_any_event",
+    ),
+    (
+        "a closed websocket is never given back to the gauge",
+        text_edit(
+            WSI,
+            """    info!(session_id = %id, "ws disconnected");
+    crate::metrics::WS_CONNECTIONS_ACTIVE.dec();""",
+            """    info!(session_id = %id, "ws disconnected");""",
+        ),
+        "the_connection_gauge_counts_up_and_back_down_to_zero",
+    ),
+    (
+        "an acknowledgement always sends its (empty) arrays",
+        text_edit(
+            WSI,
+            """        #[serde(skip_serializing_if = "Vec::is_empty", default)]
+        consumed_annotations: Vec<i32>,""",
+            """        #[serde(default)]
+        consumed_annotations: Vec<i32>,""",
+        ),
+        "an_empty_acknowledgement_does_not_send_empty_arrays",
     ),
 ]
 

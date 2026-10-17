@@ -181,6 +181,7 @@ fn seed_label_vocabularies() {
     for result in ["ok", "error"] {
         OCR_REQUESTS.with_label_values(&[result]).inc_by(0);
     }
+
     for kind in ["prompt", "eval"] {
         OCR_TOKENS.with_label_values(&[kind]).inc_by(0);
     }

@@ -619,7 +619,7 @@ mod tests {
     fn described_properties(spec: &Value, schema: &str) -> Vec<String> {
         let node = &spec["components"]["schemas"][schema];
         let mut names: Vec<String> = Vec::new();
-        let mut collect = |node: &Value, names: &mut Vec<String>| {
+        let collect = |node: &Value, names: &mut Vec<String>| {
             if let Some(props) = node.get("properties").and_then(Value::as_object) {
                 names.extend(props.keys().cloned());
             }

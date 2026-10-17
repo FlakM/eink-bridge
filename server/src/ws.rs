@@ -147,3 +147,86 @@ fn extract_type(text: &str) -> &str {
     }
     "unknown"
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_message_type_is_read_for_logging() {
+        assert_eq!(extract_type(r#"{"type":"subscribe"}"#), "subscribe");
+        assert_eq!(extract_type(r#"{"type": "subscribe"}"#), "subscribe");
+        assert_eq!(
+            extract_type(r#"{"type":"annotation_result","feedback_id":"abc"}"#),
+            "annotation_result"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_message_reports_unknown_rather_than_panicking() {
+        // This runs inside the socket task: a panic here would kill the connection the
+        // reader's feedback arrives on.
+        for text in [
+            "",
+            "not json",
+            "{}",
+            r#"{"type":}"#,
+            r#"{"type""#,
+            r#"{"type"}"#,
+            r#""type""#,
+            r#"{"other":"type"}"#,
+            "{\"type\":\"波兰语\"}",
+            r#"{"type":"a\"b"}"#,
+            "🖊",
+            &"x".repeat(10_000),
+        ] {
+            let _ = extract_type(text);
+        }
+        assert_eq!(extract_type("{}"), "unknown");
+        assert_eq!(extract_type(r#"{"other":"type"}"#), "unknown");
+    }
+
+    #[test]
+    fn a_server_message_serialises_the_way_the_client_reads_it() {
+        // The app switches on these tags and field names.
+        let version = serde_json::to_value(ServerMessage::VersionUpdated {
+            version: 3,
+            consumed_annotations: vec![0, 2],
+            consumed_strokes: vec![vec![[1.0, 2.0]]],
+        })
+        .unwrap();
+        assert_eq!(version["type"], "version_updated");
+        assert_eq!(version["version"], 3);
+        assert_eq!(version["consumed_annotations"][1], 2);
+        assert_eq!(version["consumed_strokes"][0][0][0], 1.0);
+
+        let error = serde_json::to_value(ServerMessage::Error {
+            message: "cancelled".into(),
+        })
+        .unwrap();
+        assert_eq!(error["type"], "error");
+        assert_eq!(error["message"], "cancelled");
+    }
+
+    #[test]
+    fn an_empty_acknowledgement_does_not_send_empty_arrays() {
+        // The CLI treats absent and empty differently: absent means "the client already
+        // consumed the annotation", empty would mean "nothing was consumed".
+        let message = serde_json::to_value(ServerMessage::VersionUpdated {
+            version: 2,
+            consumed_annotations: Vec::new(),
+            consumed_strokes: Vec::new(),
+        })
+        .unwrap();
+        assert!(message.get("consumed_annotations").is_none());
+        assert!(message.get("consumed_strokes").is_none());
+    }
+
+    #[test]
+    fn the_client_message_shape_is_the_one_the_cli_sends() {
+        let subscribe: ClientMessage = serde_json::from_str(r#"{"type":"subscribe"}"#).unwrap();
+        assert!(matches!(subscribe, ClientMessage::Subscribe));
+        // Anything else is ignored rather than fatal, so an unknown tag must not parse.
+        assert!(serde_json::from_str::<ClientMessage>(r#"{"type":"nonsense"}"#).is_err());
+    }
+}
