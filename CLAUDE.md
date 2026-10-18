@@ -188,11 +188,19 @@ just test-android        # Android unit tests only (no coverage)
 
 Use `/coverage` skill for automated analysis of gaps.
 
-Last measured (overnight pass): **89% of Rust lines**, 228 Android unit tests, and 38
-mutations all caught by `just test-mutations`. What remains uncovered is deliberately so:
-`main.rs`, `mock_device.rs` and the two benchmark binaries are entrypoints, and the
-remaining Rust lines are error-logging paths and environment-driven configuration
-(`providers::OpenAi::from_env`) that a unit test cannot reach safely.
+Last measured (overnight pass): **89.8% of Rust lines** — and **93.7%** of everything
+that is not an entrypoint or a benchmark. Together with 228 Android unit tests and 38
+mutations all caught by `just test-mutations`.
+
+Fully covered: `api.rs`, `metrics.rs`, `render/chunks.rs`, `render/browser.rs`,
+`render/html_utils.rs`, `render/models.rs`. Behind them: `reanchor.rs` 99.6%,
+`render/diagrams.rs` 99.3%, `render.rs` 98.4%, `ocr/cache.rs` 99.5%,
+`ocr/race.rs` 98.9%, `session.rs` 96.5%, `ocr.rs` 94.2%, `ws.rs` 91.7%.
+
+What is left uncovered is deliberately so. `main.rs`, `mock_device.rs` and the two
+benchmark binaries are entrypoints. The rest is error-logging paths for a disk that cannot
+be written, and `providers::OpenAi::from_env`, which reads process environment and cannot
+be exercised in a unit test without racing every other test in the binary.
 
 ## What to test when
 
