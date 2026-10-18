@@ -188,6 +188,12 @@ just test-android        # Android unit tests only (no coverage)
 
 Use `/coverage` skill for automated analysis of gaps.
 
+Last measured (overnight pass): **89% of Rust lines**, 228 Android unit tests, and 38
+mutations all caught by `just test-mutations`. What remains uncovered is deliberately so:
+`main.rs`, `mock_device.rs` and the two benchmark binaries are entrypoints, and the
+remaining Rust lines are error-logging paths and environment-driven configuration
+(`providers::OpenAi::from_env`) that a unit test cannot reach safely.
+
 ## What to test when
 
 | Change area | Run |
@@ -196,6 +202,12 @@ Use `/coverage` skill for automated analysis of gaps.
 | Annotation / highlighting / tap behaviour | `just test-render` then `just test-mutations` |
 | Snippet, diff, steps or fence handling | `cargo test render::tests::parse_chunks` / `a_snippet` / `a_line_mark` |
 | Relocating notes after an edit | `cargo test reanchor::tests` |
+| HTTP edge cases (remove, purge, ack, limits) | `cargo test --test api_edge_test` |
+| CLI commands end to end | `cargo test --test cli_integration_test` |
+| OCR: strokes, providers, the engine | `cargo test ocr::` then `cargo test --test ocr_handwriting_test -- --ignored` |
+| WebSocket gauge leak | `cargo test --test ws_metrics_test` |
+| The tablet's own logic | `just test-android` |
+| Metric names and the metrics reference | `cargo test metrics::` |
 | `render.rs` diagram parsing | `cargo test render::tests::graph` / `mindmap` / `mermaid` |
 | `app.rs` handlers | `cargo test --test health_test` |
 | `session.rs` lifecycle | `cargo test --test session_lifecycle_test` |
@@ -268,6 +280,55 @@ author is told the wrong thing with confidence. The rules, each with a test:
 deterministic document shapes: a note either follows its own paragraph or is left
 unplaced, never a neighbour.
 
+### The HTTP surface and the CLI
+
+`tests/api_edge_test.rs` covers the requests a client makes when something is unfinished,
+misspelled or already over. The rules it pins, each one a place a wrong answer looks
+harmless: `?remove=true` forgets a session and deletes its files while a bare DELETE
+cancels and keeps them; purge takes finished reviews and leaves active and starred ones;
+an acknowledgement must name the feedback it consumes and cannot be spent twice; a stale
+writer gets 409 with its edit intact; an over-large element map is refused before the
+quadratic comparison runs; a second submit is a conflict; a broken multipart field names
+itself in the 400; an uploaded annotation lands on disk byte for byte; and without an OCR
+engine `POST /api/ocr` answers "not available" rather than an empty transcription.
+
+`tests/cli_integration_test.rs` runs the real binary: push, update, star, unstar, cancel,
+remove and list, plus the observer's reconnect loop. `src/cli.rs` keeps its own decisions
+pure so they can be tested without a server -- the verdict exit code a pipeline gates on,
+the result text, the list row, and the metric body it pushes to the pushgateway (whose
+label values are escaped: one malformed line and the whole batch is rejected, silently).
+
+### The tablet (`android/`)
+
+```bash
+just test-android        # all JVM unit tests (228 of them)
+just coverage-android    # JaCoCo report
+```
+
+`AnnotationRelocationTest` is the client half of the relocation problem `reanchor.rs`
+solves on the server, and holds the same safety property: ink follows the top-left of its
+paragraph (so a margin note stays beside its line when the paragraph grows), a bound note
+whose paragraph is gone is archived rather than drawn over unrelated text, and the
+archived count is the truth about what the reader can no longer see. A *free* stroke
+always binds to the nearest paragraph however far it is -- there is no distance cap, which
+is deliberate and worth knowing before "fixing" it.
+
+### The mutation harness
+
+`just test-mutations` reintroduces each known defect and asserts the named test goes red.
+Three rules keep it honest, each learned the hard way:
+
+- **Every case names its target.** A test in a binary crate is invisible to `--lib`; a
+  filter that matches no test exits zero, which would make a missed mutation look caught.
+  The harness now refuses to run a filter that selects nothing.
+- **Reverts are by offset and verified byte for byte.** Restoring by searching for the
+  replacement text once put a `?remove=true` line back into `cmd_cancel`, because a bare
+  `DELETE /api/sessions/{id}` appears in both commands.
+- **The final gate runs every target**, not just the library. The corruption above reached
+  a commit because only `--lib` was checked at the end of the run.
+
+Add a case whenever you add an invariant.
+
 ### Deployment gap
 
 The `eink-serve` systemd **user override runs the repository's `result` binary**, so
@@ -307,17 +368,16 @@ The `/metrics` endpoint (port 3333) exposes all Prometheus metrics in text forma
 curl -s http://localhost:3333/metrics | grep eink_
 ```
 
-Key metrics for debugging:
+Key metrics for debugging — the symptom-to-metric table, kept next to the code that
+defines them so a test can hold it to account: [`server/METRICS.md`](server/METRICS.md).
+The common ones:
 
 | Symptom | Metric to check |
 |---|---|
 | Sessions not submitting | `eink_sessions_submitted_total`, `eink_sessions_active` |
 | OCR failures | `eink_ocr_requests_total{result="error"}` |
-| OCR slow | `eink_ocr_duration_seconds` buckets |
 | WebSocket drops | `eink_ws_connections_active` |
-| Long-poll timing out too fast | `eink_long_poll_total{result="timeout"}` |
 | Webhook not firing | `eink_webhook_total{result="error"}` |
-| Unexpected session expiry | `eink_sessions_expired_total` |
 
 Grafana dashboard on odroid:3002 visualizes all of these over time — often faster to spot trends than grepping logs.
 
@@ -341,14 +401,12 @@ When adding a new feature to `render.rs`:
 
 Areas that work today but could bite under load or after refactoring:
 
-### Notifier / WS sender map leak
+### Notifier / WS sender map leak — fixed
 
-`AppState.notifiers` and `AppState.ws_senders` are cleaned up on submit and cancel
-but **not** on session expiry. The expiry loop in `main.rs` only calls
-`SessionManager::expire_stale()` — it never touches the notifier/sender maps.
-Long-running servers will accumulate orphaned entries for every expired session.
-
-Fix: have the expiry loop call `notify_and_cleanup` + `ws_cleanup` for each expired id.
+`expire_stale` now wakes waiters with an expiry message and cleans both maps for every
+expired id, so the expiry loop in `main.rs` no longer leaks an entry per stale session.
+`tests/ws_metrics_test.rs` holds the connection gauge to zero, which is the observable
+half of the same concern.
 
 ### No server-side WebSocket heartbeat
 

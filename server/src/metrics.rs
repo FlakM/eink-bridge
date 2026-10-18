@@ -314,14 +314,23 @@ mod tests {
 
     #[test]
     fn the_metrics_the_runbook_names_are_the_ones_that_exist() {
-        // AGENTS.md tells the reader which metric to check for which symptom. A rename
-        // that leaves the runbook behind sends the next person to a metric that is gone.
+        // METRICS.md tells the reader which metric to check for which symptom. A rename
+        // that leaves the reference behind sends the next person to a metric that is gone.
         init();
         let exposed = render();
-        for name in documented_metrics(include_str!("../../AGENTS.md")) {
+        // The HTTP metrics are labelled by path, so their family only appears once a
+        // request has been made; the reference names them for that reason.
+        const APPEAR_WITH_TRAFFIC: &[&str] = &[
+            "eink_http_requests_total",
+            "eink_http_request_duration_seconds",
+        ];
+        for name in documented_metrics(include_str!("../METRICS.md")) {
+            if APPEAR_WITH_TRAFFIC.contains(&name.as_str()) {
+                continue;
+            }
             assert!(
                 exposed.contains(&name),
-                "the runbook names {name}, which no longer exists"
+                "the metrics reference names {name}, which no longer exists"
             );
         }
     }
@@ -340,10 +349,10 @@ mod tests {
     #[test]
     fn documented_metrics_are_read_from_the_runbook() {
         // Guard the guard: if the parser stops finding names the test above passes empty.
-        let found = documented_metrics(include_str!("../../AGENTS.md"));
+        let found = documented_metrics(include_str!("../METRICS.md"));
         assert!(
             found.len() >= 6,
-            "the runbook should name several metrics, found {found:?}"
+            "the reference should name several metrics, found {found:?}"
         );
     }
 

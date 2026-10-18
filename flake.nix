@@ -41,7 +41,9 @@
               (craneLib.filterCargoSources path type) ||
               (pkgs.lib.hasInfix "/assets" path) ||
               (pkgs.lib.hasInfix "/golden" path) ||
-              (pkgs.lib.hasInfix "/fixtures" path);
+              (pkgs.lib.hasInfix "/fixtures" path) ||
+              # Read by a test that keeps the metric names honest.
+              (pkgs.lib.hasInfix "METRICS.md" path);
           };
           strictDeps = true;
           buildInputs = with pkgs; [
