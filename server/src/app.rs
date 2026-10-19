@@ -53,6 +53,9 @@ pub struct AppState {
     /// The one client every webhook goes out through, with a bound: a receiver that
     /// never answers used to hold a task forever.
     pub http: reqwest::Client,
+    /// Waits after a failed webhook attempt. Injectable so a test can prove the retry
+    /// happens without spending five seconds doing it.
+    pub webhook_backoff: [Duration; 3],
     /// Directories `/source` may read from, from `EINK_SOURCE_ROOTS`. `None` means any
     /// directory a local creator names; a non-local creator never gets one.
     pub source_roots: Option<Vec<PathBuf>>,
@@ -160,6 +163,11 @@ impl AppState {
             ocr_engine,
             ws_heartbeat_seconds,
             http,
+            webhook_backoff: [
+                Duration::from_millis(250),
+                Duration::from_secs(1),
+                Duration::from_secs(4),
+            ],
             source_roots: source_roots_from_env(),
             reanchor_budget: Duration::from_secs(10),
         }
@@ -218,25 +226,46 @@ impl AppState {
     /// the sense of "nobody will ever know".
     pub fn send_webhook(&self, url: String, body: impl serde::Serialize + Send + 'static) {
         let client = self.http.clone();
+        let backoff = self.webhook_backoff;
+        let body = match serde_json::to_value(body) {
+            Ok(body) => body,
+            Err(error) => {
+                tracing::error!(%url, %error, "webhook body could not be serialized");
+                crate::metrics::WEBHOOK_TOTAL
+                    .with_label_values(&["error"])
+                    .inc();
+                return;
+            }
+        };
         tokio::spawn(async move {
-            match client.post(&url).json(&body).send().await {
-                Ok(resp) if resp.status().is_success() => {
-                    crate::metrics::WEBHOOK_TOTAL
-                        .with_label_values(&["ok"])
-                        .inc();
-                }
-                Ok(resp) => {
-                    tracing::warn!("webhook POST to {url} returned {}", resp.status());
+            // A channel that is restarting is deaf for a second or two, not gone: the
+            // pending feedback is durable, so a retry costs nothing and saves the note.
+            // Three retries after the first attempt, with a backoff that stays inside a
+            // human's patience.
+            let backoff = backoff;
+            for attempt in 0..=backoff.len() {
+                let failure = match client.post(&url).json(&body).send().await {
+                    Ok(resp) if resp.status().is_success() => {
+                        crate::metrics::WEBHOOK_TOTAL
+                            .with_label_values(&["ok"])
+                            .inc();
+                        return;
+                    }
+                    Ok(resp) => format!("returned {}", resp.status()),
+                    Err(error) => format!("failed: {error}"),
+                };
+                if attempt == backoff.len() {
+                    tracing::warn!(%url, attempt, "webhook {failure}; giving up");
                     crate::metrics::WEBHOOK_TOTAL
                         .with_label_values(&["error"])
                         .inc();
+                    return;
                 }
-                Err(error) => {
-                    tracing::warn!("webhook POST to {url} failed: {error}");
-                    crate::metrics::WEBHOOK_TOTAL
-                        .with_label_values(&["error"])
-                        .inc();
-                }
+                tracing::warn!(%url, attempt, "webhook {failure}; retrying");
+                crate::metrics::WEBHOOK_TOTAL
+                    .with_label_values(&["retried"])
+                    .inc();
+                tokio::time::sleep(backoff[attempt]).await;
             }
         });
     }
@@ -1267,28 +1296,23 @@ async fn update_content(
 
 /// Where the server may deliver a session's events.
 ///
-/// Only this machine. The callback is a request the *server* makes, so an unrestricted
-/// URL from a LAN caller would turn it into a probe of the rest of the network.
-/// `EINK_CALLBACK_ALLOW_REMOTE=1` lifts that for a deliberate remote receiver.
+/// The same scheme and address rules as creation ([`validate_callback_url`]) plus one
+/// more: the channel that claims a session runs on this machine, so a non-loopback hook
+/// is a mistake at best and a network probe at worst. `EINK_CALLBACK_ALLOW_REMOTE=1`
+/// lifts the second rule for a deliberate remote receiver.
 fn callback_url(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
-    if trimmed.is_empty()
-        || trimmed.len() > 2048
-        || trimmed.chars().any(|c| c.is_whitespace() || c.is_control())
-    {
+    if trimmed.is_empty() || trimmed.len() > 2048 {
         return None;
     }
-    let rest = trimmed.strip_prefix("http://")?;
-    let authority = rest.split('/').next().unwrap_or(rest);
-    let host = match authority.rsplit_once(':') {
-        Some((host, _)) => host,
-        None => authority,
-    };
-    let host = host.trim_start_matches('[').trim_end_matches(']');
-    let loopback = host.eq_ignore_ascii_case("localhost")
-        || host
-            .parse::<std::net::IpAddr>()
-            .is_ok_and(|ip| ip.is_loopback());
+    validate_callback_url(trimmed).ok()?;
+    let parsed = reqwest::Url::parse(trimmed).ok()?;
+    let loopback = parsed.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+    });
     if !loopback && std::env::var("EINK_CALLBACK_ALLOW_REMOTE").as_deref() != Ok("1") {
         return None;
     }

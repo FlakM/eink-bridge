@@ -11,7 +11,10 @@ use std::path::PathBuf;
 use tower::ServiceExt;
 
 pub fn test_app(state_dir: PathBuf) -> Router {
-    let state = AppState::new(state_dir);
+    let mut state = AppState::new(state_dir);
+    // Retries are real behaviour, but a test that waits 5.25 s to observe one is a test
+    // that gets deleted. Keep the retry, drop the wait.
+    state.webhook_backoff = [std::time::Duration::ZERO; 3];
     build_app(state)
 }
 

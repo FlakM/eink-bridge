@@ -500,3 +500,79 @@ async fn a_callback_url_must_be_somewhere_the_server_should_post_to() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn a_webhook_that_fails_twice_is_retried_until_it_lands() {
+    // A channel that is restarting is deaf for a second or two, not gone. The feedback is
+    // durable on the session, so the delivery has to be retried rather than dropped.
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let received = HookReceiver::new();
+    let counter = attempts.clone();
+    let receiver = received.clone();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let app = axum::Router::new().route(
+            "/hook",
+            axum::routing::post(move |body: String| {
+                let counter = counter.clone();
+                let receiver = receiver.clone();
+                async move {
+                    let attempt = counter.fetch_add(1, Ordering::SeqCst) + 1;
+                    if attempt < 3 {
+                        return StatusCode::INTERNAL_SERVER_ERROR;
+                    }
+                    if let Ok(value) = serde_json::from_str(&body) {
+                        receiver.store(value).await;
+                    }
+                    StatusCode::OK
+                }
+            }),
+        );
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let dir = tempfile::tempdir().unwrap();
+    let app = common::test_app(dir.path().to_path_buf());
+    let hook = format!("http://127.0.0.1:{port}/hook");
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::post(format!(
+                "/api/sessions?callback_url={}",
+                urlencoding::encode(&hook)
+            ))
+            .body(Body::from("# Flaky receiver"))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Cancelling also fires the callback, which is faster than filling in a review.
+    let resp = app
+        .oneshot(
+            Request::delete(format!("/api/sessions/{id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+
+    let payload = received.wait(3000).await.expect("the third attempt was not delivered");
+    assert_eq!(payload["id"], id);
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        3,
+        "two refusals, then the delivery"
+    );
+}

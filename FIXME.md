@@ -36,6 +36,9 @@ add a mutation case for every new invariant (`server/scripts/mutation-check.py`)
 
 ### 3. The CLI does the whole round trip
 
+Superseded by `PLAN-cli-first.md`, which widens this into every procedure the skills
+carry; the flags below are its Phase 1.
+
 - Hurts: `update` takes only `<id> <file>` (`server/src/cli.rs:61-66`); no
   `--expected-version`, `--feedback-id`, `--consumed`, no `content` or `source` command,
   `push` has no `--tags`, `result` exits 0 for both pending and lgtm (`:497-500`), `list`

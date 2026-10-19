@@ -188,7 +188,7 @@ fn seed_label_vocabularies() {
     for result in ["notified", "timeout"] {
         LONG_POLL_TOTAL.with_label_values(&[result]).inc_by(0);
     }
-    for result in ["ok", "error"] {
+    for result in ["ok", "retried", "error"] {
         WEBHOOK_TOTAL.with_label_values(&[result]).inc_by(0);
     }
     for provider in PROVIDERS {

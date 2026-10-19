@@ -40,8 +40,13 @@ it delegates delivery back to this skill's contract.
    Use the only active session if there is one. If there are several, ask which one;
    the newest session may belong to a different conversation. If none, say so.
 
-2. Attach the background watcher below. It also recovers pending feedback already
-   sent without a callback. A server session alone does not connect this conversation.
+2. Reconnect delivery for this conversation:
+   - **Claude channel path:** call `subscribe_session(session_id)` again. It re-registers
+     this instance's callback and immediately re-reads `GET /api/sessions/{id}/feedback`,
+     so notes sent while Claude was restarting still arrive.
+   - **Portable path:** attach the background watcher below; it recovers pending feedback
+     already sent without a callback.
+   A server session alone does not connect this conversation.
 
 3. Recover the current markdown once from `GET /api/sessions/<id>/content` if it is
    absent from this conversation. Confirm the intended review focus if it is unknown.
@@ -82,8 +87,7 @@ review focus and proposed length in one sentence; ask again only if the scope ch
 Claude channel notifications are enabled (`--dangerously-load-development-channels server:eink-channel`).
 
 ```bash
-CHANNEL_PORT=${EINK_CHANNEL_PORT:-8789}
-SESSION_ID=$(eink-review --server "${EINK_SERVER_URL:-http://localhost:3333}" push --async --callback-url "http://127.0.0.1:$CHANNEL_PORT/" <file>)
+SESSION_ID=$(eink-review --server "${EINK_SERVER_URL:-http://localhost:3333}" push --async <file>)
 echo "SESSION_ID:$SESSION_ID"
 ```
 
@@ -92,7 +96,11 @@ Immediately after getting the session ID, call the `subscribe_session` tool with
 subscribe_session(session_id="<SESSION_ID>")
 ```
 
-This claims the session so that webhook events are routed only to this Claude instance and not to other running instances.
+This claims the session so that webhook events are routed only to this Claude instance
+and not to other running instances. It also registers this instance's own port with the
+server and re-reads pending feedback, which is what makes a restart safe. Do not guess a
+port and do not pass `--callback-url`: the channel picks a free port because a second
+Claude instance must be able to run beside the first.
 
 **Portable path (OpenCode, or Claude Code without channel tools):**
 

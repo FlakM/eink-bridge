@@ -176,7 +176,8 @@ mutation-harness gradle retry.
 |---|---|---|
 | plan | landed | — |
 | 1 | landed | item 1 commit |
-| 2–11, s | queued | |
+| 2 | landed | item 2 commit |
+| 3–11, s | queued | |
 
 ## Log
 
@@ -193,3 +194,12 @@ mutation-harness gradle retry.
   URL (400), and is covered in `api_edge_test`. Two instances and the 404 are covered in
   `test_feedback_delivery.py`. Deviation from FIXME recorded as D1: registering on claim
   beats passing the URL to `push`, which cannot know the owning instance's port.
+
+- **Item 2, landed.** `send_webhook` retries three times (250 ms / 1 s / 4 s) on a
+  connection error or any non-2xx, counts `result="retried"`, and keeps the feedback
+  pending until a 2xx. The backoff is a field on `AppState` so `common::test_app` can zero
+  it — otherwise the existing metric test would wait five seconds to see a failure, and a
+  test that slow gets deleted. `/eink continue` now says, in the channel path, to call
+  `subscribe_session` again (which re-registers the callback and re-reads `/feedback`);
+  the portable path keeps the watcher. Proved by a receiver that refuses twice and then
+  accepts, plus an asset test that the continue section names both.

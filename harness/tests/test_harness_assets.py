@@ -85,5 +85,29 @@ class SkillTests(unittest.TestCase):
         self.assertIn("EINK_PR_SOCKET", body)
 
 
+class ContinueFlowTests(unittest.TestCase):
+    """`/eink continue` must survive a Claude restart.
+
+    Subscriptions live in memory in the channel, so a restarted instance silently
+    acknowledges nothing until it claims the session again. The flow has to re-subscribe
+    (which also re-registers the callback) and read the durable pending feedback.
+    """
+
+    def section(self, heading, next_heading):
+        text = (SKILLS / "eink" / "SKILL.md").read_text()
+        return text[text.index(heading):text.index(next_heading)]
+
+    def test_continue_resubscribes_and_reads_pending_feedback(self):
+        section = self.section("## Steps for `/eink continue", "## Steps for a new push")
+        self.assertIn("subscribe_session", section)
+        self.assertIn("/feedback", section)
+
+    def test_the_channel_registers_its_own_port(self):
+        section = self.section("### 2. Connect delivery", "**Portable path")
+        self.assertNotIn("$CHANNEL_PORT", section,
+                         "a guessed port is not the port the channel is listening on")
+        self.assertIn("subscribe_session", section)
+
+
 if __name__ == "__main__":
     unittest.main()
