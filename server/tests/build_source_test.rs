@@ -99,8 +99,13 @@ fn every_file_a_test_reads_is_copied_into_the_build() {
 fn the_allowlist_matches_the_filter_in_the_flake() {
     // Guard the guard: if the filter gains or loses a clause, this test is describing
     // something that is no longer true.
-    let flake =
-        std::fs::read_to_string(server_root().join("../flake.nix")).expect("a readable flake");
+    // The flake is not part of the derivation - that is the point of the filter - so this
+    // runs in the repository and steps aside in the build. `just ci` runs the tests before
+    // `nix build`, which is where it needs to speak.
+    let Ok(flake) = std::fs::read_to_string(server_root().join("../flake.nix")) else {
+        eprintln!("no flake.nix beside the crate: skipping the filter-text check");
+        return;
+    };
     for clause in [
         "filterCargoSources",
         "/assets",

@@ -64,6 +64,11 @@ Handwriting recognition uses **Ollama** with `qwen2.5vl:7b` (vision model). Tess
 | `EINK_OLLAMA_URL` | `http://localhost:11434` | Ollama base URL |
 | `EINK_OLLAMA_MODEL` | `glm-ocr` | Model name |
 | `EINK_OCR_DEBUG` | unset | If set, saves PNG to `/tmp/eink-ocr-*.png` |
+| `EINK_OCR_TIMEOUT_SECONDS` | `120` (max 300) | Bound on one local OCR attempt |
+| `EINK_OCR_INTERACTIVE_TIMEOUT_SECONDS` | `20` (max 120) | The shorter bound for a call a reader is waiting on |
+
+Both bounds fall back to their default on an unusable value; a `0` would abandon every
+attempt before it was sent, which reads as "the model never answers".
 
 ### Timing
 
@@ -188,9 +193,9 @@ just test-android        # Android unit tests only (no coverage)
 
 Use `/coverage` skill for automated analysis of gaps.
 
-Last measured (overnight pass): **89.8% of Rust lines** — and **93.7%** of everything
-that is not an entrypoint or a benchmark. Together with 228 Android unit tests and 38
-mutations all caught by `just test-mutations`.
+Last measured: **90.8% of Rust lines** — and **~95%** of everything that is not an
+entrypoint or a benchmark. Together with 234 Android unit tests and 53 mutations all caught
+by `just test-mutations`.
 
 Fully covered: `api.rs`, `metrics.rs`, `render/chunks.rs`, `render/browser.rs`,
 `render/html_utils.rs`, `render/models.rs`. Behind them: `reanchor.rs` 99.6%,
@@ -215,6 +220,11 @@ be exercised in a unit test without racing every other test in the binary.
 | OCR: strokes, providers, the engine | `cargo test ocr::` then `cargo test --test ocr_handwriting_test -- --ignored` |
 | WebSocket gauge leak | `cargo test --test ws_metrics_test` |
 | The tablet's own logic | `just test-android` |
+| WebSocket heartbeat / half-open sockets | `cargo test --test ws_heartbeat_test` |
+| Startup failures (port in use) | `cargo test --test startup_test` |
+| Pagination and the session list | `cargo test --test api_edge_test` (`pages_` / `a_page_size`) |
+| Session write durability | `cargo test --lib session::write_queue` and the `api_edge_test` durability case |
+| A file read by a test is in the nix source | `cargo test --test build_source_test` |
 | Metric names and the metrics reference | `cargo test metrics::` |
 | `render.rs` diagram parsing | `cargo test render::tests::graph` / `mindmap` / `mermaid` |
 | `app.rs` handlers | `cargo test --test health_test` |
@@ -370,6 +380,12 @@ just apk-install   # build + install on connected device
 
 ### Metrics
 
+`GET /api/sessions` takes `limit` and `cursor` and answers with an `x-next-cursor`
+header; without `limit` it returns the whole list, which is what older clients expect. The
+order is total — starred, `updated_at`, id — so a cursor cannot duplicate or skip a
+session. `GET /api/health` carries a `ready` block: OCR availability, whether the state
+directory can be written (probed, not assumed), session counts, and the version.
+
 The `/metrics` endpoint (port 3333) exposes all Prometheus metrics in text format — useful for checking live state without logs:
 
 ```bash
@@ -407,14 +423,39 @@ When adding a new feature to `render.rs`:
 
 ## Known weak points
 
-Areas that work today but could bite under load or after refactoring:
+### No authentication
 
-### Notifier / WS sender map leak — fixed
+The server binds `0.0.0.0:3333` with no auth (see Security notes). That was acceptable
+while the API was effectively read-only; it now includes a destructive `remove` and
+`/metrics`. A token for non-local callers is the obvious next step, and it has a cost: the
+tablet would have to carry it.
 
-`expire_stale` now wakes waiters with an expiry message and cleans both maps for every
-expired id, so the expiry loop in `main.rs` no longer leaks an entry per stale session.
-`tests/ws_metrics_test.rs` holds the connection gauge to zero, which is the observable
-half of the same concern.
+### A crash between the write and the response still loses that one write
+
+Writes are queued so the session lock is never held during disk I/O, and a successful
+*mutation* response waits for the write to land before it is sent. A SIGKILL inside that
+window loses the last change — the one the client was about to be told had landed. The
+window is one handler rather than the whole queue, but it is not zero.
+
+### `annotation_images` are machine paths
+
+The field is a filesystem path on the server. `annotation_urls` carries the same images as
+addresses, so a remote consumer can fetch them; the path field stays for the local agent
+and for compatibility, and nothing new should depend on it.
+
+### Free strokes bind by proximity, with a cap
+
+A stroke the reader never bound attaches to the nearest paragraph within 300 units and is
+submitted unanchored beyond it. That cap trades one mistake for another: a note far past
+the end of the page is no longer attributed to the last paragraph (it is still submitted
+and still visible). If margin notes turn out to sit further away, the cap is a parameter,
+not a constant buried in the logic.
+
+### Long-poll waiters hold a task each
+
+Every waiting request parks a task and a `Notify` for up to `long_poll_seconds` (30 s by
+default), and the notifier is cleaned up on submit, cancel and expiry. Fine for a handful
+of observers; it would need a rethink for hundreds.
 
 ### No server-side WebSocket heartbeat
 

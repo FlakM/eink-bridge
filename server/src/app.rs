@@ -1285,45 +1285,40 @@ fn bad_request(message: String) -> Response {
     (StatusCode::BAD_REQUEST, message).into_response()
 }
 
-async fn render_session(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
-    let mgr = state.sessions.read().await;
-    match mgr.get(&id) {
-        Some(s) => {
-            tracing::debug!(id = %id, "rendering session HTML");
-            Ok(Html(render::to_eink_html(&s.content, &s.id).replace(
-                "</head>",
-                &format!(
-                    "<meta name=\"eink-version\" content=\"{}\"></head>",
-                    s.version
-                ),
-            )))
-        }
-        None => {
-            tracing::debug!(id = %id, "render: session not found");
-            Err(StatusCode::NOT_FOUND)
-        }
-    }
+async fn render_session(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    // Take what rendering needs and drop the lock: rendering a large document used to hold
+    // the read lock, so every mutation waited behind it.
+    let snapshot = {
+        let mgr = state.sessions.read().await;
+        mgr.get(&id)
+            .map(|s| (s.content.clone(), s.id.clone(), s.version))
+    };
+    let Some((content, session_id, version)) = snapshot else {
+        tracing::debug!(id = %id, "render: session not found");
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    tracing::debug!(id = %id, "rendering session HTML");
+    Html(render::to_eink_html(&content, &session_id).replace(
+        "</head>",
+        &format!("<meta name=\"eink-version\" content=\"{version}\"></head>"),
+    ))
+    .into_response()
 }
 
-async fn render_review(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
-    let mgr = state.sessions.read().await;
-    match mgr.get(&id) {
-        Some(s) => {
-            tracing::debug!(id = %id, "rendering browser review HTML");
-            Ok(Html(render::to_browser_html(&s.content, &s.id).replace(
-                "</head>",
-                &format!(
-                    "<meta name=\"eink-version\" content=\"{}\"></head>",
-                    s.version
-                ),
-            )))
-        }
-        None => {
-            tracing::debug!(id = %id, "review: session not found");
-            Err(StatusCode::NOT_FOUND)
-        }
-    }
+async fn render_review(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    let snapshot = {
+        let mgr = state.sessions.read().await;
+        mgr.get(&id)
+            .map(|s| (s.content.clone(), s.id.clone(), s.version))
+    };
+    let Some((content, session_id, version)) = snapshot else {
+        tracing::debug!(id = %id, "review: session not found");
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    tracing::debug!(id = %id, "rendering browser review HTML");
+    Html(render::to_browser_html(&content, &session_id).replace(
+        "</head>",
+        &format!("<meta name=\"eink-version\" content=\"{version}\"></head>"),
+    ))
+    .into_response()
 }
