@@ -38,10 +38,12 @@ internal data class SessionListState(
 internal class SessionViewModel(app: Application) : AndroidViewModel(app) {
     private val sessionRepo = SessionRepository(app)
     private val docCache = DocumentCache(app)
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(5, TimeUnit.SECONDS)
-        .readTimeout(10, TimeUnit.SECONDS)
-        .build()
+    private val client = HttpClients.withToken(
+        OkHttpClient.Builder()
+            .connectTimeout(5, TimeUnit.SECONDS)
+            .readTimeout(10, TimeUnit.SECONDS)
+            .build()
+    ) { sessionRepo.token() }
 
     private val _state = MutableStateFlow(SessionListState())
     val state: StateFlow<SessionListState> = _state.asStateFlow()

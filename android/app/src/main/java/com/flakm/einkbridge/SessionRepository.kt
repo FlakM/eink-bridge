@@ -14,6 +14,15 @@ internal class SessionRepository(context: Context) {
         prefs.edit().putString("server_url", url).apply()
     }
 
+    /** Empty means the server is on loopback or has no token configured. */
+    fun token(): String = prefs.getString("token", "") ?: ""
+
+    fun saveToken(token: String) {
+        val trimmed = token.trim()
+        if (trimmed.isEmpty()) prefs.edit().remove("token").apply()
+        else prefs.edit().putString("token", trimmed).apply()
+    }
+
     fun pushgatewayUrl(): String =
         prefs.getString("pushgateway_url", "http://odroid:9091") ?: "http://odroid:9091"
 

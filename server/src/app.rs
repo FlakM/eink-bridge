@@ -53,6 +53,9 @@ pub struct AppState {
     /// The one client every webhook goes out through, with a bound: a receiver that
     /// never answers used to hold a task forever.
     pub http: reqwest::Client,
+    /// When set, a caller that is not on this machine must present it. Loopback stays
+    /// open so the CLI and the tablet on the same host need no configuration.
+    pub token: Option<String>,
     /// Waits after a failed webhook attempt. Injectable so a test can prove the retry
     /// happens without spending five seconds doing it.
     pub webhook_backoff: [Duration; 3],
@@ -163,6 +166,10 @@ impl AppState {
             ocr_engine,
             ws_heartbeat_seconds,
             http,
+            token: std::env::var("EINK_TOKEN")
+                .ok()
+                .map(|token| token.trim().to_string())
+                .filter(|token| !token.is_empty()),
             webhook_backoff: [
                 Duration::from_millis(250),
                 Duration::from_secs(1),
@@ -358,6 +365,159 @@ use crate::api::AnnotationGroup;
 
 type SubmitError = (StatusCode, String);
 
+/// A black-box comparison, so a wrong token cannot be found one byte at a time.
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut difference = 0u8;
+    for (a, b) in left.iter().zip(right) {
+        difference |= a ^ b;
+    }
+    difference == 0
+}
+
+/// Where a WebView or a browser socket may carry the token in the URL, because neither
+/// can set an `Authorization` header on the request that matters.
+fn query_token_allowed(path: &str) -> bool {
+    path.starts_with("/session/")
+        || path.starts_with("/ws/")
+        || (path.starts_with("/api/sessions/") && path.contains("/annotation/"))
+}
+
+fn query_value<'a>(query: &'a str, key: &str) -> Option<&'a str> {
+    query.split('&').find_map(|pair| {
+        let (name, value) = pair.split_once('=')?;
+        (name == key).then_some(value)
+    })
+}
+
+/// `%XX` and `+`, because the WebSocket URL is built with `URLEncoder` and the token may
+/// legitimately contain a character that has to be escaped.
+fn percent_decode(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'%' if index + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[index + 1..index + 3]).ok()?;
+                out.push(u8::from_str_radix(hex, 16).ok()?);
+                index += 3;
+            }
+            b'+' => {
+                out.push(b' ');
+                index += 1;
+            }
+            byte => {
+                out.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+fn cookie_value<'a>(header: &'a str, key: &str) -> Option<&'a str> {
+    header.split(';').find_map(|pair| {
+        let pair = pair.trim();
+        let (name, value) = pair.split_once('=')?;
+        (name == key).then_some(value)
+    })
+}
+
+/// The trust boundary: this API can read, edit and delete reviews, and it binds the LAN.
+///
+/// Loopback is exempt because the CLI and the channel run on the server's own machine.
+/// Everything else presents `Authorization: Bearer`, a `?token=` where the WebView needs
+/// it, or the `HttpOnly` cookie the page set. No token configured = today's open server.
+async fn require_token(
+    State(state): State<AppState>,
+    request: Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let Some(token) = state.token.clone() else {
+        return next.run(request).await;
+    };
+    let path = request.uri().path().to_string();
+    // Liveness and the metrics scrape are read-only counters, and a monitor that needs
+    // the token to say "alive" is a monitor nobody finishes configuring.
+    if path == "/api/health" || path == "/metrics" {
+        return next.run(request).await;
+    }
+
+    let caller = request
+        .extensions()
+        .get::<Caller>()
+        .and_then(|caller| caller.0)
+        .or_else(|| {
+            request
+                .extensions()
+                .get::<ConnectInfo<SocketAddr>>()
+                .map(|connected| connected.0.ip())
+        });
+    if caller.is_some_and(|ip| ip.is_loopback()) {
+        return next.run(request).await;
+    }
+
+    let headers = request.headers();
+    let bearer = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+    let from_query = query_token_allowed(&path)
+        .then(|| {
+            request
+                .uri()
+                .query()
+                .and_then(|query| query_value(query, "token"))
+        })
+        .flatten()
+        .and_then(percent_decode);
+    let from_cookie = headers
+        .get(header::COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| cookie_value(value, "eink_token"));
+
+    let authorized = [bearer, from_query.as_deref(), from_cookie]
+        .into_iter()
+        .flatten()
+        .any(|candidate| constant_time_eq(candidate.as_bytes(), token.as_bytes()));
+    if !authorized {
+        crate::metrics::HTTP_REQUESTS
+            .with_label_values(&["GET", "unauthorized", "401"])
+            .inc_by(0);
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let mut response = next.run(request).await;
+    // The page's images and its JS fetches carry no Authorization header; the cookie is
+    // what makes them work without putting the token in the markup.
+    if path.starts_with("/session/") {
+        if let Ok(cookie) = header::HeaderValue::from_str(&format!(
+            "eink_token={token}; Path=/; HttpOnly; SameSite=Strict"
+        )) {
+            response.headers_mut().append(header::SET_COOKIE, cookie);
+        }
+    }
+    response
+}
+
+#[cfg(test)]
+mod auth_tests {
+    use super::{percent_decode, query_token_allowed};
+
+    #[test]
+    fn a_query_token_is_decoded_and_only_allowed_where_a_header_cannot_go() {
+        assert_eq!(percent_decode("s3%2Bcret").as_deref(), Some("s3+cret"));
+        assert_eq!(percent_decode("a+b").as_deref(), Some("a b"));
+        assert!(query_token_allowed("/session/abc"));
+        assert!(query_token_allowed("/ws/abc"));
+        assert!(query_token_allowed("/api/sessions/abc/annotation/0"));
+        assert!(!query_token_allowed("/api/sessions"));
+    }
+}
+
 pub fn build_app(state: AppState) -> Router {
     // Export the metrics from the first scrape rather than from the first event: a
     // labelled series has no children until something sets a label, so a quiet server
@@ -399,6 +559,10 @@ pub fn build_app(state: AppState) -> Router {
         .route("/ws/{id}", get(crate::ws::ws_handler))
         .route("/session/{id}", get(render_session))
         .route("/review/{id}", get(render_review))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_token,
+        ))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             durable_writes,

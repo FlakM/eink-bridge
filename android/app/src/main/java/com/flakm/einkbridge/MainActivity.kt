@@ -62,10 +62,12 @@ class MainActivity : AppCompatActivity() {
     private var savedScrollY: Int = 0
     private lateinit var ocrOverlay: View
     private lateinit var ocrStatus: TextView
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(5, TimeUnit.SECONDS)
-        .readTimeout(10, TimeUnit.SECONDS)
-        .build()
+    private val client = HttpClients.withToken(
+        OkHttpClient.Builder()
+            .connectTimeout(5, TimeUnit.SECONDS)
+            .readTimeout(10, TimeUnit.SECONDS)
+            .build()
+    ) { sessionRepo.token() }
 
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private lateinit var sessionViewModel: SessionViewModel
@@ -95,7 +97,7 @@ class MainActivity : AppCompatActivity() {
         }
         WebView.setWebContentsDebuggingEnabled(true)
         sessionRepo = SessionRepository(this)
-        submissionManager = SubmissionManager()
+        submissionManager = SubmissionManager(client)
         docCache = DocumentCache(this)
         sessionViewModel = ViewModelProvider(this)[SessionViewModel::class.java]
         serverUrl = sessionViewModel.serverUrl
@@ -115,6 +117,7 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.btnCancelProcessing).setOnClickListener { cancelProcessing() }
 
         serverInput.setText(serverUrl)
+        findViewById<EditText>(R.id.tokenInput).setText(sessionRepo.token())
         metricsInput.setText(pushgatewayUrl)
         serverUrlText.text = if (serverUrl.isNotEmpty()) "Connected: $serverUrl" else "Not connected"
 
@@ -184,6 +187,7 @@ class MainActivity : AppCompatActivity() {
 
         findViewById<Button>(R.id.connectBtn).setOnClickListener {
             val url = serverInput.text.toString().trimEnd('/')
+            sessionRepo.saveToken(findViewById<EditText>(R.id.tokenInput).text.toString())
             if (url.isNotEmpty()) {
                 serverUrl = url
                 sessionViewModel.setServerUrl(url)
@@ -608,6 +612,31 @@ class MainActivity : AppCompatActivity() {
         epdHandler.postDelayed(epdRestoreRunnable!!, delayMs)
     }
 
+    /**
+     * The page's images and its own fetches cannot carry an Authorization header, so the
+     * cookie is set before the WebView asks for anything. The header still goes on the
+     * main frame; the cookie exists for the subresources.
+     */
+    private fun installSessionCookie() {
+        val token = sessionRepo.token().trim()
+        if (token.isEmpty()) return
+        android.webkit.CookieManager.getInstance().setCookie(serverUrl, "eink_token=$token")
+        android.webkit.CookieManager.getInstance().flush()
+    }
+
+    private fun loadSessionPage(sessionId: String) {
+        installSessionCookie()
+        val token = sessionRepo.token().trim()
+        if (token.isEmpty()) {
+            loadSessionPage(sessionId)
+        } else {
+            webView.loadUrl(
+                "$serverUrl/session/$sessionId",
+                mapOf("Authorization" to "Bearer $token"),
+            )
+        }
+    }
+
     private fun openSession(sessionId: String) {
         Log.i(TAG, "openSession id=$sessionId serverUrl=$serverUrl")
         MetricsReporter.recordSessionView()
@@ -632,6 +661,7 @@ class MainActivity : AppCompatActivity() {
         wsClient = WebSocketClient(
             serverUrl = serverUrl,
             sessionId = sessionId,
+            token = sessionRepo.token(),
             onMessage = { type, json -> runOnUiThread {
                 if (currentSessionId == sessionId) handleWsMessage(type, json)
             } },
@@ -641,10 +671,10 @@ class MainActivity : AppCompatActivity() {
         webView.visibility = View.VISIBLE
         strokeView.visibility = View.VISIBLE
         penToolbar.visibility = View.VISIBLE
-        webView.loadUrl("$serverUrl/session/$sessionId")
+        loadSessionPage(sessionId)
         val buf = StrokeBuffer()
         sessionRepo.loadStrokes(sessionId, buf)
-        val ocrClient = OcrClient { serverUrl }
+        val ocrClient = OcrClient({ serverUrl }, { sessionRepo.token() })
         val overlay = PenOverlay(webView, penToolbar, strokeView, buf = buf,
             onStrokesChanged = { sessionRepo.saveStrokes(sessionId, buf) },
         )
@@ -856,7 +886,7 @@ class MainActivity : AppCompatActivity() {
                 if (serverVersion > loadedVersion) {
                     Log.i(TAG, "reconnect: server version=$serverVersion > loaded=$loadedVersion — reloading")
                     loadedVersion = serverVersion
-                    webView.loadUrl("$serverUrl/session/$sessionId")
+                    loadSessionPage(sessionId)
                 } else {
                     Log.d(TAG, "reconnect: version up to date ($serverVersion)")
                 }
@@ -1108,7 +1138,7 @@ class MainActivity : AppCompatActivity() {
                     loadedVersion = version
                     ocrOverlay.visibility = View.GONE
                     savedScrollY = webView.scrollY
-                    webView.loadUrl("$serverUrl/session/$sid")
+                    loadSessionPage(sid)
                     showRoutineStatus("Document updated")
                     notifyDocumentUpdated()
                 }

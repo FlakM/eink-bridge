@@ -1796,3 +1796,109 @@ async fn a_progress_line_must_match_the_feedback_and_fit_on_a_line() {
         StatusCode::NO_CONTENT
     );
 }
+
+#[tokio::test]
+async fn a_token_keeps_the_lan_out_and_this_machine_in() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = AppState::with_config(dir.path().to_path_buf(), 5);
+    state.token = Some("s3+cret".into());
+    let app = build_app(state);
+
+    // No connection info in this harness, so the caller is unknown -- and unknown is
+    // treated as remote, which is the safe direction.
+    let (status, _) = send(
+        &app,
+        Request::get("/api/sessions").body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _) = send(
+        &app,
+        Request::post("/api/sessions")
+            .body(Body::from("# private"))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "a remote create must not land"
+    );
+
+    let with = |value: &str| {
+        Request::get("/api/sessions")
+            .header("authorization", value)
+            .body(Body::empty())
+            .unwrap()
+    };
+    let (status, _) = send(&app, with("Bearer wrong")).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _) = send(&app, with("Bearer s3+cret")).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // A cookie is how the page's own images and fetches authenticate.
+    let (status, _) = send(
+        &app,
+        Request::get("/api/sessions")
+            .header("cookie", "theme=paper; eink_token=s3+cret")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Loopback needs nothing: the CLI and the channel run on this machine.
+    let (status, _) = send(
+        &app,
+        Request::get("/api/sessions")
+            .extension(from_this_machine())
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // `?token=` is only for the paths a WebView cannot put a header on.
+    let (status, _) = send(
+        &app,
+        Request::get("/api/sessions?token=s3%2Bcret")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let (status, body) = send(
+        &app,
+        Request::post("/api/sessions")
+            .extension(from_this_machine())
+            .body(Body::from("# Page"))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let page = app
+        .clone()
+        .oneshot(
+            Request::get(format!("/session/{id}?token=s3%2Bcret"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(page.status(), StatusCode::OK);
+    let cookie = page
+        .headers()
+        .get("set-cookie")
+        .expect("the page sets the cookie its subresources need")
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(cookie.contains("eink_token=s3+cret"), "{cookie}");
+    assert!(cookie.contains("HttpOnly"), "{cookie}");
+}

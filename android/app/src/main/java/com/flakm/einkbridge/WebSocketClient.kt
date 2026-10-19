@@ -14,6 +14,7 @@ private const val TAG = "EinkWS"
 class WebSocketClient(
     private val serverUrl: String,
     private val sessionId: String,
+    private val token: String? = null,
     private val onMessage: (type: String, json: JSONObject) -> Unit,
     private val onClosed: () -> Unit,
 ) {
@@ -30,9 +31,7 @@ class WebSocketClient(
     fun connect() {
         stopped = false
         handler.removeCallbacks(retry)
-        val wsUrl = serverUrl
-            .replaceFirst("http://", "ws://")
-            .replaceFirst("https://", "wss://") + "/ws/$sessionId"
+        val wsUrl = HttpClients.websocketUrl(serverUrl, sessionId, token)
         Log.i(TAG, "connecting to $wsUrl")
         val request = Request.Builder().url(wsUrl).build()
         ws = client.newWebSocket(request, object : WebSocketListener() {

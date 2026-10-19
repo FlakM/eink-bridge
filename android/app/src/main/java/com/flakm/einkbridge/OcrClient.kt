@@ -20,16 +20,23 @@ import java.util.concurrent.TimeUnit
 private const val TAG = "OcrClient"
 internal const val OCR_OPERATION_TIMEOUT_MS = 140_000L
 
-internal class OcrClient(private val getServerUrl: () -> String) {
-    private val http = buildHttpClient()
+internal class OcrClient(
+    private val getServerUrl: () -> String,
+    private val getToken: () -> String? = { null },
+) {
+    private val http = buildHttpClient(getToken)
 
     companion object {
-        internal fun buildHttpClient(): OkHttpClient = OkHttpClient.Builder()
-            .connectTimeout(3, TimeUnit.SECONDS)
-            // The server allows up to 120 seconds for a cold Ollama request.
-            .readTimeout(130, TimeUnit.SECONDS)
-            .callTimeout(135, TimeUnit.SECONDS)
-            .build()
+        internal fun buildHttpClient(getToken: () -> String? = { null }): OkHttpClient =
+            HttpClients.withToken(
+                OkHttpClient.Builder()
+                    .connectTimeout(3, TimeUnit.SECONDS)
+                    // The server allows up to 120 seconds for a cold Ollama request.
+                    .readTimeout(130, TimeUnit.SECONDS)
+                    .callTimeout(135, TimeUnit.SECONDS)
+                    .build(),
+                getToken,
+            )
     }
 
     suspend fun recognize(strokes: List<Stroke>): String? {

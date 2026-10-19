@@ -94,6 +94,16 @@
                 android:textSize="16sp" />
         </LinearLayout>
 
+        <!-- Only needed when the server is reached over the LAN with EINK_TOKEN set. -->
+        <EditText
+            android:id="@+id/tokenInput"
+            android:layout_width="match_parent"
+            android:layout_height="40dp"
+            android:hint="API token (LAN only, optional)"
+            android:textSize="14sp"
+            android:inputType="textPassword"
+            android:padding="8dp" />
+
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"

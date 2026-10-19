@@ -1513,8 +1513,15 @@ async fn the_cli_narrates_progress_for_the_pending_feedback() {
     // The pending feedback is the common case; the agent should not have to repeat its id.
     let (code, _, stderr) = run_cli_raw(
         &[
-            "--server", &server, "progress", &id, "Read 1 note on *Checks*", "--step", "1",
-            "--of", "3",
+            "--server",
+            &server,
+            "progress",
+            &id,
+            "Read 1 note on *Checks*",
+            "--step",
+            "1",
+            "--of",
+            "3",
         ],
         &[],
     )
@@ -1525,7 +1532,13 @@ async fn the_cli_narrates_progress_for_the_pending_feedback() {
     // one the reader is watching.
     let (code, _, stderr) = run_cli_raw(
         &[
-            "--server", &server, "progress", &id, "Rewriting", "--feedback-id", "already-answered",
+            "--server",
+            &server,
+            "progress",
+            &id,
+            "Rewriting",
+            "--feedback-id",
+            "already-answered",
         ],
         &[],
     )
