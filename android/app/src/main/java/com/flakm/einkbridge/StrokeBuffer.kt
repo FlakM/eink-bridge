@@ -328,6 +328,26 @@ internal class StrokeBuffer {
 
 internal data class OcrResult(val docX: Float, val docY: Float, val text: String, val minDocY: Float = docY, val strokeIndices: Set<Int> = emptySet())
 
+/**
+ * How far a cluster's ink has been moved on screen at this instant.
+ *
+ * A cluster may be dragged on its own, or be part of a bound group that is being dragged.
+ * The label is drawn from the cluster's own coordinates, so it has to know about the
+ * group's live offset too -- otherwise moving the group leaves its OCR label behind until
+ * the drag is committed (and, before the commit learned to move the results, for good).
+ */
+internal fun liveClusterOffset(
+    clusterIdx: Int,
+    strokeIndices: Set<Int>,
+    clusterOffsets: Map<Int, Pair<Float, Float>>,
+    groups: List<BindGroup>,
+    groupOffsets: Map<Int, Pair<Float, Float>>,
+): Pair<Float, Float> {
+    clusterOffsets[clusterIdx]?.let { return it }
+    val group = groups.firstOrNull { group -> group.strokeIndices.any { it in strokeIndices } }
+    return group?.let { groupOffsets[it.id] } ?: (0f to 0f)
+}
+
 private data class StrokeBBox(val l: Float, val t: Float, val r: Float, val b: Float)
 
 private fun strokeBBox(stroke: Stroke): StrokeBBox {

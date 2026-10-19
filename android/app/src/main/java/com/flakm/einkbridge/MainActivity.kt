@@ -430,7 +430,14 @@ class MainActivity : AppCompatActivity() {
      * Updates UI indicators and pushes the new mode to [PenOverlay] atomically.
      */
     internal fun setToolMode(mode: ToolMode) {
-        if (toolMode == mode) return
+        if (toolMode == mode) {
+            // Even when the activity already thinks it is in this mode, the overlay is
+            // told: the two can drift (a mode assigned directly during teardown, a gesture
+            // the system interrupted), and a silent no-op is how a stuck mode becomes
+            // permanent. Setting the same mode twice is free.
+            penOverlay?.setMode(mode)
+            return
+        }
         toolMode = mode
         colorDrawer.visibility = View.GONE
         setModeButtonActive(btnLink, R.id.dotLink, mode == ToolMode.TAG)

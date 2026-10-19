@@ -319,7 +319,11 @@ internal class StrokeView @JvmOverloads constructor(
         }
 
         for ((idx, result) in ocrResults.withIndex()) {
-            val strokeOff = clusterStrokeOffsets[idx] ?: (0f to 0f)
+            // The cluster's own drag, or the drag of a group it belongs to: an OCR label
+            // must never be the one thing left behind when the ink moves.
+            val strokeOff = liveClusterOffset(
+                idx, result.strokeIndices, clusterStrokeOffsets, bindGroups, groupStrokeOffsets,
+            )
             val labelOff = clusterLabelOffsets[idx] ?: (0f to 0f)
             val sx = t.docToScreenX(result.docX + strokeOff.first) + labelOff.first * t.scale
             val pad = 10f

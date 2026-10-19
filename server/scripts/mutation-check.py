@@ -876,18 +876,53 @@ CASES = [
         "gradle:PenOverlayTest",
     ),
     (
-        "a resize keeps the finger the rotation cancelled",
+        "a cancelled drag is thrown away instead of committed",
         text_edit(
             PENOVERLAY,
-            """        fingerDown = false
-        applyDrawingState()
-    }
-
-    /** Lifecycle hook — call from Activity.onResume. */""",
-            """        applyDrawingState()
-    }
-
-    /** Lifecycle hook — call from Activity.onResume. */""",
+            """                        when {
+                            dragClusterIdx != null -> commitClusterOffset(dragClusterIdx!!)
+                            dragGroupId != null -> commitGroupOffset(dragGroupId!!)
+                        }
+                        dragLabel = null; dragGroupId = null; dragClusterIdx = null""",
+            """                        if (event.actionMasked == MotionEvent.ACTION_UP) {
+                            when {
+                                dragClusterIdx != null -> commitClusterOffset(dragClusterIdx!!)
+                                dragGroupId != null -> commitGroupOffset(dragGroupId!!)
+                            }
+                        }
+                        dragLabel = null; dragGroupId = null; dragClusterIdx = null""",
+        ),
+        "gradle:PenOverlayTest",
+    ),
+    (
+        "a moved group leaves its OCR label behind",
+        text_edit(
+            PENOVERLAY,
+            """            for (i in ocrResults.indices) {
+                val result = ocrResults[i]
+                if (result.strokeIndices.any { it in group.strokeIndices }) {
+                    ocrResults[i] = result.copy(
+                        docX = result.docX + dx,
+                        docY = result.docY + dy,
+                        minDocY = result.minDocY + dy,
+                    )
+                }
+            }
+""",
+            "",
+        ),
+        "gradle:PenOverlayTest",
+    ),
+    (
+        "a resize mid-drag drops the drag instead of committing it",
+        text_edit(
+            PENOVERLAY,
+            """        when {
+            dragClusterIdx != null -> commitClusterOffset(dragClusterIdx!!)
+            dragGroupId != null -> commitGroupOffset(dragGroupId!!)
+        }
+        dragLabel = null""",
+            """        dragLabel = null""",
         ),
         "gradle:PenOverlayTest",
     ),

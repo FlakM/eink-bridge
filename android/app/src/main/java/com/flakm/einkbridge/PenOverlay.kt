@@ -667,11 +667,14 @@ internal class PenOverlay(
                         }
                     }
                     MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                        if (event.actionMasked == MotionEvent.ACTION_UP) {
-                            when {
-                                dragClusterIdx != null -> commitClusterOffset(dragClusterIdx!!)
-                                dragGroupId != null -> commitGroupOffset(dragGroupId!!)
-                            }
+                        // A cancelled drag (a rotation, the system taking the gesture) is
+                        // still a drag the reader performed. Committing it keeps the ink and
+                        // everything anchored to it together; leaving the live offset
+                        // uncommitted meant the next path that clears offsets snapped the
+                        // ink back while the OCR label stayed where the drag left it.
+                        when {
+                            dragClusterIdx != null -> commitClusterOffset(dragClusterIdx!!)
+                            dragGroupId != null -> commitGroupOffset(dragGroupId!!)
                         }
                         dragLabel = null; dragGroupId = null; dragClusterIdx = null
                     }
@@ -763,14 +766,41 @@ internal class PenOverlay(
             Log.i("EinkDraw", "onViewResized: clearing a finger that the resize cancelled")
         }
         fingerDown = false
+        abandonArmedGesture()
         applyDrawingState()
+    }
+
+    /**
+     * Drop any gesture the system interrupted.
+     *
+     * A rotation cancels touches, but the *state* a gesture armed -- a drag target, a lasso
+     * path, a page-wide highlight -- is only unwound by the UP path. Leaving it armed is
+     * what made mode switching feel wedged: a stale lasso kept the page highlighted and a
+     * stale drag target swallowed the next tap in select mode.
+     */
+    private fun abandonArmedGesture() {
+        // Committed, not dropped: the same rule as a cancelled drag. Dropping the target
+        // but leaving the live offset behind draws the ink where it was dragged to and
+        // keeps the data where it was, which is the bug this class of state produces.
+        when {
+            dragClusterIdx != null -> commitClusterOffset(dragClusterIdx!!)
+            dragGroupId != null -> commitGroupOffset(dragGroupId!!)
+        }
+        dragLabel = null
+        dragGroupId = null
+        dragClusterIdx = null
+        strokeView?.setBindPath(null)
+        strokeView?.bindDrawingActive = false
+        strokeView?.invalidate()
+        bridge.unhighlightAll()
     }
 
     /** Lifecycle hook — call from Activity.onResume. */
     fun onResumed() {
         paused = false
-        // Nothing can be in flight across a pause/resume either.
-        fingerDown = false
+        // No need to clear the finger here: `onPaused` already did, and a pause is what
+        // precedes every resume. (The mutation run showed this line could be deleted with
+        // no test noticing, which is the definition of a line that does not belong.)
         if (!initialized) initController()
         applyDrawingState()
     }
@@ -778,6 +808,10 @@ internal class PenOverlay(
     /** Lifecycle hook — call from Activity.onPause. */
     fun onPaused() {
         paused = true
+        // Nothing may be in flight across a pause: a drag target or a lasso left armed
+        // would be applied to whatever happens after the resume.
+        fingerDown = false
+        abandonArmedGesture()
         applyDrawingState()
     }
 
@@ -962,6 +996,19 @@ internal class PenOverlay(
                 markerDocY = group.markerDocY + dy,
                 strokeDocCenters = group.strokeDocCenters.map { (x, y) -> x + dx to y + dy },
             )
+            // OCR labels are anchored to stroke coordinates. A label covering strokes in
+            // this group has to move with them, or it is left pointing at empty space --
+            // which is what "the OCR label stays behind when the cluster is moved" was.
+            for (i in ocrResults.indices) {
+                val result = ocrResults[i]
+                if (result.strokeIndices.any { it in group.strokeIndices }) {
+                    ocrResults[i] = result.copy(
+                        docX = result.docX + dx,
+                        docY = result.docY + dy,
+                        minDocY = result.minDocY + dy,
+                    )
+                }
+            }
             tryMergeNearbyGroups(groupId)
         }
         notifyStrokeView()
@@ -1213,6 +1260,17 @@ internal class PenOverlay(
     private var dragStartY = 0f
     private var dragBaseDocX = 0f
     private var dragBaseDocY = 0f
+
+    /** Which drag, if any, is armed right now. For tests of the transition paths. */
+    internal fun debugDragTarget(): String? = when {
+        dragLabel != null -> "label"
+        dragGroupId != null -> "group"
+        dragClusterIdx != null -> "cluster"
+        else -> null
+    }
+
+    /** The OCR labels as they are stored, for callers that need to assert on them. */
+    internal fun ocrResultsSnapshot(): List<OcrResult> = ocrResults.toList()
 
     fun loadOcrResults(results: List<OcrResult>) {
         ocrResults.clear()

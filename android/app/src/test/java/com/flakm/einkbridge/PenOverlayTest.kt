@@ -88,6 +88,133 @@ class PenOverlayTest {
         assertFalse("a finger on the page still stops the pen", fix.mock.drawingEnabled)
     }
 
+    // ── A drag the system interrupts still counts ───────────────────────────────
+
+    @Test
+    fun aDragCancelledByTheSystemStillMovesTheInkAndItsLabel() {
+        // A rotation cancels the gesture. The drag is still one the reader performed, and
+        // the offset has to be committed: leaving it live meant any later path that clears
+        // offsets snapped the ink back while the OCR label -- anchored to the stored
+        // coordinates -- stayed where the drag had left it.
+        val ctx = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.app.Application>()
+        val buf = StrokeBuffer()
+        val mock = MockPenController(buf)
+        val webView = buildFakeWebView()
+        val strokeView = StrokeView(ctx)
+        val overlay = PenOverlay(
+            webView = webView, buf = buf, strokeView = strokeView,
+            controllerOverride = mock,
+            limitRectOverride = android.graphics.Rect(0, 0, 400, 600),
+            transformOverride = { ViewTransform() },
+        )
+        overlay.init()
+        mock.simulateStroke(listOf(200f to 300f, 210f to 305f, 220f to 310f))
+        overlay.loadOcrResults(
+            listOf(OcrResult(docX = 200f, docY = 300f, text = "hi", minDocY = 300f, strokeIndices = setOf(0))),
+        )
+        overlay.setMode(ToolMode.MOVE)
+
+        webView.dispatchTouchEvent(fingerEventAt(MotionEvent.ACTION_DOWN, 200f, 300f))
+        webView.dispatchTouchEvent(fingerEventAt(MotionEvent.ACTION_MOVE, 260f, 350f))
+        webView.dispatchTouchEvent(fingerEventAt(MotionEvent.ACTION_CANCEL, 260f, 350f))
+
+        assertTrue(
+            "the ink must be moved for real, not only on screen: ${buf.strokes[0].points}",
+            buf.strokes[0].points.first().first > 240f,
+        )
+        val labels = overlay.ocrResultsSnapshot()
+        assertTrue(
+            "and the OCR label must be moved with it: $labels",
+            labels.isNotEmpty() && labels[0].docX > 240f,
+        )
+    }
+
+    @Test
+    fun aResizeMidDragCommitsTheDragAndDisarmsIt() {
+        // A rotation during a drag leaves the drag target armed; the next tap in MOVE mode
+        // would continue the old drag. And the offset has to be committed, or the ink is
+        // drawn where it was dragged to while the data stays behind.
+        val ctx = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.app.Application>()
+        val buf = StrokeBuffer()
+        val mock = MockPenController(buf)
+        val webView = buildFakeWebView()
+        val strokeView = StrokeView(ctx)
+        val overlay = PenOverlay(
+            webView = webView, buf = buf, strokeView = strokeView,
+            controllerOverride = mock,
+            limitRectOverride = android.graphics.Rect(0, 0, 400, 600),
+            transformOverride = { ViewTransform() },
+        )
+        overlay.init()
+        val before = buildFakeWebView().let { 0f } // keep the fixture shape obvious
+        mock.simulateStroke(listOf(200f to (300f + before), 210f to 305f, 220f to 310f))
+        overlay.loadOcrResults(
+            listOf(OcrResult(docX = 200f, docY = 300f, text = "hi", minDocY = 300f, strokeIndices = setOf(0))),
+        )
+        overlay.setMode(ToolMode.MOVE)
+        webView.dispatchTouchEvent(fingerEventAt(MotionEvent.ACTION_DOWN, 200f, 300f))
+        webView.dispatchTouchEvent(fingerEventAt(MotionEvent.ACTION_MOVE, 260f, 350f))
+
+        // The rotation lands mid-drag: no finger-UP, no CANCEL, just a resize.
+        overlay.onViewResized()
+
+        assertTrue(
+            "the drag must be committed, not lost: ${buf.strokes[0].points}",
+            buf.strokes[0].points.first().first > 240f,
+        )
+        assertTrue(
+            "and its label must follow: ${overlay.ocrResultsSnapshot()}",
+            overlay.ocrResultsSnapshot().first().docX > 240f,
+        )
+        // And the drag is no longer armed: a fresh tap elsewhere exits select mode rather
+        // than continuing the old drag.
+        webView.dispatchTouchEvent(fingerEventAt(MotionEvent.ACTION_DOWN, 380f, 560f))
+        assertEquals("no drag target survives the resize", null, overlay.debugDragTarget())
+    }
+
+    @Test
+    fun draggingABoundGroupTakesItsOcrLabelAlong() {
+        // The reported bug: the ink and the group marker moved, but an OCR label covering
+        // those same strokes stayed where it was, because the label is drawn from the
+        // cluster's coordinates and nothing moved them with the group.
+        val ctx = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.app.Application>()
+        val buf = StrokeBuffer()
+        val mock = MockPenController(buf)
+        val webView = buildFakeWebView()
+        val strokeView = StrokeView(ctx)
+        val overlay = PenOverlay(
+            webView = webView, buf = buf, strokeView = strokeView,
+            controllerOverride = mock,
+            limitRectOverride = android.graphics.Rect(0, 0, 400, 600),
+            transformOverride = { ViewTransform() },
+        )
+        overlay.init()
+        mock.simulateStroke(listOf(200f to 300f, 210f to 305f, 220f to 310f))
+        overlay.loadOcrResults(
+            listOf(OcrResult(docX = 200f, docY = 300f, text = "hi", minDocY = 300f, strokeIndices = setOf(0))),
+        )
+        overlay.loadBindGroups(
+            listOf(BindGroup(7, Color.RED, setOf(0), listOf(1), emptyList(), 210f, 305f)),
+        )
+        overlay.setMode(ToolMode.MOVE)
+
+        webView.dispatchTouchEvent(fingerEventAt(MotionEvent.ACTION_DOWN, 210f, 305f))
+        webView.dispatchTouchEvent(fingerEventAt(MotionEvent.ACTION_MOVE, 310f, 405f))
+        webView.dispatchTouchEvent(fingerEventAt(MotionEvent.ACTION_UP, 310f, 405f))
+
+        assertTrue(
+            "the group's ink moved: ${buf.strokes[0].points}",
+            buf.strokes[0].points.first().first > 290f,
+        )
+        val label = overlay.ocrResultsSnapshot().single()
+        assertTrue(
+            "the OCR label must move with the ink it annotates: $label",
+            label.docX > 290f && label.docY > 390f,
+        )
+        val group = overlay.bindGroups.single()
+        assertTrue("and the group marker with it: $group", group.markerDocX > 290f)
+    }
+
     // ── MockPenController behaviour ────────────────────────────────────────────
 
     @Test
@@ -818,6 +945,15 @@ class PenOverlayTest {
         val fix = buildOverlay(limitRect = android.graphics.Rect(0, 0, 400, 600))
         fix.overlay.init()
         return fix
+    }
+
+    private fun fingerEventAt(action: Int, x: Float, y: Float): MotionEvent {
+        val pp = arrayOf(MotionEvent.PointerProperties().apply {
+            id = 0
+            toolType = MotionEvent.TOOL_TYPE_FINGER
+        })
+        val pc = arrayOf(MotionEvent.PointerCoords().apply { this.x = x; this.y = y })
+        return MotionEvent.obtain(0L, 0L, action, 1, pp, pc, 0, 0, 1f, 1f, 0, 0, 0, 0)
     }
 
     private fun buildFingerEvent(action: Int): MotionEvent {

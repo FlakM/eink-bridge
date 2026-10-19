@@ -543,4 +543,49 @@ class StrokeBufferTest {
         val obj = arr.getJSONObject(0)
         assertEquals("proximity", obj.getJSONObject("anchor").getString("type"))
     }
+
+    // ── OCR labels follow their ink ────────────────────────────────────────────
+
+    @Test fun aClusterDraggedOnItsOwnUsesItsOwnOffset() {
+        val offset = liveClusterOffset(
+            clusterIdx = 2,
+            strokeIndices = setOf(5, 6),
+            clusterOffsets = mapOf(2 to (10f to 20f)),
+            groups = emptyList(),
+            groupOffsets = emptyMap(),
+        )
+        assertEquals(10f to 20f, offset)
+    }
+
+    @Test fun aClusterInsideADraggedGroupFollowsTheGroup() {
+        // The bug: dragging a bound group moved its ink and its marker, but the OCR label
+        // covering the same strokes was drawn from the cluster's own (absent) offset and
+        // stayed where it was.
+        val group = BindGroup(7, 0, setOf(5), listOf(1), emptyList(), 0f, 0f)
+        val offset = liveClusterOffset(
+            clusterIdx = 0,
+            strokeIndices = setOf(5, 6),
+            clusterOffsets = emptyMap(),
+            groups = listOf(group),
+            groupOffsets = mapOf(7 to (30f to -40f)),
+        )
+        assertEquals(30f to -40f, offset)
+    }
+
+    @Test fun nothingIsMovedWhenNothingIsDragged() {
+        assertEquals(
+            0f to 0f,
+            liveClusterOffset(0, setOf(1), emptyMap(), emptyList(), emptyMap()),
+        )
+    }
+
+    @Test fun aClustersOwnDragWinsOverAGroupItBelongsTo() {
+        // Dragging the label or the cluster on its own is a local adjustment; the group
+        // offset must not be added on top of it.
+        val group = BindGroup(7, 0, setOf(5), listOf(1), emptyList(), 0f, 0f)
+        assertEquals(
+            5f to 5f,
+            liveClusterOffset(3, setOf(5), mapOf(3 to (5f to 5f)), listOf(group), mapOf(7 to (99f to 99f))),
+        )
+    }
 }
