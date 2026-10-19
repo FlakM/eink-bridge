@@ -73,6 +73,11 @@ TARGETS = {
     "a_local_runtime_http_error_is_reported_with_its_status": "--lib",
     "handwriting_with_nothing_drawn_makes_no_request": "--lib",
     "a_client_that_connects_after_an_update_still_receives_it": "--test ws_test",
+    "a_webhook_that_fails_twice_is_retried_until_it_lands": "--test webhook_test",
+    "progress_reaches_the_watcher_and_the_latest_line_survives_a_reconnect": "--test ws_test",
+    "a_token_keeps_the_lan_out_and_this_machine_in": "--test api_edge_test",
+    "a_review_that_has_not_happened_is_not_success": "--test cli_integration_test",
+    "retention_takes_old_terminal_sessions_and_leaves_the_rest": "--lib",
     "an_unreadable_message_does_not_break_the_connection": "--test ws_test",
 }
 
@@ -956,6 +961,52 @@ CASES = [
             """        dragLabel = null""",
         ),
         "gradle:PenOverlayTest",
+    ),
+    (
+        "a failed webhook is not retried, so a restarting channel loses the note",
+        text_edit(
+            APPI,
+            """                if attempt == backoff.len() {""",
+            """                if attempt == 0 {""",
+        ),
+        "a_webhook_that_fails_twice_is_retried_until_it_lands",
+    ),
+    (
+        "progress outlives the update it describes",
+        text_edit(
+            APPI,
+            """            if mgr.clear_progress(&id, feedback_id.as_deref()) {""",
+            """            if mgr.clear_progress(&id, None) {""",
+        ),
+        "progress_reaches_the_watcher_and_the_latest_line_survives_a_reconnect",
+    ),
+    (
+        "the token gate lets a remote caller through",
+        text_edit(
+            APPI,
+            """    if !authorized {""",
+            """    if false && !authorized {""",
+        ),
+        "a_token_keeps_the_lan_out_and_this_machine_in",
+    ),
+    (
+        "retention keeps every finished session forever",
+        text_edit(
+            SESSIONI,
+            """                    && s.updated_at < cutoff""",
+            """                    && s.updated_at < cutoff
+                    && false""",
+        ),
+        "retention_takes_old_terminal_sessions_and_leaves_the_rest",
+    ),
+    (
+        "a pipeline reads \"still active\" as a pass",
+        text_edit(
+            CLII,
+            """            std::process::exit(PENDING_EXIT_CODE);""",
+            """            let _ = PENDING_EXIT_CODE;""",
+        ),
+        "a_review_that_has_not_happened_is_not_success",
     ),
 ]
 

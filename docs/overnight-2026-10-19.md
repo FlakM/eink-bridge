@@ -184,6 +184,13 @@ mutation-harness gradle retry.
 | 7 | landed | item 7 commit |
 | 8–11, s | queued | |
 
+**Gate at the end of the night:** 223 Rust lib tests plus every integration binary green,
+clippy clean, 284 Android tests (0 failures, 3 skipped), 75 harness tests, render and
+contract goldens green. Deployed server `6pbvg028…` with `just verify-deploy` matching the
+build; APK installed on the tablet. Five mutation cases added for the new invariants (71
+total); the full harness was started in the background and its result is recorded below if
+it finished.
+
 ## Log
 
 - **2026-10-19, evening.** Read FIXME against the code. Confirmed: channel binds 8789 with
@@ -262,3 +269,98 @@ mutation-harness gradle retry.
   alongside the existing server job. Concurrency cancels superseded runs. Not verified on
   GitHub itself (no push to a runner from here); the commands are the same ones run
   locally below.
+
+## What is left, and how to start it
+
+### Item 8 — reproducible Android build
+
+- `android/app/build.gradle.kts:15-16`: replace the constants with
+  `providers.exec { commandLine("git", "describe", "--tags", "--always", "--dirty") }`,
+  `versionCode = providers.exec { commandLine("git", "rev-list", "--count", "HEAD") }`,
+  each with a fallback of `1` (the Nix sandbox may have no git).
+- Add `User-Agent: eink-bridge-android/<version>` in `HttpClients.withToken` so it covers
+  every client; expose the version in the session-list header.
+- **Decision needed:** the committed *debug* keystore. It is what lets a second machine
+  install over the first, and it is not a release key — but it is still a key in a public
+  repo. If that is unacceptable, the alternative is `adb uninstall` on every new machine,
+  which loses the cached sessions and ink. I would commit it with a comment that says
+  "debug only, never release".
+- Delete `android/shell.nix`; replace the `~/.gradle/gradle.properties` rewrite in
+  `flake.nix:123-136` with `GRADLE_USER_HOME` inside the dev shell.
+- Prove: `just apk` from a clean clone installs over the existing app; the User-Agent shows
+  the tablet build.
+
+### Item 9 — one deploy story
+
+- Export `homeManagerModules.eink-bridge` from this flake (server unit, CLI, skills,
+  agents, output style, channel MCP). `nix_dots` imports it and deletes its local copies;
+  the systemd *user override* that runs `./result/bin/eink-serve` is the thing to replace.
+- `harness/skills/deploy-eink/SKILL.md:14-43` reads `EINK_BRIDGE_ROOT`, `EINK_HOST`,
+  `EINK_FLAKE` with today's values as fallbacks; drop `git add -p`.
+- README: add a *New machine* section (server, MCP, APK, `just boox-setup`, app server URL),
+  fix the stale paths at `:82,212,456,565,603` and the "create skills in `~/.claude/skills`"
+  advice at `:592` (it is a read-only store path; the module owns it).
+- Prove: follow the README on a fresh user account. **Cannot be proved from this host.**
+
+### Item 10 — split the Android god objects
+
+Order matters: `PageLifecycle` first, because it is the wiring that just broke.
+
+1. Extract `PageLifecycle` (`onPageStarted`, `onPageFinished`, `reconcileAnnotations`) with
+   constructor-injected collaborators; add the Robolectric test that a bridge whose
+   element-map callback never answers still gives the pen, ink view and UPDATE button back.
+2. `OcrManager` callbacks → `SharedFlow`.
+3. `SessionScreen` (toolbar, popovers, mode state); `MainActivity` under 400 lines.
+4. Replace the 3 `evaluateJavascript` calls with `WebViewBridge`; the 6 prefs accesses with
+   `SessionRepository`.
+
+### Item 11 — render cache and JS tests
+
+- `AppState` gets `Mutex<LruCache<(String, u32), String>>` (capacity 32); `render_session`
+  checks it, misses render and insert; content update/remove invalidates the id;
+  `eink_render_cache_total{result}`. Safe because progress is delivered by WS, not HTML.
+- Move the pure functions out of `element-map.js` (element lookup, nearest paragraph,
+  viewport report) into `server/assets/lib/…` and test with `node --test`; extend
+  `just lint-assets` to run them, so a broken hit-test fails before the tablet sees it.
+
+### Smaller items, any time
+
+- `harness/skills/eink-pr/SKILL.md:31,106,123,297` vs `scripts/registry.py:33-40`: three
+  socket spellings, two worktree layouts, an unexpanded `~`, `herdr tab close` for a
+  workspace it created, and a registry written by hand. Make `registry.py` the CLI the
+  skill calls; add a lock and a unique temp name (`:87-93`); warn on a corrupt file
+  (`:82`).
+- One verdict vocabulary: `harness/output-styles/eink-review.md:8-19` and
+  `harness/skills/eink/SKILL.md:239` disagree with `server/src/verdict.rs:4-25` on casing,
+  the diagram count, bullets vs tables and what amber means.
+- `harness/skills/eink-update/SKILL.md:48-56` writes a fixed `/tmp/eink-update-XXXXX.md`;
+  use `mktemp`, then fold the skill into `eink` once item 3's CLI is the only path.
+- `harness/skills/eink/scripts/watch-feedback.py:93` unguarded `json.loads`: one bad
+  `EVENT:` line kills the watcher without `WATCH_ENDED`.
+- `channel.ts:113` now URL-encodes `session_id` (done with item 4); left: the shebang is
+  `env -S` now (done), and the SDK pin `^1.0.0` should be exact.
+- `harness/skills/eink-webview/SKILL.md:54,75,91,192` hard-code `/home/flakm` and `amd-pc`;
+  use `$EINK_BRIDGE_ROOT` and `$EINK_SERVER_URL`.
+- `harness/tests/test_eink_pr_reader.py:285` skips without a server, so CI never runs it;
+  `harness/skills/eink/evals/evals.json` is run by nothing.
+- OCR bounds are per process; add `timeout_seconds` to `/api/ocr` and `request_update`,
+  capped by the env bound.
+- `flake.lock` inputs date from 2026-03; add a monthly `nix flake update` job.
+- The mutation harness can abort on a transient Kotlin incremental-compile failure; retry
+  the gradle target once before declaring `NoTestsRan`.
+
+## Deliberate deviations and unfinished edges
+
+- **D1:** the callback is registered when a session is claimed, not passed to `push`. The
+  agent cannot know which channel instance owns the session at push time, and a restart
+  would leave a dead URL.
+- **Item 3:** "still active" exits **5**, not 3. `3` is already *reject*; the codes are
+  documented next to `PENDING_EXIT_CODE`.
+- **Item 4:** the consumed notes are not flashed on the new page. The server sends
+  `consumed_annotations`, but the page has no one-shot highlight; it is a separate change
+  and was not worth rushing.
+- **Item 5:** `/metrics` stays open. It exposes counters, not titles or bodies, and the
+  Grafana scraper on another host would otherwise need the secret to say the server is up.
+  No real-LAN end-to-end test: the harness has no second host.
+- **Item 7:** the new jobs have not run on GitHub from here. The commands are the ones run
+  locally; watch the first PR.
