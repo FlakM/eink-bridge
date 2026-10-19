@@ -9,7 +9,7 @@
   // Everything a tap can bind to. A rendered block has to be reachable this way, or a
   // reader cannot annotate it at all, so every block kind names its wrapper here.
   // `tests::every_block_kind_can_be_bound_by_a_tap` holds this to account.
-  var QUERY = 'h1, h2, h3, p, li, pre, blockquote, td, th, table, ul, ol, img, .diagram-block, .snippet-block, .steps-block';
+  var QUERY = 'h1, h2, h3, p, li, pre, blockquote, td, th, table, ul, ol, img, .diagram-block, .snippet-block, .steps-block, .diff-block';
 
   function slugify(s) {
     return 's-' + s.trim().toLowerCase().replace(/[^\w\s-]/g, '').replace(/\s+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
