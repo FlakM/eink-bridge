@@ -208,6 +208,19 @@ class MainActivity : AppCompatActivity() {
             sessionRepo.savePushgatewayUrl(pushgatewayUrl)
         }
 
+        findViewById<Button>(R.id.btnCleanNotes).setOnClickListener {
+            AlertDialog.Builder(this)
+                .setTitle("Clean all notes?")
+                .setMessage("Remove every note from the server, pinned ones included. This deletes their files too.")
+                .setPositiveButton("Clean") { _, _ ->
+                    scope.launch {
+                        val ok = sessionViewModel.cleanNotes()
+                        showRoutineStatus(if (ok) "Notes cleaned" else "Could not clean the notes")
+                    }
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+        }
         findViewById<Button>(R.id.btnClearSessions).setOnClickListener {
             AlertDialog.Builder(this)
                 .setTitle("Clear finished sessions?")

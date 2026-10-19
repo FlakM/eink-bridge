@@ -84,11 +84,47 @@ internal class SessionViewModel(app: Application) : AndroidViewModel(app) {
         } catch (_: Exception) { false }
     }
 
+    /** Forget a note and its files. A bare DELETE would only cancel it, leaving it listed. */
     suspend fun deleteSession(id: String): Boolean = withContext(Dispatchers.IO) {
         try {
-            val request = Request.Builder().url("$serverUrl/api/sessions/$id").delete().build()
+            val request = Request.Builder()
+                .url("$serverUrl/api/sessions/$id?remove=true&force=true")
+                .delete().build()
             client.newCall(request).execute().use { it.isSuccessful }
         } catch (_: Exception) { false }
+    }
+
+    /**
+     * Remove every note, pinned ones included.
+     *
+     * "Clear finished" leaves starred notes alone -- they are pinned precisely so that
+     * purge, expiry and restarts keep them -- which is how a reader ends up with a list
+     * they cannot clear.
+     */
+    suspend fun cleanNotes(): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val listed = client.newCall(
+                Request.Builder().url("$serverUrl/api/sessions").build()
+            ).execute().use { response ->
+                if (!response.isSuccessful) return@withContext false
+                org.json.JSONArray(response.body?.string() ?: "[]")
+            }
+            var removed = 0
+            for (index in 0 until listed.length()) {
+                val id = listed.getJSONObject(index).optString("id")
+                if (id.isBlank()) continue
+                val ok = client.newCall(
+                    Request.Builder()
+                        .url("$serverUrl/api/sessions/$id?remove=true&force=true")
+                        .delete().build()
+                ).execute().use { it.isSuccessful }
+                if (ok) removed++
+            }
+            fetchSessions()
+            removed > 0 || listed.length() == 0
+        } catch (_: Exception) {
+            false
+        }
     }
 
     suspend fun toggleStar(id: String, starred: Boolean): Boolean = withContext(Dispatchers.IO) {

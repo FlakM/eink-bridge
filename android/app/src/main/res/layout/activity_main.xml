@@ -27,6 +27,15 @@
                 android:fontFamily="serif" />
 
             <Button
+                android:id="@+id/btnCleanNotes"
+                android:layout_width="wrap_content"
+                android:layout_height="40dp"
+                android:text="Clean notes"
+                android:textSize="14sp"
+                android:textColor="#CC0000"
+                style="?android:attr/buttonBarButtonStyle" />
+
+        <Button
                 android:id="@+id/btnClearSessions"
                 android:layout_width="wrap_content"
                 android:layout_height="40dp"
