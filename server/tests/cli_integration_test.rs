@@ -1383,7 +1383,15 @@ async fn the_cli_reads_content_and_source_and_guards_an_update() {
 
     // `source` reads from the checkout the review was pushed from.
     let (code, stdout, stderr) = run_cli_raw(
-        &["--server", &server, "source", &id, "src/cli.rs:10", "--context", "1"],
+        &[
+            "--server",
+            &server,
+            "source",
+            &id,
+            "src/cli.rs:10",
+            "--context",
+            "1",
+        ],
         &[],
     )
     .await;
@@ -1397,7 +1405,13 @@ async fn the_cli_reads_content_and_source_and_guards_an_update() {
     // A stale version is refused and the document is untouched.
     let (code, _, stderr) = run_cli_raw(
         &[
-            "--server", &server, "update", &id, second, "--expected-version", "99",
+            "--server",
+            &server,
+            "update",
+            &id,
+            second,
+            "--expected-version",
+            "99",
         ],
         &[],
     )
@@ -1405,12 +1419,21 @@ async fn the_cli_reads_content_and_source_and_guards_an_update() {
     assert_ne!(code, 0, "a stale update must fail");
     assert!(stderr.contains("stale version"), "{stderr}");
     let (_, stdout, _) = run_cli_raw(&["--server", &server, "content", &id], &[]).await;
-    assert!(stdout.contains("# First"), "the refused update must not land: {stdout}");
+    assert!(
+        stdout.contains("# First"),
+        "the refused update must not land: {stdout}"
+    );
 
     // The matching version lands.
     let (code, _, stderr) = run_cli_raw(
         &[
-            "--server", &server, "update", &id, second, "--expected-version", "1",
+            "--server",
+            &server,
+            "update",
+            &id,
+            second,
+            "--expected-version",
+            "1",
         ],
         &[],
     )
@@ -1423,8 +1446,15 @@ async fn the_cli_reads_content_and_source_and_guards_an_update() {
     // rather than reporting a stale version.
     let (code, _, stderr) = run_cli_raw(
         &[
-            "--server", &server, "update", &id, second, "--feedback-id", "not-pending",
-            "--consumed", "0",
+            "--server",
+            &server,
+            "update",
+            &id,
+            second,
+            "--feedback-id",
+            "not-pending",
+            "--consumed",
+            "0",
         ],
         &[],
     )
@@ -1442,15 +1472,14 @@ async fn a_review_that_has_not_happened_is_not_success() {
     let file = dir.path().join("review.md");
     std::fs::write(&file, "# Waiting\n").unwrap();
     let file = file.to_str().unwrap();
-    let (_, stdout, _) = run_cli_raw(
-        &["--server", &server, "push", "--async", file],
-        &[],
-    )
-    .await;
+    let (_, stdout, _) = run_cli_raw(&["--server", &server, "push", "--async", file], &[]).await;
     let id = stdout.trim().to_string();
 
     let (code, _, stderr) = run_cli_raw(&["--server", &server, "result", &id], &[]).await;
-    assert_eq!(code, 5, "pending must be distinguishable from lgtm: {stderr}");
+    assert_eq!(
+        code, 5,
+        "pending must be distinguishable from lgtm: {stderr}"
+    );
     assert!(stderr.contains("still active"), "{stderr}");
     handle.abort();
 }
@@ -1458,8 +1487,50 @@ async fn a_review_that_has_not_happened_is_not_success() {
 #[tokio::test]
 async fn the_server_url_defaults_to_the_environment() {
     let (server, handle) = start_server().await;
-    let (code, stdout, stderr) = run_cli_raw(&["list", "--json"], &[("EINK_SERVER_URL", &server)]).await;
+    let (code, stdout, stderr) =
+        run_cli_raw(&["list", "--json"], &[("EINK_SERVER_URL", &server)]).await;
     assert_eq!(code, 0, "EINK_SERVER_URL was ignored: {stderr}");
     let _: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    handle.abort();
+}
+
+#[tokio::test]
+async fn the_cli_narrates_progress_for_the_pending_feedback() {
+    let (server, handle) = start_server().await;
+    let id = push_document(&server, "# Review\n\nBody").await;
+    let client = reqwest::Client::new();
+    client
+        .post(format!("{server}/api/sessions/{id}/request_update"))
+        .json(&serde_json::json!({
+            "annotations": [{"anchor": null, "strokes": [], "recognized_text": "tighter"}]
+        }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+
+    // The pending feedback is the common case; the agent should not have to repeat its id.
+    let (code, _, stderr) = run_cli_raw(
+        &[
+            "--server", &server, "progress", &id, "Read 1 note on *Checks*", "--step", "1",
+            "--of", "3",
+        ],
+        &[],
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+
+    // A line about a note that is not pending is refused rather than overwriting the
+    // one the reader is watching.
+    let (code, _, stderr) = run_cli_raw(
+        &[
+            "--server", &server, "progress", &id, "Rewriting", "--feedback-id", "already-answered",
+        ],
+        &[],
+    )
+    .await;
+    assert_ne!(code, 0);
+    assert!(stderr.contains("not pending"), "{stderr}");
     handle.abort();
 }

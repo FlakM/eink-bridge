@@ -1,6 +1,9 @@
 package com.flakm.einkbridge
 
 import android.view.View
+import android.widget.Button
+import android.widget.ProgressBar
+import org.json.JSONObject
 import androidx.test.core.app.ActivityScenario
 import org.junit.After
 import org.junit.Assert.*
@@ -310,6 +313,31 @@ class MainActivityTest {
             activity.exitSelectMode()
             assertEquals(ToolMode.DRAW, activity.toolMode)
             assertEquals(View.VISIBLE, drawControls.visibility)
+        }
+    }
+
+    // ── The agent narrates while it works ──────────────────────────────────────
+
+    @Test fun agentProgressReplacesWaitingAndVersionUpdatedResetsIt() {
+        scenario.onActivity { activity ->
+            activity.handleWsMessage(
+                "agent_progress",
+                JSONObject()
+                    .put("feedback_id", "f1")
+                    .put("message", "Rewriting *Checks*")
+                    .put("step", 2)
+                    .put("of", 4)
+            )
+            val button = activity.findViewById<Button>(R.id.btnRequestUpdate)
+            assertEquals("Rewriting *Checks*", button.text.toString())
+            val bar = activity.findViewById<ProgressBar>(R.id.agentProgress)
+            assertEquals("a step with a total draws the bar", View.VISIBLE, bar.visibility)
+            assertEquals(4, bar.max)
+            assertEquals(2, bar.progress)
+
+            activity.handleWsMessage("version_updated", JSONObject().put("version", 7))
+            assertEquals("the rewrite landed, so the button is an action again", "Update", button.text.toString())
+            assertEquals(View.GONE, bar.visibility)
         }
     }
 }

@@ -387,6 +387,7 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/sessions/{id}/reanchor", post(reanchor))
         .route("/api/sessions/{id}/feedback", get(pending_feedback))
         .route("/api/sessions/{id}/callback", put(set_callback))
+        .route("/api/sessions/{id}/progress", post(agent_progress))
         .route("/api/sessions/{id}/star", put(set_starred))
         .route(
             "/api/sessions/{id}/annotation/{index}",
@@ -1271,6 +1272,11 @@ async fn update_content(
                 consumed_strokes,
             };
             mgr.record_content_update(&id, serde_json::to_value(&event).unwrap(), acknowledge);
+            if mgr.clear_progress(&id, feedback_id.as_deref()) {
+                crate::metrics::AGENT_PROGRESS_TOTAL
+                    .with_label_values(&["cleared"])
+                    .inc();
+            }
             event
         })
     };
@@ -1358,6 +1364,85 @@ async fn set_starred(
         .expect("session must exist after set_starred returned true");
     tracing::info!(id = %id, starred = body.starred, "session star toggled");
     Json(response).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct ProgressBody {
+    feedback_id: String,
+    message: String,
+    #[serde(default)]
+    step: Option<u32>,
+    #[serde(default)]
+    of: Option<u32>,
+}
+
+/// The longest progress line a reviewer can read at a glance on e-ink. In characters,
+/// not bytes: a line of Polish must not be rejected for being two bytes per letter.
+const MAX_PROGRESS_CHARS: usize = 120;
+
+/// A short line about what the agent is doing, while it does it.
+///
+/// This is status, not prose: the reader is looking at "Waiting for agent" and needs to
+/// know whether their notes were read and which section is being rewritten. It is stored
+/// on the session (so a reconnecting tablet gets the latest line) and cleared only by the
+/// content update that names the same feedback id.
+async fn agent_progress(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<ProgressBody>,
+) -> Response {
+    let message = body.message.trim();
+    if message.is_empty() || message.chars().count() > MAX_PROGRESS_CHARS {
+        return bad_request(format!(
+            "a progress line must be 1 to {MAX_PROGRESS_CHARS} characters"
+        ));
+    }
+    let fence = match (body.step, body.of) {
+        (None, None) => None,
+        (Some(step), Some(of)) if step >= 1 && step <= of => Some((step, of)),
+        _ => return bad_request("step and of must be given together, with 1 <= step <= of".into()),
+    };
+
+    let mut mgr = state.sessions.write().await;
+    let Some(session) = mgr.get(&id) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let pending = session
+        .pending_feedback
+        .as_ref()
+        .and_then(|p| p["feedback_id"].as_str());
+    if pending != Some(body.feedback_id.as_str()) {
+        crate::metrics::AGENT_PROGRESS_TOTAL
+            .with_label_values(&["rejected"])
+            .inc();
+        return StatusCode::CONFLICT.into_response();
+    }
+
+    let mut progress = serde_json::json!({
+        "feedback_id": body.feedback_id,
+        "message": message,
+    });
+    if let Some((step, of)) = fence {
+        progress["step"] = step.into();
+        progress["of"] = of.into();
+    }
+    mgr.record_progress(&id, progress.clone());
+    drop(mgr);
+
+    let event = crate::ws::ServerMessage::AgentProgress {
+        feedback_id: progress["feedback_id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+        message: message.to_string(),
+        step: fence.map(|(step, _)| step),
+        of: fence.map(|(_, of)| of),
+    };
+    state.ws_send(&id, event).await;
+    crate::metrics::AGENT_PROGRESS_TOTAL
+        .with_label_values(&["accepted"])
+        .inc();
+    StatusCode::NO_CONTENT.into_response()
 }
 
 fn webhook_payload(session: &Session) -> Option<(String, SessionResultResponse)> {

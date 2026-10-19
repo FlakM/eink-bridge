@@ -219,6 +219,21 @@ Rewrite the document applying the feedback. The native client asks the server to
 match old/new text and reposition retained ink. Positional section IDs alone are
 not stable identity. Deleted or ambiguous targets are archived rather than guessed.
 
+While you work, say so. The tablet replaces "Waiting for agent" with your latest line,
+so the reader can tell the notes were read, which section is being rewritten, and whether
+you are stuck.
+
+- One line per step, in the reader's words, not the agent's: "Read 4 notes on *Reading
+  order* and *Checks*", "Rewriting *Important pieces* B and C", "Adding the missing test
+  you asked for", "Rendering".
+- At most one every few seconds, never more than 120 characters. Status, not prose or a
+  question.
+- Claude channel path: `report_progress(session_id="<id>", feedback_id="<feedback_id>",
+  message="<line>", step=<n>, of=<m>)`.
+- Portable path: `eink-review progress <id> "<line>" --step <n> --of <m>` (the feedback id
+  defaults to the pending one).
+- The content update that names `feedback_id` clears the line.
+
 Then call the `update_session` tool:
 ```
 update_session(session_id="<id>", content="<full updated markdown>", expected_version=<version>, feedback_id="<feedback_id>", consumed_annotations=[<zero-based indices incorporated>])

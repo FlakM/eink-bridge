@@ -164,6 +164,22 @@
         android:id="@+id/colorDrawer"
         style="@style/Widget.Popover" />
 
+    <!-- Agent progress: a thin line just above the toolbar. No animation (e-ink), and
+         only present when the agent reported a step and a total. -->
+    <ProgressBar
+        android:id="@+id/agentProgress"
+        style="?android:attr/progressBarStyleHorizontal"
+        android:layout_width="match_parent"
+        android:layout_height="4dp"
+        android:layout_gravity="bottom"
+        android:layout_marginBottom="@dimen/toolbar_height"
+        android:max="100"
+        android:progress="0"
+        android:progressTint="#000000"
+        android:progressBackgroundTint="#DDDDDD"
+        android:indeterminate="false"
+        android:visibility="gone" />
+
     <!-- Toolbar: tools | modes | (context) | view | spacer | edit | commit -->
     <LinearLayout
         android:id="@+id/penToolbar"

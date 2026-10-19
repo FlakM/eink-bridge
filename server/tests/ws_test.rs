@@ -396,3 +396,103 @@ async fn a_late_watcher_of_a_finished_review_is_told_how_it_ended() {
     assert_eq!(msg["type"], "error");
     assert_eq!(msg["message"], "session cancelled");
 }
+
+#[tokio::test]
+async fn progress_reaches_the_watcher_and_the_latest_line_survives_a_reconnect() {
+    let (url, handle) = start_server().await;
+    let id = create_session(&url).await;
+    let client = reqwest::Client::new();
+    client
+        .post(format!("{url}/api/sessions/{id}/request_update"))
+        .json(&json!({"annotations":[{"anchor":null,"strokes":[],"recognized_text":"tighter"}]}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let feedback = client
+        .get(format!("{url}/api/sessions/{id}/feedback"))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap()["pending"]["feedback_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let (mut ws, _) = connect_async(ws_url(&url, &format!("/ws/{id}")))
+        .await
+        .unwrap();
+    // The snapshot opens with the pending feedback.
+    let first = next_text(&mut ws).await;
+    assert_eq!(first["type"], "annotation_result");
+
+    let response = client
+        .post(format!("{url}/api/sessions/{id}/progress"))
+        .json(
+            &json!({"feedback_id": feedback, "message": "Rewriting *Checks*", "step": 2, "of": 4}),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::NO_CONTENT);
+
+    let message = next_text(&mut ws).await;
+    assert_eq!(message["type"], "agent_progress");
+    assert_eq!(message["message"], "Rewriting *Checks*");
+    assert_eq!(message["step"], 2);
+    assert_eq!(message["of"], 4);
+    assert_eq!(message["feedback_id"], feedback);
+
+    // A tablet that reconnects after the line was written still sees it.
+    let (mut late, _) = connect_async(ws_url(&url, &format!("/ws/{id}")))
+        .await
+        .unwrap();
+    let mut saw_progress = None;
+    for _ in 0..4 {
+        let text = next_text(&mut late).await;
+        if text["type"] == "agent_progress" {
+            saw_progress = Some(text);
+            break;
+        }
+    }
+    assert_eq!(
+        saw_progress.expect("a late watcher must see the latest line")["message"],
+        "Rewriting *Checks*"
+    );
+
+    // The update that names the feedback clears it: the line described work that is done.
+    client
+        .put(format!("{url}/api/sessions/{id}/content"))
+        .json(&json!({
+            "content": "# Rewritten",
+            "expected_version": 1,
+            "feedback_id": feedback,
+            "consumed_annotations": []
+        }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+
+    let (mut after, _) = connect_async(ws_url(&url, &format!("/ws/{id}")))
+        .await
+        .unwrap();
+    let mut stale = false;
+    loop {
+        match tokio::time::timeout(Duration::from_millis(400), after.next()).await {
+            Err(_) => break,
+            Ok(Some(Ok(Message::Text(text)))) => {
+                if text.contains("agent_progress") {
+                    stale = true;
+                }
+            }
+            Ok(_) => break,
+        }
+    }
+    assert!(!stale, "progress must not outlive the update it describes");
+    handle.abort();
+}

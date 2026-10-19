@@ -95,6 +95,22 @@ enum Command {
         #[arg(long, default_value = "6")]
         context: usize,
     },
+    /// Report what the agent is doing while it rewrites (shown on the tablet)
+    Progress {
+        /// Session ID
+        id: String,
+        /// One short line, in the reader's words
+        message: String,
+        /// Which step this is (1-based); requires --of
+        #[arg(long)]
+        step: Option<u32>,
+        /// How many steps there are
+        #[arg(long)]
+        of: Option<u32>,
+        /// The feedback this work answers; defaults to the session's pending feedback
+        #[arg(long)]
+        feedback_id: Option<String>,
+    },
     /// Watch an existing session for events via WebSocket (emits same events as push --interactive)
     Watch {
         /// Session ID
@@ -143,6 +159,7 @@ async fn main() {
     let command_name = match &cli.command {
         Command::Push { .. } => "push",
         Command::Content { .. } => "content",
+        Command::Progress { .. } => "progress",
         Command::Source { .. } => "source",
         Command::Update { .. } => "update",
         Command::Watch { .. } => "watch",
@@ -200,6 +217,13 @@ async fn main() {
             .await
         }
         Command::Content { id, json } => cmd_content(&client, &cli.server, &id, json).await,
+        Command::Progress {
+            id,
+            message,
+            step,
+            of,
+            feedback_id,
+        } => cmd_progress(&client, &cli.server, &id, &message, step, of, feedback_id).await,
         Command::Source {
             id,
             reference,
@@ -585,6 +609,58 @@ async fn cmd_content(client: &Client, server: &str, id: &str, json: bool) -> any
             Ok(())
         }
         404 => anyhow::bail!("session {id} not found"),
+        s => anyhow::bail!("unexpected status: {s}"),
+    }
+}
+
+async fn cmd_progress(
+    client: &Client,
+    server: &str,
+    id: &str,
+    message: &str,
+    step: Option<u32>,
+    of: Option<u32>,
+    feedback_id: Option<String>,
+) -> anyhow::Result<()> {
+    // The server refuses progress that does not name the pending feedback, so the common
+    // case (the note that just arrived) should not require the agent to repeat its id.
+    let feedback_id = match feedback_id {
+        Some(feedback_id) => feedback_id,
+        None => {
+            let snapshot = client
+                .get(format!("{server}/api/sessions/{id}/feedback"))
+                .send()
+                .await?;
+            if !snapshot.status().is_success() {
+                anyhow::bail!("cannot read the pending feedback: {}", snapshot.status());
+            }
+            let body: serde_json::Value = snapshot.json().await?;
+            body["pending"]["feedback_id"]
+                .as_str()
+                .map(str::to_string)
+                .ok_or_else(|| anyhow::anyhow!("this session has no pending feedback"))?
+        }
+    };
+    let resp = client
+        .post(format!("{server}/api/sessions/{id}/progress"))
+        .json(&serde_json::json!({
+            "feedback_id": feedback_id,
+            "message": message,
+            "step": step,
+            "of": of,
+        }))
+        .send()
+        .await?;
+    match resp.status().as_u16() {
+        204 => Ok(()),
+        400 => {
+            let reason = resp.text().await.unwrap_or_default();
+            anyhow::bail!("progress refused: {reason}")
+        }
+        404 => anyhow::bail!("session {id} not found"),
+        409 => anyhow::bail!(
+            "progress refused: that feedback is not pending (it may already be answered)"
+        ),
         s => anyhow::bail!("unexpected status: {s}"),
     }
 }

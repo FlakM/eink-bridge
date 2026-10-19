@@ -38,6 +38,15 @@ macro_rules! reg {
 // Session lifecycle
 pub static SESSIONS_CREATED: LazyLock<IntCounter> =
     LazyLock::new(|| reg!(counter "eink_sessions_created_total", "Sessions created"));
+pub static AGENT_PROGRESS_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    reg!(
+        counter_vec
+        "eink_agent_progress_total",
+        "Agent progress lines accepted, rejected, or cleared by the update they describe",
+        &["result"]
+    )
+});
+
 pub static SESSIONS_SUBMITTED: LazyLock<IntCounter> =
     LazyLock::new(|| reg!(counter "eink_sessions_submitted_total", "Sessions submitted"));
 pub static SESSIONS_CANCELLED: LazyLock<IntCounter> =
@@ -164,6 +173,7 @@ pub fn init() {
     let _ = &*WS_CONNECTIONS_ACTIVE;
     let _ = &*LONG_POLL_TOTAL;
     let _ = &*WEBHOOK_TOTAL;
+    let _ = &*AGENT_PROGRESS_TOTAL;
     let _ = &*HTTP_REQUESTS;
     let _ = &*HTTP_DURATION;
     seed_label_vocabularies();
@@ -190,6 +200,9 @@ fn seed_label_vocabularies() {
     }
     for result in ["ok", "retried", "error"] {
         WEBHOOK_TOTAL.with_label_values(&[result]).inc_by(0);
+    }
+    for result in ["accepted", "rejected", "cleared"] {
+        AGENT_PROGRESS_TOTAL.with_label_values(&[result]).inc_by(0);
     }
     for provider in PROVIDERS {
         OCR_PROVIDER_WINS.with_label_values(&[provider]).inc_by(0);

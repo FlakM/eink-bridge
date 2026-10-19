@@ -1725,3 +1725,74 @@ async fn a_callback_is_registered_only_by_this_machine_and_only_to_this_machine(
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn a_progress_line_must_match_the_feedback_and_fit_on_a_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = test_app(dir.path().to_path_buf());
+    let id = create(&app, "# Review").await;
+
+    let (status, _) = send(
+        &app,
+        Request::post(format!("/api/sessions/{id}/request_update"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"annotations":[{"anchor":null,"strokes":[],"recognized_text":"go on"}]}"#,
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert!(status.is_success(), "request_update said {status}");
+
+    let (status, detail) = get_json(&app, &format!("/api/sessions/{id}/feedback")).await;
+    assert_eq!(status, StatusCode::OK);
+    let feedback = detail["pending"]["feedback_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let post = |body: serde_json::Value| {
+        let app = app.clone();
+        let uri = format!("/api/sessions/{id}/progress");
+        async move {
+            send(
+                &app,
+                Request::post(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .0
+        }
+    };
+
+    assert_eq!(
+        post(serde_json::json!({"feedback_id": "someone-else", "message": "Rewriting"})).await,
+        StatusCode::CONFLICT,
+        "progress for a note that is not pending must not overwrite the real one"
+    );
+    assert_eq!(
+        post(serde_json::json!({"feedback_id": feedback, "message": "x".repeat(121)})).await,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        post(serde_json::json!({"feedback_id": feedback, "message": "Rewriting", "step": 2})).await,
+        StatusCode::BAD_REQUEST,
+        "a step without a total cannot draw a bar"
+    );
+    assert_eq!(
+        post(serde_json::json!({
+            "feedback_id": feedback, "message": "Rewriting", "step": 5, "of": 4
+        }))
+        .await,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        post(serde_json::json!({
+            "feedback_id": feedback, "message": "Rewriting *Checks*", "step": 1, "of": 3
+        }))
+        .await,
+        StatusCode::NO_CONTENT
+    );
+}

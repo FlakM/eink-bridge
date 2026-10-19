@@ -1078,12 +1078,18 @@ class MainActivity : AppCompatActivity() {
             .notify(NOTIFICATION_ID_UPDATE, notification)
     }
 
-    private fun handleWsMessage(type: String, json: JSONObject) {
+    internal fun handleWsMessage(type: String, json: JSONObject) {
         Log.d(TAG, "handleWsMessage type=$type session=$currentSessionId json=${json.toString().take(200)}")
         runOnUiThread {
             when (type) {
                 "version_updated" -> {
                     val version = json.optInt("version")
+                    // The line and the bar described work that is now done. Reset them
+                    // before the session check: a version can land after the reader has
+                    // gone back to the list, and the button must not keep saying
+                    // "Waiting for agent" there either.
+                    findViewById<Button>(R.id.btnRequestUpdate).text = "Update"
+                    findViewById<ProgressBar>(R.id.agentProgress).visibility = View.GONE
                     val sid = currentSessionId ?: return@runOnUiThread
                     if (version <= loadedVersion) return@runOnUiThread
                     val sentAt = annotationSentAt
@@ -1099,7 +1105,6 @@ class MainActivity : AppCompatActivity() {
                         sessionRepo.saveStrokes(sid, overlay.buf)
                     }
                     Log.i(TAG, "version_updated: version=$version — reloading webview")
-                    findViewById<Button>(R.id.btnRequestUpdate).text = "Update"
                     loadedVersion = version
                     ocrOverlay.visibility = View.GONE
                     savedScrollY = webView.scrollY
@@ -1113,10 +1118,32 @@ class MainActivity : AppCompatActivity() {
                     showSessionList()
                     startPolling()
                 }
+                "agent_progress" -> {
+                    // Status, not prose: the agent says what it is doing while it works,
+                    // in place of the static "Waiting for agent…".
+                    val message = json.optString("message")
+                    if (message.isNotBlank()) {
+                        Log.i(TAG, "agent_progress: $message")
+                        findViewById<Button>(R.id.btnRequestUpdate).text = message
+                        findViewById<TextView>(R.id.processingStatus).text = message
+                        ocrOverlay.visibility = View.VISIBLE
+                    }
+                    val bar = findViewById<ProgressBar>(R.id.agentProgress)
+                    val step = json.optInt("step")
+                    val of = json.optInt("of")
+                    if (step > 0 && of > 0) {
+                        bar.max = of
+                        bar.progress = step
+                        bar.visibility = View.VISIBLE
+                    } else {
+                        bar.visibility = View.GONE
+                    }
+                }
                 "annotation_result" -> {
                     val version = json.optInt("version")
                     Log.i(TAG, "annotation_result: version=$version — waiting for document update")
                     ocrOverlay.visibility = View.GONE
+                    findViewById<ProgressBar>(R.id.agentProgress).visibility = View.GONE
                     findViewById<Button>(R.id.btnRequestUpdate).text = "Waiting for agent…"
                     showRoutineStatus("Feedback saved · awaiting reply")
                 }

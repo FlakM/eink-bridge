@@ -166,8 +166,20 @@ class DeliveryTests(unittest.TestCase):
             self.assertFalse(result["result"].get("isError", False))
             self.assertEqual(updates, [{"content": "# Fixed", "expected_version": 1,
                                        "feedback_id": "recovered", "consumed_annotations": [0]}])
-            self.assertEqual(len(callbacks), 1, "the claim registers this instance's callback")
-            self.assertTrue(callbacks[0][1]["url"].startswith("http://127.0.0.1:"))
+            registered = next(body for path, body in callbacks if path.endswith('/callback'))
+            self.assertTrue(registered["url"].startswith("http://127.0.0.1:"))
+
+            # The agent narrates while it works; the tool posts the same fields the route
+            # validates, so the tablet's line comes from here and not from curl.
+            send({"id": 4, "method": "tools/call", "params": {"name": "report_progress", "arguments": {
+                "session_id": "session", "feedback_id": "recovered",
+                "message": "Rewriting *Checks*", "step": 2, "of": 4}}})
+            reported = json.loads(lines.get(timeout=10))
+            self.assertEqual(reported["id"], 4)
+            self.assertFalse(reported["result"].get("isError", False))
+            progress = next(body for path, body in callbacks if path.endswith('/progress'))
+            self.assertEqual(progress, {"feedback_id": "recovered",
+                                        "message": "Rewriting *Checks*", "step": 2, "of": 4})
         finally:
             process.terminate()
             process.wait(timeout=5)

@@ -178,7 +178,8 @@ mutation-harness gradle retry.
 | 1 | landed | item 1 commit |
 | 2 | landed | item 2 commit |
 | 3 | landed | item 3 commit |
-| 4–11, s | queued | |
+| 4 | landed | item 4 commit |
+| 5–11, s | queued | |
 
 ## Log
 
@@ -217,3 +218,17 @@ mutation-harness gradle retry.
   `eink-review <cmd> --flag` from the skill files and asks the binary's `--help`; the
   `eink-update` skill carries the acknowledgement flags directly instead of pointing at a
   JSON fallback.
+
+- **Item 4, landed (server, CLI, channel, skill, tablet).** `POST
+  /api/sessions/{id}/progress` validates the pending feedback id (409), 120 characters and
+  a paired `step`/`of` (400), stores the line on the session without touching `updated_at`
+  (progress must not reorder the list), broadcasts `agent_progress`, and includes it in the
+  WS snapshot. The content update that names the same feedback id clears it. CLI
+  `progress <id> "<line>" [--step n --of m]` resolves the pending feedback id by default;
+  the channel exposes `report_progress`; the skill says what to narrate and how often.
+  On the tablet the UPDATE button carries the line and a thin non-animated bar sits above
+  the bottom toolbar; `version_updated` resets both, *before* the session check so a
+  version landing after the reader left the note cannot leave the list saying "Waiting".
+  Not done: flashing the consumed notes on the new page (FIXME's last tablet sentence).
+  It needs the page to receive the consumed indices and a one-shot highlight, which is a
+  separate change; recorded under *Stalled* rather than rushed.

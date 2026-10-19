@@ -22,6 +22,7 @@ exists.
 | Long-poll timing out too fast | `eink_long_poll_total{result="timeout"}` |
 | Webhook not firing | `eink_webhook_total{result="error"}` |
 | Webhook receiver was down and recovered | `eink_webhook_total{result="retried"}` |
+| Update narration not reaching the tablet | `eink_agent_progress_total{result="accepted"}` |
 | Unexpected session expiry | `eink_sessions_expired_total` |
 | Disk filling up | `eink_sessions_stored`, `eink_session_content_bytes` |
 | A gateway route falling over | `eink_http_requests_total{status="500"}` |

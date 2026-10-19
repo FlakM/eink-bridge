@@ -36,6 +36,14 @@ pub enum ServerMessage {
         version: u32,
         annotations: Vec<crate::api::AnnotationGroup>,
     },
+    AgentProgress {
+        feedback_id: String,
+        message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        step: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        of: Option<u32>,
+    },
     Error {
         message: String,
     },
@@ -86,7 +94,18 @@ async fn durable_snapshot(state: &AppState, id: &str) -> Vec<serde_json::Value> 
     let mgr = state.sessions.read().await;
     mgr.get(id)
         .filter(|s| s.status == crate::session::SessionStatus::Active)
-        .map(|s| [s.last_content_update.clone(), s.pending_feedback.clone()])
+        .map(|s| {
+            let progress = s.progress.as_ref().map(|progress| {
+                let mut message = progress.clone();
+                message["type"] = serde_json::Value::String("agent_progress".into());
+                message
+            });
+            [
+                s.last_content_update.clone(),
+                s.pending_feedback.clone(),
+                progress,
+            ]
+        })
         .unwrap_or_default()
         .into_iter()
         .flatten()

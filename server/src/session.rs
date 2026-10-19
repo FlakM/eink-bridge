@@ -85,6 +85,11 @@ pub struct Session {
     /// Latest unacknowledged update request. Kept separately from final submission.
     #[serde(default)]
     pub pending_feedback: Option<serde_json::Value>,
+    /// The agent's latest line about the rewrite it is doing, cleared by the content
+    /// update that names the same feedback id. Deliberately not part of `updated_at`:
+    /// progress must not reorder the list under the reader.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<serde_json::Value>,
     #[serde(default)]
     pub last_content_update: Option<serde_json::Value>,
     #[serde(default)]
@@ -372,6 +377,7 @@ impl SessionManager {
             stroke_data: None,
             annotations: Vec::new(),
             pending_feedback: None,
+            progress: None,
             last_content_update: None,
             callback_url: new.callback_url,
             tags: new.tags,
@@ -398,6 +404,33 @@ impl SessionManager {
         } else {
             false
         }
+    }
+
+    /// Record the agent's latest progress line for a session.
+    pub fn record_progress(&mut self, id: &str, progress: serde_json::Value) -> bool {
+        if let Some(s) = self.sessions.get_mut(id) {
+            s.progress = Some(progress);
+            s.persist();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Clear progress, but only when it belongs to the feedback the update answered.
+    /// An unrelated edit must not wipe the line that is still true.
+    pub fn clear_progress(&mut self, id: &str, feedback_id: Option<&str>) -> bool {
+        let Some(feedback_id) = feedback_id else {
+            return false;
+        };
+        if let Some(s) = self.sessions.get_mut(id)
+            && s.progress.as_ref().and_then(|p| p["feedback_id"].as_str()) == Some(feedback_id)
+        {
+            s.progress = None;
+            s.persist();
+            return true;
+        }
+        false
     }
 
     /// Record where this session's events should be delivered.

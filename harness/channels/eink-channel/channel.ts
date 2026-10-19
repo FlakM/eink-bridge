@@ -122,6 +122,21 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ['session_id', 'content'],
       },
     },
+    {
+      name: 'report_progress',
+      description: 'Tell the tablet what you are doing while you rewrite. One short line in the reader\'s words; it replaces "Waiting for agent" and is cleared by the update that names the same feedback_id.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          session_id: { type: 'string', description: 'The session being rewritten' },
+          feedback_id: { type: 'string', description: 'The feedback this work answers' },
+          message: { type: 'string', description: 'At most 120 characters, reader-facing' },
+          step: { type: 'integer', description: 'Which step this is, 1-based (requires of)' },
+          of: { type: 'integer', description: 'How many steps there are' },
+        },
+        required: ['session_id', 'feedback_id', 'message'],
+      },
+    },
   ],
 }))
 
@@ -159,7 +174,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
     const { session_id, content, consumed_annotations, feedback_id, expected_version } = req.params.arguments as {
       session_id: string; content: string; consumed_annotations?: number[]; feedback_id?: string; expected_version?: number
     }
-    const resp = await fetch(`${SERVER_URL}/api/sessions/${session_id}/content`, {
+    const resp = await fetch(`${SERVER_URL}/api/sessions/${encodeURIComponent(session_id)}/content`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ content, consumed_annotations, feedback_id, expected_version }),
@@ -169,6 +184,21 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
     }
     const data = await resp.json() as { version: number }
     return { content: [{ type: 'text', text: `updated to version ${data.version}` }] }
+  }
+  if (req.params.name === 'report_progress') {
+    const { session_id, feedback_id, message, step, of } = req.params.arguments as {
+      session_id: string; feedback_id: string; message: string; step?: number; of?: number
+    }
+    const resp = await fetch(
+      `${SERVER_URL}/api/sessions/${encodeURIComponent(session_id)}/progress`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ feedback_id, message, step, of }),
+      })
+    if (!resp.ok) {
+      throw new Error(`report_progress failed: ${resp.status} ${await resp.text()}`)
+    }
+    return { content: [{ type: 'text', text: `progress reported: ${message}` }] }
   }
   throw new Error(`unknown tool: ${req.params.name}`)
 })
