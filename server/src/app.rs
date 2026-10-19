@@ -357,6 +357,7 @@ pub fn build_app(state: AppState) -> Router {
         )
         .route("/api/sessions/{id}/reanchor", post(reanchor))
         .route("/api/sessions/{id}/feedback", get(pending_feedback))
+        .route("/api/sessions/{id}/callback", put(set_callback))
         .route("/api/sessions/{id}/star", put(set_starred))
         .route(
             "/api/sessions/{id}/annotation/{index}",
@@ -1262,6 +1263,59 @@ async fn update_content(
             }
         }
     }
+}
+
+/// Where the server may deliver a session's events.
+///
+/// Only this machine. The callback is a request the *server* makes, so an unrestricted
+/// URL from a LAN caller would turn it into a probe of the rest of the network.
+/// `EINK_CALLBACK_ALLOW_REMOTE=1` lifts that for a deliberate remote receiver.
+fn callback_url(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty()
+        || trimmed.len() > 2048
+        || trimmed.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        return None;
+    }
+    let rest = trimmed.strip_prefix("http://")?;
+    let authority = rest.split('/').next().unwrap_or(rest);
+    let host = match authority.rsplit_once(':') {
+        Some((host, _)) => host,
+        None => authority,
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    let loopback = host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback());
+    if !loopback && std::env::var("EINK_CALLBACK_ALLOW_REMOTE").as_deref() != Ok("1") {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+async fn set_callback(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    caller: Caller,
+    Json(body): Json<crate::api::SetCallbackRequest>,
+) -> Response {
+    if !caller.is_local() {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(url) = callback_url(&body.url) else {
+        return bad_request(
+            "callback url must be http:// on this machine (set EINK_CALLBACK_ALLOW_REMOTE=1 for a remote receiver)"
+                .into(),
+        );
+    };
+    let mut mgr = state.sessions.write().await;
+    if !mgr.set_callback(&id, Some(url.clone())) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    tracing::info!(id = %id, %url, "callback registered");
+    StatusCode::NO_CONTENT.into_response()
 }
 
 async fn set_starred(

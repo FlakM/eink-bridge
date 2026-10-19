@@ -9,6 +9,8 @@ import subprocess
 import tempfile
 import threading
 import unittest
+import urllib.error
+import urllib.request
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -95,6 +97,7 @@ class DeliveryTests(unittest.TestCase):
         pending = {"type": "annotation_result", "feedback_id": "recovered", "version": 1,
                    "annotations": [{"recognized_text":"say more","anchor":None,"strokes":[[[1,2],[3,4]]],"pressures":[[.5,.8]]}]}
         updates = []
+        callbacks = []
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
@@ -105,8 +108,19 @@ class DeliveryTests(unittest.TestCase):
             def log_message(self, *args):
                 pass
 
+            def do_POST(self):
+                callbacks.append((self.path, json.loads(self.rfile.read(int(self.headers['Content-Length'])))))
+                self.send_response(204)
+                self.end_headers()
+
             def do_PUT(self):
-                updates.append(json.loads(self.rfile.read(int(self.headers['Content-Length']))))
+                body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+                if self.path.endswith('/callback'):
+                    callbacks.append((self.path, body))
+                    self.send_response(204)
+                    self.end_headers()
+                    return
+                updates.append(body)
                 self.send_response(200)
                 self.end_headers()
                 self.wfile.write(b'{"version":2}')
@@ -152,12 +166,63 @@ class DeliveryTests(unittest.TestCase):
             self.assertFalse(result["result"].get("isError", False))
             self.assertEqual(updates, [{"content": "# Fixed", "expected_version": 1,
                                        "feedback_id": "recovered", "consumed_annotations": [0]}])
+            self.assertEqual(len(callbacks), 1, "the claim registers this instance's callback")
+            self.assertTrue(callbacks[0][1]["url"].startswith("http://127.0.0.1:"))
         finally:
             process.terminate()
             process.wait(timeout=5)
             process.stdin.close(); process.stdout.close(); process.stderr.close()
             server.shutdown()
             server.server_close()
+
+
+    # ── One channel per Claude instance ────────────────────────────────────────
+    #
+    # Found in the backlog: a fixed port meant a second instance either crashed or was
+    # never reached, and delivery for a session the instance did not own answered 200,
+    # so the server believed the note had landed.
+
+    def _start_channel(self, server_url=None, port=None):
+        env = {**os.environ, "EINK_SERVER_URL": server_url or "http://127.0.0.1:9"}
+        env.pop("EINK_CHANNEL_PORT", None)
+        if port is not None:
+            env["EINK_CHANNEL_PORT"] = str(port)
+        process = subprocess.Popen(
+            ["node", "--experimental-strip-types", "channel.ts"],
+            cwd=ROOT / "harness/channels/eink-channel",
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+        lines = queue.Queue()
+        threading.Thread(target=lambda: [lines.put(line) for line in process.stderr], daemon=True).start()
+        line = lines.get(timeout=10)
+        self.assertTrue(line.startswith("eink-channel listening on http://127.0.0.1:"), line)
+        return process, int(line.rsplit(":", 1)[1])
+
+    def test_two_instances_pick_different_ports(self):
+        first, first_port = self._start_channel()
+        second, second_port = self._start_channel()
+        try:
+            self.assertNotEqual(first_port, second_port,
+                                "two Claude instances must not fight over one port")
+        finally:
+            for process in (first, second):
+                process.terminate()
+                process.wait(timeout=5)
+                process.stdin.close(); process.stdout.close(); process.stderr.close()
+
+    def test_a_session_this_instance_does_not_own_is_refused(self):
+        process, port = self._start_channel()
+        try:
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{port}/", data=json.dumps({"id": "stranger"}).encode(),
+                headers={"Content-Type": "application/json"}, method="POST")
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                urllib.request.urlopen(request, timeout=5)
+            self.assertEqual(caught.exception.code, 404,
+                             "a 200 here tells the server the note was delivered")
+        finally:
+            process.terminate()
+            process.wait(timeout=5)
+            process.stdin.close(); process.stdout.close(); process.stderr.close()
 
 
 if __name__ == "__main__":

@@ -175,7 +175,7 @@ mutation-harness gradle retry.
 | Item | State | Commit |
 |---|---|---|
 | plan | landed | — |
-| 1 | in progress | |
+| 1 | landed | item 1 commit |
 | 2–11, s | queued | |
 
 ## Log
@@ -185,3 +185,11 @@ mutation-harness gradle retry.
   `cmd_result` returns `Ok(())` on 204; `cmd_update` takes only id+file; ConnectInfo already
   exists (token work is cheap); `/feedback` already exists (item 2 is mostly a skill and
   retry change); the render route is uncached. Wrote D1–D14 above; starting item 1.
+
+- **Item 1, landed.** The channel binds port 0, writes `listening on <url>` to stderr, and
+  `subscribe_session` now registers that URL with the server before subscribing. Unknown
+  sessions get 404 and are logged; deliveries and duplicates are logged with the session
+  id. `PUT /api/sessions/{id}/callback` refuses a remote caller (403) and a non-loopback
+  URL (400), and is covered in `api_edge_test`. Two instances and the 404 are covered in
+  `test_feedback_delivery.py`. Deviation from FIXME recorded as D1: registering on claim
+  beats passing the URL to `push`, which cannot know the owning instance's port.

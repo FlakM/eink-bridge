@@ -29,6 +29,11 @@ pub struct SetStarredRequest {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct SetCallbackRequest {
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct SubmitReviewRequest {
     #[serde(default)]
     pub document_version: Option<u32>,

@@ -1,15 +1,30 @@
-#!/usr/bin/env node --experimental-strip-types
+#!/usr/bin/env -S node --experimental-strip-types
 import { createServer } from 'node:http'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 
-const CHANNEL_PORT = parseInt(process.env.EINK_CHANNEL_PORT ?? '8789', 10)
+// Port 0 means "any free port": two Claude instances must be able to coexist, and a
+// fixed port makes the second one fail to bind and the first one unreachable by it.
+const CHANNEL_PORT = process.env.EINK_CHANNEL_PORT ?? '0'
 const SERVER_URL = process.env.EINK_SERVER_URL ?? 'http://localhost:3333'
 
 // Sessions subscribed by this Claude instance — only these receive channel events.
 const subscribedSessions = new Set<string>()
-const deliveredFeedback = new Set<string>()
+
+// Feedback ids already delivered. Bounded: a long-lived instance would otherwise grow
+// this set for every note the reader ever sends.
+const deliveredFeedback = new Map<string, true>()
+const DELIVERED_FEEDBACK_LIMIT = 512
+
+function rememberDelivered(feedbackId: string) {
+  deliveredFeedback.set(feedbackId, true)
+  while (deliveredFeedback.size > DELIVERED_FEEDBACK_LIMIT) {
+    const oldest = deliveredFeedback.keys().next().value
+    if (oldest === undefined) break
+    deliveredFeedback.delete(oldest)
+  }
+}
 
 function compactEvent(data: Record<string, unknown>) {
   const compact = { ...data }
@@ -27,18 +42,34 @@ function compactEvent(data: Record<string, unknown>) {
   return compact
 }
 
-async function deliver(session_id: string, data: Record<string, unknown>) {
-  if (!subscribedSessions.has(session_id)) return
+/**
+ * Deliver one event to this instance's Claude session.
+ *
+ * Returns false when the session is not ours. That must reach the caller as a failure:
+ * answering 200 for a session nobody here subscribed to tells the server the feedback
+ * landed, and it is then dropped with the tablet still waiting.
+ */
+async function deliver(session_id: string, data: Record<string, unknown>): Promise<boolean> {
+  if (!subscribedSessions.has(session_id)) {
+    process.stderr.write(`eink-channel skip session=${session_id} (not subscribed on this instance)\n`)
+    return false
+  }
   const feedbackId = typeof data.feedback_id === 'string' ? data.feedback_id : null
-  if (feedbackId && deliveredFeedback.has(feedbackId)) return
+  if (feedbackId && deliveredFeedback.has(feedbackId)) {
+    process.stderr.write(`eink-channel duplicate session=${session_id} feedback=${feedbackId}\n`)
+    return true
+  }
   const event_type = data.type === 'annotation_result' ? 'annotation_result'
     : data.status === 'Submitted' ? 'submitted' : 'cancelled'
   await mcp.notification({
     method: 'notifications/claude/channel',
     params: { content: JSON.stringify(compactEvent(data)), meta: { event_type, session_id } },
   })
-  if (feedbackId) deliveredFeedback.add(feedbackId)
+  process.stderr.write(
+    `eink-channel deliver session=${session_id} event=${event_type} feedback=${feedbackId ?? '-'}\n`)
+  if (feedbackId) rememberDelivered(feedbackId)
   if (event_type === 'submitted' || event_type === 'cancelled') subscribedSessions.delete(session_id)
+  return true
 }
 
 const mcp = new Server(
@@ -97,14 +128,32 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
 mcp.setRequestHandler(CallToolRequestSchema, async req => {
   if (req.params.name === 'subscribe_session') {
     const { session_id } = req.params.arguments as { session_id: string }
+    await listening
+    // Tell the server where this instance lives. `push --callback-url` cannot: the agent
+    // does not know which channel process will claim the session, and after a restart the
+    // stored URL points at a process that no longer exists. Registering on every claim is
+    // what repairs that.
+    const registered = await fetch(`${SERVER_URL}/api/sessions/${encodeURIComponent(session_id)}/callback`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: callbackUrl }),
+    })
+    if (!registered.ok && registered.status !== 404) {
+      throw new Error(`subscribe_session could not register its callback: ${registered.status}`)
+    }
+    if (registered.status === 404) {
+      process.stderr.write(
+        'eink-channel warning: the server has no callback route; pass --callback-url to push\n')
+    }
     subscribedSessions.add(session_id)
+    process.stderr.write(`eink-channel subscribe session=${session_id} callback=${callbackUrl}\n`)
     // Callback may have arrived before the session was claimed, or while this
     // process was down. Recover the durable request, not only future webhooks.
     const response = await fetch(`${SERVER_URL}/api/sessions/${encodeURIComponent(session_id)}/feedback`)
     if (!response.ok) throw new Error(`subscribe_session failed: ${response.status}`)
     const snapshot = await response.json() as { pending?: Record<string, unknown> }
     if (snapshot.pending) await deliver(session_id, snapshot.pending)
-    return { content: [{ type: 'text', text: `subscribed to session ${session_id}` }] }
+    return { content: [{ type: 'text', text: `subscribed to session ${session_id} (callback ${callbackUrl})` }] }
   }
   if (req.params.name === 'update_session') {
     const { session_id, content, consumed_annotations, feedback_id, expected_version } = req.params.arguments as {
@@ -126,6 +175,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
 
 await mcp.connect(new StdioServerTransport())
 
+let callbackUrl = ''
+
 const httpServer = createServer((req, res) => {
   if (req.method !== 'POST') {
     res.writeHead(405).end('method not allowed')
@@ -145,7 +196,12 @@ const httpServer = createServer((req, res) => {
 
     const session_id = String(data.id ?? '')
     try {
-      await deliver(session_id, data)
+      const delivered = await deliver(session_id, data)
+      if (!delivered) {
+        res.writeHead(404, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: 'session is not subscribed to this channel instance' }))
+        return
+      }
       res.writeHead(200).end('ok')
     } catch {
       res.writeHead(503).end('delivery failed; feedback remains on server')
@@ -153,4 +209,22 @@ const httpServer = createServer((req, res) => {
   })
 })
 
-httpServer.listen(CHANNEL_PORT, '127.0.0.1')
+// Announce the chosen port before anything can subscribe. `listening` is awaited by
+// subscribe_session, so a tool call cannot race the bind.
+const listening = new Promise<void>((resolve, reject) => {
+  httpServer.once('listening', () => {
+    const address = httpServer.address()
+    if (address === null || typeof address === 'string') {
+      reject(new Error('the channel did not get a TCP port'))
+      return
+    }
+    callbackUrl = `http://127.0.0.1:${address.port}`
+    process.stderr.write(`eink-channel listening on ${callbackUrl}\n`)
+    resolve()
+  })
+  httpServer.once('error', (error: Error) => {
+    process.stderr.write(`eink-channel cannot listen on port ${CHANNEL_PORT}: ${error.message}\n`)
+    reject(error)
+  })
+})
+httpServer.listen(Number(CHANNEL_PORT), '127.0.0.1')

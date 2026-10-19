@@ -400,6 +400,24 @@ impl SessionManager {
         }
     }
 
+    /// Record where this session's events should be delivered.
+    ///
+    /// Separate from creation because the channel instance that owns a session only
+    /// learns its own port at startup: `push` cannot know which instance will claim the
+    /// session. Registering on claim is also what repairs the URL after a restart.
+    pub fn set_callback(&mut self, id: &str, url: Option<String>) -> bool {
+        if let Some(s) = self.sessions.get_mut(id) {
+            if s.callback_url != url {
+                s.callback_url = url;
+                s.updated_at = Utc::now();
+                s.persist();
+            }
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn get(&self, id: &str) -> Option<&Session> {
         self.sessions.get(id)
     }

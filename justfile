@@ -79,6 +79,7 @@ lint:
 # syntax-check the page scripts the renderer embeds
 lint-assets:
     node --check {{server_dir}}/assets/*.js
+    node --experimental-strip-types --check harness/channels/eink-channel/channel.ts
 
 # check formatting without modifying
 check-fmt:

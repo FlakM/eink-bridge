@@ -1657,3 +1657,71 @@ async fn a_mutation_whose_write_fails_is_not_reported_as_a_success() {
         String::from_utf8_lossy(&body)
     );
 }
+
+#[tokio::test]
+async fn a_callback_is_registered_only_by_this_machine_and_only_to_this_machine() {
+    // The callback is a request the *server* makes. Letting a LAN caller name an
+    // arbitrary URL turns the server into a probe of the rest of the network, and
+    // letting it register the hook at all means redirecting a review's feedback.
+    let dir = tempfile::tempdir().unwrap();
+    let app = test_app(dir.path().to_path_buf());
+    let id = create(&app, "# Review\n\nBody").await;
+    let uri = format!("/api/sessions/{id}/callback");
+
+    let (status, _) = send(
+        &app,
+        Request::put(&uri)
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"url":"http://127.0.0.1:9999/"}"#))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a remote caller must not choose the hook"
+    );
+
+    let (status, _) = send(
+        &app,
+        Request::put(&uri)
+            .extension(from_this_machine())
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"url":"http://example.com/hook"}"#))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "the hook must be on this machine"
+    );
+
+    let (status, _) = send(
+        &app,
+        Request::put(&uri)
+            .extension(from_this_machine())
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"url":"http://127.0.0.1:8789"}"#))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (_, detail) = get_json(&app, &format!("/api/sessions/{id}")).await;
+    assert_eq!(
+        detail["callback_url"], "http://127.0.0.1:8789",
+        "the channel that claimed the session owns the callback"
+    );
+
+    let (status, _) = send(
+        &app,
+        Request::put("/api/sessions/nope/callback")
+            .extension(from_this_machine())
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"url":"http://127.0.0.1:8789"}"#))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
