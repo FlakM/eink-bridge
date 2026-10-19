@@ -248,6 +248,9 @@ class MainActivity : AppCompatActivity() {
             override fun onPageFinished(view: WebView, url: String) {
                 val sid = currentSessionId ?: return
                 Log.d(TAG, "webview onPageFinished url=$url session=$sid")
+                // The page is here, so the pen works -- before any of the polish below,
+                // which can and does bail out on an empty map.
+                penOverlay?.onPageReady()
                 // The ink mapping comes from the page, so it has to be read as soon as the
                 // page can answer -- otherwise the first strokes are drawn through the
                 // fallback until something happens to scroll or resize.
@@ -847,7 +850,13 @@ class MainActivity : AppCompatActivity() {
         val overlay = penOverlay ?: return
         val version = loadedVersion
         overlay.queryElementMap { current ->
-            if (currentSessionId != sid || current.isEmpty()) return@queryElementMap
+            if (currentSessionId != sid) return@queryElementMap
+            if (current.isEmpty()) {
+                // No map to reconcile against, but the page is loaded and drawable.
+                overlay.setInputEnabled(true)
+                strokeView.visibility = View.VISIBLE
+                return@queryElementMap
+            }
             val previous = sessionRepo.loadElementMap(sid)
             if (overlay.buf.isEmpty || previous == current) {
                 sessionRepo.saveElementMap(sid, current)

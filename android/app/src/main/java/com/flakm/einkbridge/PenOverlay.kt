@@ -798,6 +798,9 @@ internal class PenOverlay(
     /** Lifecycle hook — call from Activity.onResume. */
     fun onResumed() {
         paused = false
+        // A *layout* pause deliberately survives a resume (`layoutPauseCannotBeUndoneByResume`
+        // pins that): ink must not land against an element map that was never read. The page
+        // finishing its load is the signal that clears it, not the lifecycle.
         // No need to clear the finger here: `onPaused` already did, and a pause is what
         // precedes every resume. (The mutation run showed this line could be deleted with
         // no test noticing, which is the definition of a line that does not belong.)
@@ -834,10 +837,16 @@ internal class PenOverlay(
         val shouldDraw = contentReady && !isBindMode && !isSelectMode && !fingerDown && !paused
         Log.d(
             "EinkDraw",
-            "applyDrawingState shouldDraw=$shouldDraw " +
+            "applyDrawingState shouldDraw=$shouldDraw contentReady=$contentReady " +
                 "isBindMode=$isBindMode isSelectMode=$isSelectMode fingerDown=$fingerDown paused=$paused " +
                 "bufSize=${buf.size}"
         )
+        // The one term that is not a mode: a page load sets `contentReady` false, and if
+        // nothing ever sets it back the pen is dead while every other signal says draw.
+        // Say so, once, in words -- the log above buried it among five trues.
+        if (!shouldDraw && !isBindMode && !isSelectMode && !fingerDown && !paused && !contentReady) {
+            Log.w("EinkDraw", "the pen is off because the page has not reported ready")
+        }
         controller.setEnabled(shouldDraw)
     }
 
@@ -1295,8 +1304,26 @@ internal class PenOverlay(
     }
 
     private var contentReady = true
+
+    /** A page load starts by taking the pen away; the page finishing loading gives it back. */
     fun setInputEnabled(enabled: Boolean) {
         contentReady = enabled
+        applyDrawingState()
+    }
+
+    /**
+     * The page has loaded.
+     *
+     * Drawing must come back here, unconditionally: a load is what sets [contentReady]
+     * false, and everything downstream -- the element map, the relocation -- is polish. If
+     * one of those paths bails (an empty map, a session that changed under us) the pen
+     * would stay dead while the toolbar said DRAW, which is exactly how this failed.
+     */
+    fun onPageReady() {
+        if (!contentReady) {
+            Log.i("EinkDraw", "onPageReady: the page loaded, giving the pen back")
+        }
+        contentReady = true
         applyDrawingState()
     }
 

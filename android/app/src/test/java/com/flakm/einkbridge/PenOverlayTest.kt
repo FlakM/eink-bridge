@@ -215,6 +215,36 @@ class PenOverlayTest {
         assertTrue("and the group marker with it: $group", group.markerDocX > 290f)
     }
 
+    // ── A page load must not leave the pen dead ─────────────────────────────────
+    //
+    // Found on the tablet: the log said `shouldDraw=false isBindMode=false isSelectMode=false
+    // fingerDown=false paused=false` -- every signal named, all of them "draw" -- because the
+    // sixth term, `contentReady`, was the one the log did not print. A page load sets it
+    // false, and the paths that set it back (the element map, the relocation) can bail out.
+
+    @Test
+    fun aPageThatFinishedLoadingLeavesThePenEnabled() {
+        val fix = buildOverlayWithInit()
+        assertTrue(fix.mock.drawingEnabled)
+
+        fix.overlay.setInputEnabled(false) // the page starts loading
+        assertFalse("loading takes the pen away", fix.mock.drawingEnabled)
+
+        fix.overlay.onPageReady() // onPageFinished
+        assertTrue("the page is here, so the pen works", fix.mock.drawingEnabled)
+    }
+
+    @Test
+    fun theEmptyElementMapPathStillGivesThePenBack() {
+        // The relocation bails without touching the drawing state when there is no map to
+        // reconcile against -- so the page-ready signal has to be what enables the pen.
+        val fix = buildOverlayWithInit()
+        fix.overlay.setInputEnabled(false)
+        fix.overlay.onPageReady()
+        fix.overlay.setMode(ToolMode.DRAW)
+        assertTrue(fix.mock.drawingEnabled)
+    }
+
     // ── MockPenController behaviour ────────────────────────────────────────────
 
     @Test
