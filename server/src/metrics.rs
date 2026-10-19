@@ -56,6 +56,14 @@ pub static SESSIONS_EXPIRED: LazyLock<IntCounter> = LazyLock::new(
 );
 pub static SESSIONS_ACTIVE: LazyLock<IntGauge> =
     LazyLock::new(|| reg!(gauge "eink_sessions_active", "Currently active sessions"));
+pub static SESSION_DIRS_ON_DISK: LazyLock<IntGauge> = LazyLock::new(|| {
+    reg!(
+        gauge
+        "eink_session_dirs_on_disk",
+        "Session directories present on disk, including ones not loaded into memory"
+    )
+});
+
 pub static SESSIONS_STORED: LazyLock<IntGauge> =
     LazyLock::new(|| reg!(gauge "eink_sessions_stored", "Total sessions stored"));
 pub static SESSIONS_STARRED: LazyLock<IntGauge> =
@@ -158,6 +166,7 @@ pub fn init() {
     let _ = &*SESSIONS_EXPIRED;
     let _ = &*SESSIONS_ACTIVE;
     let _ = &*SESSIONS_STORED;
+    let _ = &*SESSION_DIRS_ON_DISK;
     let _ = &*SESSIONS_STARRED;
     let _ = &*SESSION_CONTENT_BYTES;
     let _ = &*SESSION_ANNOTATION_IMAGES;

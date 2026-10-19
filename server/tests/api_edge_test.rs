@@ -1902,3 +1902,35 @@ async fn a_token_keeps_the_lan_out_and_this_machine_in() {
     assert!(cookie.contains("eink_token=s3+cret"), "{cookie}");
     assert!(cookie.contains("HttpOnly"), "{cookie}");
 }
+
+#[tokio::test]
+async fn a_finished_session_directory_leaves_on_the_retention_sweep() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::with_config(dir.path().to_path_buf(), 5);
+    let app = build_app(state.clone());
+    let id = create(&app, "# Old work").await;
+    let path = session_dir(dir.path(), &id);
+    assert!(path.is_dir());
+
+    // Cancel it: terminal, unstarred, and (with a zero window) old enough.
+    let (status, _) = send(
+        &app,
+        Request::delete(format!("/api/sessions/{id}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let mut old = state.clone();
+    old.retention_days = 0;
+    let removed = old.sweep_retention().await;
+    assert_eq!(removed, 1);
+    assert!(!path.exists(), "retention must remove the directory, not only the memory");
+
+    let (_, metrics) = send(&app, Request::get("/metrics").body(Body::empty()).unwrap()).await;
+    assert!(
+        String::from_utf8_lossy(&metrics).contains("eink_session_dirs_on_disk 0"),
+        "the disk gauge must tell the truth after a sweep"
+    );
+}

@@ -180,7 +180,8 @@ mutation-harness gradle retry.
 | 3 | landed | item 3 commit |
 | 4 | landed | item 4 commit |
 | 5 | landed | item 5 commit |
-| 6–11, s | queued | |
+| 6 | landed | item 6 commit |
+| 7–11, s | queued | |
 
 ## Log
 
@@ -246,3 +247,11 @@ mutation-harness gradle retry.
   a secret to say the server is alive, and it exposes counters, not titles or bodies.
   Not done: no end-to-end test with a real LAN address (the harness has no second host);
   the server matrix and the shared client factory are tested instead.
+
+- **Item 6, landed.** `EINK_RETENTION_DAYS` (default 30, clamped 1..3650) selects terminal,
+  unstarred sessions older than the window; the sweep runs at startup and daily, collects
+  under the lock and deletes off it. `remove`/`purge_finished` now hand back the sessions
+  and the handlers delete their directories after dropping the guard. The gauge
+  `eink_session_dirs_on_disk` counts what is actually on disk, refreshed after create,
+  delete, purge and sweep. Unit test for the selection (starred survives, active survives,
+  recent survives), API test for the directory and the gauge.

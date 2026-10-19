@@ -53,6 +53,10 @@ pub struct AppState {
     /// The one client every webhook goes out through, with a bound: a receiver that
     /// never answers used to hold a task forever.
     pub http: reqwest::Client,
+    /// Where session directories live, for the retention sweep and the disk gauge.
+    pub state_dir: PathBuf,
+    /// Days a terminal, unstarred session is kept before its directory is removed.
+    pub retention_days: i64,
     /// When set, a caller that is not on this machine must present it. Loopback stays
     /// open so the CLI and the tablet on the same host need no configuration.
     pub token: Option<String>,
@@ -110,6 +114,17 @@ impl<S: Send + Sync> FromRequestParts<S> for Caller {
     }
 }
 
+/// How long finished work stays on disk. A day at least, so a mistake in the environment
+/// cannot sweep everything on the next start; ten years at most, so a typo is clamped
+/// rather than immortal.
+fn retention_days_from_env() -> i64 {
+    std::env::var("EINK_RETENTION_DAYS")
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|days| (1..=3650).contains(days))
+        .unwrap_or(30)
+}
+
 /// The directories `/source` may read from, colon-separated, or nothing when unset.
 fn source_roots_from_env() -> Option<Vec<PathBuf>> {
     let value = std::env::var("EINK_SOURCE_ROOTS").ok()?;
@@ -147,7 +162,7 @@ impl AppState {
             .timeout(WEBHOOK_TIMEOUT)
             .build()
             .expect("a default HTTP client can be built");
-        let mgr = SessionManager::with_writer(state_dir, write_tx.clone());
+        let mgr = SessionManager::with_writer(state_dir.clone(), write_tx.clone());
         let active = mgr
             .list()
             .iter()
@@ -166,6 +181,8 @@ impl AppState {
             ocr_engine,
             ws_heartbeat_seconds,
             http,
+            state_dir: state_dir.clone(),
+            retention_days: retention_days_from_env(),
             token: std::env::var("EINK_TOKEN")
                 .ok()
                 .map(|token| token.trim().to_string())
@@ -308,6 +325,52 @@ impl AppState {
 
     pub async fn ws_cleanup(&self, id: &str) {
         self.ws_senders.write().await.remove(id);
+    }
+
+    /// Count the session directories that are actually on disk.
+    ///
+    /// `eink_sessions_stored` is memory, and the two disagree after a crash or a purge
+    /// that could not finish; the runbook's "disk filling up" row needs the disk.
+    pub async fn refresh_dir_gauge(&self) {
+        let mut count = 0i64;
+        if let Ok(mut entries) = tokio::fs::read_dir(self.state_dir.join("sessions")).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                if entry.file_type().await.is_ok_and(|kind| kind.is_dir()) {
+                    count += 1;
+                }
+            }
+        }
+        crate::metrics::SESSION_DIRS_ON_DISK.set(count);
+    }
+
+    /// Remove directories of terminal, unstarred sessions older than the retention window.
+    ///
+    /// Called at startup and daily. The selection happens under the lock; the deletion
+    /// does not, so a slow disk slows the sweep and not the API.
+    pub async fn sweep_retention(&self) -> usize {
+        let removed = {
+            self.sessions
+                .write()
+                .await
+                .retention_candidates(self.retention_days)
+        };
+        let count = removed.len();
+        for session in removed {
+            if let Err(error) = tokio::fs::remove_dir_all(&session.state_dir).await {
+                tracing::warn!(
+                    path = %session.state_dir.display(),
+                    %error,
+                    "retention could not remove a session directory"
+                );
+            }
+        }
+        if count > 0 {
+            let stored = self.sessions.read().await.count() as i64;
+            crate::metrics::SESSIONS_STORED.set(stored);
+            tracing::info!(count, "retention removed old sessions");
+        }
+        self.refresh_dir_gauge().await;
+        count
     }
 
     pub async fn expire_stale(&self, timeout: Duration) -> usize {
@@ -853,6 +916,8 @@ async fn create_session(
     crate::metrics::SESSIONS_STORED.set(mgr.count() as i64);
     crate::metrics::SESSIONS_STARRED.set(mgr.starred_count() as i64);
     crate::metrics::SESSION_CONTENT_BYTES.observe(content_len as f64);
+    drop(mgr);
+    state.refresh_dir_gauge().await;
 
     (
         StatusCode::CREATED,
@@ -1057,6 +1122,11 @@ async fn delete_session(
             }
         }
         state.ws_cleanup(&id).await;
+        // Off the lock: the directory may hold megabytes of annotation images.
+        if let Err(error) = tokio::fs::remove_dir_all(&removed.state_dir).await {
+            tracing::warn!(path = %removed.state_dir.display(), %error, "failed to remove session dir");
+        }
+        state.refresh_dir_gauge().await;
         tracing::info!(id = %id, "session removed");
         return StatusCode::OK.into_response();
     }
@@ -1095,13 +1165,26 @@ async fn delete_session(
 }
 
 async fn purge_sessions(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let (count, stored, starred) = {
+    let (removed, stored, starred) = {
         let mut mgr = state.sessions.write().await;
-        let n = mgr.purge_finished();
-        (n, mgr.count(), mgr.starred_count())
+        let removed = mgr.purge_finished();
+        (removed, mgr.count(), mgr.starred_count())
     };
+    let count = removed.len();
     crate::metrics::SESSIONS_STORED.set(stored as i64);
     crate::metrics::SESSIONS_STARRED.set(starred as i64);
+    // Collected under the lock, deleted after it: a purge of hundreds of sessions must
+    // not stall every other mutation for the duration of the disk.
+    for session in removed {
+        if let Err(error) = tokio::fs::remove_dir_all(&session.state_dir).await {
+            tracing::warn!(
+                path = %session.state_dir.display(),
+                %error,
+                "failed to remove a purged session directory"
+            );
+        }
+    }
+    state.refresh_dir_gauge().await;
     tracing::info!(count, "sessions purged");
     Json(serde_json::json!({ "purged": count }))
 }

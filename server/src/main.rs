@@ -32,6 +32,18 @@ async fn main() {
     let app = eink_bridge::app::build_app(state.clone());
     let addr = config.bind_addr();
 
+    // Retention is independent of expiry: expiry ends a review, retention eventually
+    // removes the directory of a finished one. Run once at startup so a machine that
+    // was off for a week catches up, then daily.
+    let sweeper = state.clone();
+    tokio::spawn(async move {
+        loop {
+            sweeper.sweep_retention().await;
+            tokio::time::sleep(Duration::from_secs(24 * 60 * 60)).await;
+        }
+    });
+    state.refresh_dir_gauge().await;
+
     let timeout = Duration::from_secs(config.server.session_timeout_minutes * 60);
     let expirer = state.clone();
     tokio::spawn(async move {

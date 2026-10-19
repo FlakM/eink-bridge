@@ -551,17 +551,16 @@ impl SessionManager {
         self.remove(id).is_some()
     }
 
-    /// Forget a session and delete its files, handing back what it was so the caller can
-    /// tell a live review from a finished one.
+    /// Forget a session and hand it back so the caller can remove its directory *after*
+    /// dropping the lock. `remove_dir_all` under the write guard stalls every other
+    /// mutation for as long as the filesystem takes.
     pub fn remove(&mut self, id: &str) -> Option<Session> {
-        let session = self.sessions.remove(id)?;
-        let _ = fs::remove_dir_all(&session.state_dir);
-        Some(session)
+        self.sessions.remove(id)
     }
 
-    /// Remove all terminal-state sessions (Submitted, Cancelled, Expired) from memory and disk.
-    /// Starred sessions are never purged. Returns the number of sessions purged.
-    pub fn purge_finished(&mut self) -> usize {
+    /// Forget all terminal-state sessions (Submitted, Cancelled, Expired) and hand them
+    /// back for the caller to delete off the lock. Starred sessions are never purged.
+    pub fn purge_finished(&mut self) -> Vec<Session> {
         let finished: Vec<String> = self
             .sessions
             .values()
@@ -576,15 +575,36 @@ impl SessionManager {
             })
             .map(|s| s.id.clone())
             .collect();
-        let count = finished.len();
-        for id in &finished {
-            if let Some(s) = self.sessions.remove(id)
-                && let Err(e) = fs::remove_dir_all(&s.state_dir)
-            {
-                warn!(path = %s.state_dir.display(), error = %e, "failed to remove session dir");
-            }
-        }
-        count
+        finished
+            .into_iter()
+            .filter_map(|id| self.sessions.remove(&id))
+            .collect()
+    }
+
+    /// Terminal, unstarred sessions older than `days`, forgotten but not yet deleted.
+    ///
+    /// Collected here because the decision is about in-memory state, and removed by the
+    /// caller because deleting a directory is I/O that must not hold the lock.
+    pub fn retention_candidates(&mut self, days: i64) -> Vec<Session> {
+        let cutoff = Utc::now() - chrono::Duration::days(days);
+        let ids: Vec<String> = self
+            .sessions
+            .values()
+            .filter(|s| {
+                !s.starred
+                    && matches!(
+                        s.status,
+                        SessionStatus::Submitted
+                            | SessionStatus::Cancelled
+                            | SessionStatus::Expired
+                    )
+                    && s.updated_at < cutoff
+            })
+            .map(|s| s.id.clone())
+            .collect();
+        ids.into_iter()
+            .filter_map(|id| self.sessions.remove(&id))
+            .collect()
     }
 
     pub fn expire_stale(&mut self, timeout: Duration) -> usize {
@@ -805,9 +825,34 @@ mod tests {
         m.submit(&ephemeral.id, "notes".into(), vec![], None, None, vec![]);
 
         let purged = m.purge_finished();
-        assert_eq!(purged, 1);
+        assert_eq!(purged.len(), 1);
+        assert_eq!(purged[0].id, ephemeral.id);
         assert!(m.get(&pinned.id).is_some());
         assert!(m.get(&ephemeral.id).is_none());
+    }
+
+    #[test]
+    fn retention_takes_old_terminal_sessions_and_leaves_the_rest() {
+        let (mut m, _d) = mgr();
+        let old = m.create("old".into(), None, None, HashMap::new(), false, None);
+        let recent = m.create("recent".into(), None, None, HashMap::new(), false, None);
+        let pinned = m.create("pinned".into(), None, None, HashMap::new(), true, None);
+        let active = m.create("active".into(), None, None, HashMap::new(), false, None);
+        for id in [&old.id, &recent.id, &pinned.id, &active.id] {
+            m.cancel(id);
+        }
+        // A cancelled session is terminal; make `old` and `pinned` older than the window.
+        for id in [&old.id, &pinned.id] {
+            m.sessions.get_mut(id).unwrap().updated_at = Utc::now() - chrono::Duration::days(40);
+        }
+        m.sessions.get_mut(&active.id).unwrap().status = SessionStatus::Active;
+
+        let removed = m.retention_candidates(30);
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].id, old.id);
+        assert!(m.get(&recent.id).is_some(), "inside the window");
+        assert!(m.get(&pinned.id).is_some(), "pinned survives everything");
+        assert!(m.get(&active.id).is_some(), "a live review is not old work");
     }
 
     #[test]
