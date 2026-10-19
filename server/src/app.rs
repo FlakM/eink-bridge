@@ -231,13 +231,54 @@ async fn track_metrics(req: Request, next: Next) -> Response {
     resp
 }
 
-async fn health() -> Json<serde_json::Value> {
+/// Whether the server can actually write where it keeps sessions.
+///
+/// A permission bit is not the answer: a path that is a regular file looks writable by
+/// its mode while nothing can be created inside it, and a read-only mount keeps the
+/// mode of the directory underneath. Creating a file is the only honest probe.
+fn state_dir_is_writable(state_dir: &std::path::Path) -> bool {
+    let probe = state_dir.join(format!(".write-probe-{}", std::process::id()));
+    match std::fs::File::create(&probe) {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
     let exe = std::env::current_exe()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| "unknown".to_string());
+
+    // "ok" only says the process is up. What actually fails is the OCR engine, the disk,
+    // and the shape of the session store, so say those too rather than making the reader
+    // guess from symptoms.
+    let (stored, active, state_dir) = {
+        let mgr = state.sessions.read().await;
+        let stored = mgr.count();
+        let active = mgr
+            .list()
+            .iter()
+            .filter(|s| s.status == crate::session::SessionStatus::Active)
+            .count();
+        (stored, active, mgr.state_dir().to_path_buf())
+    };
+    let writable = state_dir_is_writable(&state_dir);
+
     Json(serde_json::json!({
         "status": "ok",
         "exe": exe,
+        "ready": {
+            "version": env!("CARGO_PKG_VERSION"),
+            "ocr": if state.ocr_engine.is_some() { "available" } else { "unavailable" },
+            "state_dir": state_dir.to_string_lossy(),
+            "state_dir_writable": writable,
+            "sessions": stored,
+            "active": active,
+            "ws_heartbeat_seconds": state.ws_heartbeat_seconds,
+        },
     }))
 }
 
@@ -406,6 +447,10 @@ struct DeleteParams {
     /// cancelled instead, leaving the review and its images on disk for good.
     #[serde(default)]
     remove: bool,
+    /// Removing a session that is still being read destroys work in progress, so it
+    /// takes a second, deliberate word.
+    #[serde(default)]
+    force: bool,
 }
 
 async fn delete_session(
@@ -414,6 +459,20 @@ async fn delete_session(
     Query(params): Query<DeleteParams>,
 ) -> Response {
     if params.remove {
+        if !params.force {
+            let live = {
+                let mgr = state.sessions.read().await;
+                mgr.get(&id)
+                    .is_some_and(|s| s.status == crate::session::SessionStatus::Active)
+            };
+            if live {
+                return (
+                    StatusCode::CONFLICT,
+                    "this review is still being read; cancel it first, or pass force=true",
+                )
+                    .into_response();
+            }
+        }
         let removed = state.sessions.write().await.delete(&id);
         if !removed {
             return StatusCode::NOT_FOUND.into_response();
@@ -884,7 +943,14 @@ async fn request_update(
                 let needs_ocr = g.recognized_text.is_none() && !strokes.is_empty();
                 async move {
                     if needs_ocr {
-                        engine.recognize_strokes(&strokes, &pressures).await.ok()
+                        engine
+                            .recognize_strokes_within(
+                                &strokes,
+                                &pressures,
+                                engine.interactive_timeout(),
+                            )
+                            .await
+                            .ok()
                     } else {
                         None
                     }

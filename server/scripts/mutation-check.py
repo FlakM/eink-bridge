@@ -30,6 +30,8 @@ WSI = SERVER / "src/ws.rs"
 OCRI = SERVER / "src/ocr.rs"
 PROVIDERSI = SERVER / "src/ocr/providers.rs"
 MAINI = SERVER / "src/main.rs"
+STROKEBUFFER = SERVER.parent / "android/app/src/main/java/com/flakm/einkbridge/StrokeBuffer.kt"
+FLAKE = SERVER.parent / "flake.nix"
 THEME = SERVER / "assets/eink-theme.tmTheme"
 
 
@@ -53,6 +55,9 @@ TARGETS = {
     "an_annotation_index_cannot_escape_the_session_directory": "--test api_edge_test",
     "a_client_that_stops_answering_is_dropped": "--test ws_heartbeat_test",
     "an_occupied_port_is_reported_in_words": "--test startup_test",
+    "the_allowlist_matches_the_filter_in_the_flake": "--test build_source_test",
+    "health_says_what_is_actually_wrong": "--test api_edge_test",
+    "remove_forgets_the_session_and_deletes_its_files": "--test api_edge_test",
     "the_cloud_timeout_stays_inside_a_usable_range": "--lib",
     "a_local_runtime_http_error_is_reported_with_its_status": "--lib",
     "handwriting_with_nothing_drawn_makes_no_request": "--lib",
@@ -62,6 +67,9 @@ TARGETS = {
 
 
 def target_for(test: str) -> str:
+    # A gradle case names its class in the test slot, since the class *is* the selector.
+    if test.startswith("gradle:"):
+        return test
     return TARGETS.get(test, "--lib")
 
 
@@ -69,7 +77,33 @@ class NoTestsRan(RuntimeError):
     """A test name that matches nothing proves nothing: it must not read as a pass."""
 
 
+ANDROID = SERVER.parent / "android"
+
+
+def gradle_is_green(class_name: str) -> bool:
+    """Run one Kotlin test class; the tablet's logic is tested by gradle, not cargo."""
+    proc = subprocess.run(
+        ["./gradlew", "testDebugUnitTest", "--tests", f"com.flakm.einkbridge.{class_name}"],
+        cwd=ANDROID,
+        capture_output=True,
+        text=True,
+    )
+    output = proc.stdout + proc.stderr
+    if proc.returncode == 0:
+        if "BUILD SUCCESSFUL" not in output:
+            raise NoTestsRan(f"{class_name} did not build: {output[-400:]}")
+        return True
+    if "compilation error" in output.lower() or output.count("e: ") > 0:
+        # The mutation did not compile, which is not evidence that a test noticed it.
+        raise NoTestsRan(f"{class_name} did not compile with this mutation: {output[-400:]}")
+    if "tests completed" not in output:
+        raise NoTestsRan(f"{class_name} ran no tests: {output[-400:]}")
+    return False
+
+
 def suite_is_green(test: str = "", target: str = "--lib") -> bool:  # noqa: D401
+    if target.startswith("gradle:"):
+        return gradle_is_green(target.split(":", 1)[1])
     proc = subprocess.run(
         ["cargo", "test", *target.split(), "--quiet", test],
         cwd=SERVER,
@@ -518,11 +552,11 @@ CASES = [
         "handwriting_with_nothing_drawn_makes_no_request",
     ),
     (
-        "a zero cloud timeout is accepted",
+        "the cloud timeout defaults to zero",
         text_edit(
             PROVIDERSI,
-            "        .filter(|v| (1..=120).contains(v))",
-            "        .filter(|v| (0..=120).contains(v))",
+            "    bounded_seconds(value, 15, 120)",
+            "    bounded_seconds(value, 0, 120)",
         ),
         "the_cloud_timeout_stays_inside_a_usable_range",
     ),
@@ -559,15 +593,11 @@ CASES = [
         "server_side_ocr_is_optional_and_says_so",
     ),
     (
-        "the remove command forgets to ask for removal",
+                "the remove command forgets to ask for removal",
         text_edit(
             CLII,
-            r"""    // `?remove=true` forgets the session and deletes its files; a bare DELETE cancels it.
-    let resp = client
-        .delete(format!("{server}/api/sessions/{id}?remove=true"))""",
-            r"""    // `?remove=true` forgets the session and deletes its files; a bare DELETE cancels it.
-    let resp = client
-        .delete(format!("{server}/api/sessions/{id}"))""",
+            r"""    let mut url = format!("{server}/api/sessions/{id}?remove=true");""",
+            r"""    let mut url = format!("{server}/api/sessions/{id}");""",
         ),
         "cli_remove_takes_the_review_away_and_cancel_keeps_it",
     ),
@@ -648,6 +678,71 @@ CASES = [
     };""",
         ),
         "an_occupied_port_is_reported_in_words",
+    ),
+    (
+        "removing a live review is allowed again",
+        text_edit(
+            APPI,
+            """            if live {
+                return (
+                    StatusCode::CONFLICT,""",
+            """            if false && live {
+                return (
+                    StatusCode::CONFLICT,""",
+        ),
+        "remove_forgets_the_session_and_deletes_its_files",
+    ),
+    (
+        "a zero OCR bound is accepted",
+        text_edit(
+            PROVIDERSI,
+            "        .filter(|v| (1..=max).contains(v))",
+            "        .filter(|v| (0..=max).contains(v))",
+        ),
+        "a_bound_is_never_zero_and_never_unbounded",
+    ),
+    (
+        "the interactive OCR bound is as long as the batch one",
+        text_edit(
+            OCRI,
+            "providers::bounded_seconds(interactive, 20, 120)",
+            "providers::bounded_seconds(interactive, 120, 120)",
+        ),
+        "the_interactive_bound_is_shorter_than_the_batch_one_by_default",
+    ),
+    (
+        "the health check claims a writable directory it never tried",
+        text_edit(
+            APPI,
+            """    match std::fs::File::create(&probe) {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }""",
+            """    let _ = std::fs::File::create(&probe);
+    true""",
+        ),
+        "health_says_what_is_actually_wrong",
+    ),
+    (
+        "a stroke far from every paragraph is bound anyway",
+        text_edit(
+            STROKEBUFFER,
+            "        if (distToElement(cx, cy, nearest) > maxBindDistance) {",
+            "        if (false) {",
+        ),
+        "gradle:StrokeBufferTest",
+    ),
+    (
+        "the build filter loses the metrics reference",
+        text_edit(
+            FLAKE,
+            """              (pkgs.lib.hasInfix "METRICS.md" path);""",
+            """              false;""",
+        ),
+        "the_allowlist_matches_the_filter_in_the_flake",
     ),
 ]
 

@@ -388,6 +388,7 @@ internal fun groupStrokesWithProximity(
     elements: List<ElementEntry>,
     explicitBindings: Map<Int, List<ElementEntry>> = emptyMap(),
     clusterThreshold: Float = 120f,
+    maxBindDistance: Float = 300f,
 ): Pair<List<StrokeGroup>, List<Stroke>> {
     if (elements.isEmpty()) return emptyList<StrokeGroup>() to strokes
 
@@ -428,13 +429,23 @@ internal fun groupStrokesWithProximity(
     for (i in 0 until n) clusterMap.getOrPut(find(i)) { mutableListOf() }.add(i)
 
     val proxGrouped = mutableMapOf<Int, MutableList<Stroke>>()
+    val tooFar = mutableListOf<Stroke>()
     for ((_, indices) in clusterMap) {
         val clusterStrokes = indices.map { free[it] }
         val pts = clusterStrokes.flatMap { it.points }
         val cx = pts.map { it.first }.average().toFloat()
         val cy = pts.map { it.second }.average().toFloat()
         val nearest = elements.minByOrNull { distToElement(cx, cy, it) }!!
-        proxGrouped.getOrPut(nearest.i) { mutableListOf() }.addAll(clusterStrokes)
+        // Binding whatever is nearest, however far, attaches a stray mark -- a test
+        // scribble, a note past the end of the page -- to a paragraph it has nothing to
+        // do with, and then moves it around whenever that paragraph is edited. Beyond a
+        // paragraph's reach the ink is submitted without an anchor instead: still the
+        // reader's, still visible, just not attributed to text it was not written about.
+        if (distToElement(cx, cy, nearest) > maxBindDistance) {
+            tooFar.addAll(clusterStrokes)
+        } else {
+            proxGrouped.getOrPut(nearest.i) { mutableListOf() }.addAll(clusterStrokes)
+        }
     }
 
     val result = mutableListOf<StrokeGroup>()
@@ -444,7 +455,7 @@ internal fun groupStrokesWithProximity(
     for ((elIdx, strks) in proxGrouped) {
         result.add(StrokeGroup(Anchor.Proximity(listOf(elementToRef(elements.first { it.i == elIdx }))), strks))
     }
-    return result to emptyList()
+    return result to tooFar
 }
 
 internal fun annotationsToJson(groups: List<StrokeGroup>, unanchored: List<Stroke>): String {

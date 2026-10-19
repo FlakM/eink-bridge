@@ -14,8 +14,14 @@ async fn start_server() -> (String, tokio::task::JoinHandle<()>) {
     let handle = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Wait for readiness rather than guessing: a loaded machine can take far longer than
+    // 50 ms, and a test that fails for that reason teaches people to ignore failures.
+    for _ in 0..500 {
+        if tokio::net::TcpStream::connect(addr).await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     (url, handle)
 }
 

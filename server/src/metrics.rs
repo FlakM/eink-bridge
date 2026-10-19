@@ -298,17 +298,33 @@ mod tests {
         }
     }
 
+    /// The observation count of one histogram series.
+    fn observations(label: &str) -> u64 {
+        let exposed = render();
+        exposed
+            .lines()
+            .find(|line| {
+                line.starts_with(&format!("eink_ocr_provider_duration_seconds_count{label}"))
+            })
+            .and_then(|line| line.rsplit(' ').next())
+            .and_then(|value| value.parse().ok())
+            .expect("the series is exported")
+    }
+
     #[test]
     fn seeding_does_not_invent_observations() {
         // A histogram child is created by touching it, but nothing may be *recorded*: a
         // seeded observation would put a spurious zero-duration sample in the panels.
+        // Counted before and after rather than asserted to be zero, because other tests
+        // in this binary legitimately observe durations.
         init();
-        let exposed = render();
-        assert!(
-            exposed.contains(
-                "eink_ocr_provider_duration_seconds_count{provider=\"local\",result=\"ok\"} 0"
-            ),
-            "the seeded histogram should have no observations:\n{exposed}"
+        let label = "{provider=\"local\",result=\"ok\"}";
+        let before = observations(label);
+        seed_label_vocabularies();
+        assert_eq!(
+            observations(label),
+            before,
+            "seeding must create the series without recording a sample"
         );
     }
 

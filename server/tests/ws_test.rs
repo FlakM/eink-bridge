@@ -15,8 +15,21 @@ async fn start_server() -> (String, tokio::task::JoinHandle<()>) {
     let handle = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    wait_until_ready(&url).await;
     (url, handle)
+}
+
+/// Wait until the server is accepting connections instead of guessing how long it needs:
+/// a loaded machine can take much longer than the usual 50 ms, and a test that fails
+/// because of that teaches people to ignore failures.
+async fn wait_until_ready(url: &str) {
+    for _ in 0..500 {
+        if reqwest::get(format!("{url}/api/health")).await.is_ok() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("the test server never answered on {url}");
 }
 
 async fn create_session(url: &str) -> String {

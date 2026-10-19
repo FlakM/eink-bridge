@@ -444,13 +444,41 @@ class StrokeBufferTest {
         assertEquals("H2", (groups[0].anchor as Anchor.Proximity).elements[0].tag)
     }
 
-    @Test fun strokeFarFromElementsStillAnchorsToNearest() {
-        val stroke = Stroke(listOf(500f to 500f, 510f to 510f), 3f)
-        val el = element(0, "P", 10f, 10f, 50f, 30f)
+    @Test fun aStrokeWithinReachOfAParagraphIsBoundToIt() {
+        // A margin note: next to the text, not on it.
+        val stroke = Stroke(listOf(40f to 100f, 50f to 110f), 3f)
+        val el = element(0, "P", 80f, 80f, 300f, 140f)
         val (groups, unanchored) = groupStrokesWithProximity(listOf(stroke), listOf(el))
         assertEquals(1, groups.size)
         assertTrue(unanchored.isEmpty())
         assertTrue(groups[0].anchor is Anchor.Proximity)
+    }
+
+    @Test fun aStrokeBeyondEveryElementIsSubmittedWithoutAnAnchor() {
+        // Far from every paragraph -- a scribble in empty space -- belongs to no text, so
+        // it must not be attached to the nearest one and dragged around with it later.
+        val stroke = Stroke(listOf(500f to 900f, 510f to 910f), 3f)
+        val el = element(0, "P", 10f, 10f, 50f, 30f)
+        val (groups, unanchored) = groupStrokesWithProximity(listOf(stroke), listOf(el))
+        assertTrue("nothing should be bound: $groups", groups.isEmpty())
+        assertEquals(1, unanchored.size)
+    }
+
+    @Test fun theBindDistanceIsTheBoundaryItClaimsToBe() {
+        // Just inside the reach binds; just outside does not. The cap is a distance from
+        // the element's rectangle, so a stroke inside it is always inside the bound.
+        val el = element(0, "P", 80f, 80f, 300f, 140f)
+        val reach = 300f
+        val inside = Stroke(listOf(80f to (140f + reach - 1f)), 3f)
+        val outside = Stroke(listOf(80f to (140f + reach + 1f)), 3f)
+
+        val (boundGroups, boundLeft) = groupStrokesWithProximity(listOf(inside), listOf(el))
+        assertEquals(1, boundGroups.size)
+        assertTrue(boundLeft.isEmpty())
+
+        val (farGroups, farLeft) = groupStrokesWithProximity(listOf(outside), listOf(el))
+        assertTrue(farGroups.isEmpty())
+        assertEquals(1, farLeft.size)
     }
 
     @Test fun multipleStrokesNearSameElementGrouped() {

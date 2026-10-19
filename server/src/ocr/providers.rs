@@ -13,9 +13,11 @@ pub(super) async fn ollama(
     url: &str,
     model: &str,
     image: &str,
+    timeout: Duration,
 ) -> Result<String, String> {
     let response = client
         .post(format!("{}/api/generate", url.trim_end_matches('/')))
+        .timeout(timeout)
         .json(&json!({
             "model": model, "prompt": PROMPT, "images": [image],
             "stream": false, "options": { "num_predict": 256 },
@@ -54,9 +56,15 @@ pub(super) async fn ollama(
 
 /// Dedicated llama-server with OCR-specific image-token limits. This bypasses
 /// Ollama's Qwen-VL minimum without changing the shared Ollama service.
-pub(super) async fn llama(client: &Client, url: &str, image: &str) -> Result<String, String> {
+pub(super) async fn llama(
+    client: &Client,
+    url: &str,
+    image: &str,
+    timeout: Duration,
+) -> Result<String, String> {
     let response = client
         .post(format!("{}/v1/chat/completions", url.trim_end_matches('/')))
+        .timeout(timeout)
         .json(&json!({
             "messages": [{"role":"user", "content":[
                 {"type":"text", "text":PROMPT},
@@ -206,13 +214,18 @@ fn enabled(value: Option<&str>) -> bool {
     matches!(value, Some("1" | "true"))
 }
 
-/// The cloud timeout, bounded to something usable. A zero would time out every request
-/// before it was sent, which reads as "the cloud provider never answers".
-fn timeout_seconds(value: Option<&str>) -> u64 {
+/// A timeout from the environment, bounded to something usable. A zero would time out
+/// every request before it was sent, which reads as "the provider never answers".
+pub(super) fn bounded_seconds(value: Option<&str>, default: u64, max: u64) -> u64 {
     value
         .and_then(|v| v.trim().parse::<u64>().ok())
-        .filter(|v| (1..=120).contains(v))
-        .unwrap_or(15)
+        .filter(|v| (1..=max).contains(v))
+        .unwrap_or(default)
+}
+
+/// The cloud timeout, bounded to something usable.
+fn timeout_seconds(value: Option<&str>) -> u64 {
+    bounded_seconds(value, 15, 120)
 }
 
 fn parse_openai(body: &Value) -> Result<String, String> {
@@ -305,6 +318,23 @@ mod tests {
                 "{unusable:?} would break every request rather than fall back"
             );
         }
+    }
+
+    #[test]
+    fn a_bound_is_never_zero_and_never_unbounded() {
+        // Used for the local OCR calls: a zero abandons every attempt before it is sent,
+        // and no ceiling leaves a reader waiting on a model that has stopped.
+        assert_eq!(bounded_seconds(None, 120, 300), 120);
+        assert_eq!(bounded_seconds(Some("45"), 120, 300), 45);
+        for unusable in ["0", "301", "abc", "", "  ", "-1", "1e3"] {
+            assert_eq!(
+                bounded_seconds(Some(unusable), 120, 300),
+                120,
+                "{unusable:?} should fall back rather than disable OCR"
+            );
+        }
+        assert_eq!(bounded_seconds(Some("300"), 120, 300), 300);
+        assert_eq!(bounded_seconds(Some("301"), 20, 120), 20);
     }
 
     #[test]

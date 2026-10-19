@@ -63,6 +63,35 @@ async fn remove_forgets_the_session_and_deletes_its_files() {
     let id = create(&app, "# Review\n\nBody").await;
     assert!(session_dir(dir.path(), &id).exists());
 
+    // A review that is still being read is not removed on a bare request: that would
+    // throw away work in progress on a mistyped id.
+    let (status, body) = send(
+        &app,
+        Request::delete(format!("/api/sessions/{id}?remove=true"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(
+        String::from_utf8_lossy(&body).contains("cancel it first"),
+        "the refusal should say what to do instead: {}",
+        String::from_utf8_lossy(&body)
+    );
+    assert!(
+        session_dir(dir.path(), &id).exists(),
+        "a refused removal must not have touched the files"
+    );
+
+    // Cancelling first is the graceful path, and then removal is allowed.
+    let (status, _) = send(
+        &app,
+        Request::delete(format!("/api/sessions/{id}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
     let (status, _) = send(
         &app,
         Request::delete(format!("/api/sessions/{id}?remove=true"))
@@ -96,6 +125,26 @@ async fn remove_forgets_the_session_and_deletes_its_files() {
         StatusCode::NOT_FOUND,
         "removing twice is not an error"
     );
+}
+
+#[tokio::test]
+async fn a_forced_removal_takes_a_live_review_away() {
+    // The reader may simply give up on a session; `--force` is the deliberate word.
+    let dir = tempfile::tempdir().unwrap();
+    let app = test_app(dir.path().to_path_buf());
+    let id = create(&app, "# Abandoned").await;
+
+    let (status, _) = send(
+        &app,
+        Request::delete(format!("/api/sessions/{id}?remove=true&force=true"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!session_dir(dir.path(), &id).exists());
+    let (status, _) = get_json(&app, &format!("/api/sessions/{id}")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -854,5 +903,53 @@ async fn the_webhook_metric_counts_what_actually_happened() {
     assert!(
         counted_failure,
         "an undeliverable webhook must be counted as an error"
+    );
+}
+
+#[tokio::test]
+async fn health_says_what_is_actually_wrong() {
+    // "ok" only means the process is up. The three things that actually fail are the OCR
+    // engine, the disk, and the shape of the session store.
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = AppState::with_config(dir.path().to_path_buf(), 5);
+    state.ocr_engine = None;
+    state.ws_heartbeat_seconds = 7;
+    let app = build_app(state);
+    let _first = create(&app, "# One").await;
+
+    let (status, health) = get_json(&app, "/api/health").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(health["status"], "ok");
+    assert!(health["exe"].as_str().is_some_and(|e| !e.is_empty()));
+    let ready = &health["ready"];
+    assert_eq!(ready["ocr"], "unavailable", "and it should say so");
+    assert_eq!(ready["state_dir_writable"], true);
+    assert_eq!(ready["sessions"], 1);
+    assert_eq!(ready["active"], 1);
+    assert_eq!(ready["ws_heartbeat_seconds"], 7);
+    assert!(
+        ready["version"].as_str().is_some_and(|v| !v.is_empty()),
+        "the running version is the first thing wanted in a bug report"
+    );
+
+    // An engine that is configured reports as available.
+    let mut state = AppState::with_config(dir.path().to_path_buf(), 5);
+    state.ocr_engine = Some(std::sync::Arc::new(
+        eink_bridge::ocr::OcrEngine::new().expect("a client can be built"),
+    ));
+    let app = build_app(state);
+    let (_, health) = get_json(&app, "/api/health").await;
+    assert_eq!(health["ready"]["ocr"], "available");
+
+    // A state directory that cannot be written is visible before it costs a review.
+    // A path that is a file, not a directory: its mode looks writable and nothing can be
+    // created inside it.
+    let blocked = dir.path().join("blocked");
+    std::fs::write(&blocked, b"in the way").unwrap();
+    let app = build_app(AppState::with_config(blocked, 5));
+    let (_, health) = get_json(&app, "/api/health").await;
+    assert_eq!(
+        health["ready"]["state_dir_writable"], false,
+        "an unwritable state directory must be visible: {health}"
     );
 }

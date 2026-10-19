@@ -21,6 +21,35 @@ pub struct OcrEngine {
     llama_url: Option<String>,
     openai: Option<providers::OpenAi>,
     cache: Mutex<cache::RecognitionCache>,
+    /// How long a local model may take before the attempt is abandoned. A stalled model
+    /// used to hold a caller for two minutes with nothing to show for it.
+    local_timeout: std::time::Duration,
+    /// The shorter bound for calls a reader is waiting on, which block a response.
+    interactive_timeout: std::time::Duration,
+}
+
+/// Bounds for the local OCR calls, from the environment, with a usable default and a hard
+/// ceiling. A zero would abandon every attempt before it was sent.
+fn local_timeouts() -> (std::time::Duration, std::time::Duration) {
+    local_timeouts_from(
+        std::env::var("EINK_OCR_TIMEOUT_SECONDS").ok().as_deref(),
+        std::env::var("EINK_OCR_INTERACTIVE_TIMEOUT_SECONDS")
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// The bounds, from values rather than from the environment, so the defaults are
+/// something a test can hold on to: a batch call may wait two minutes, but a reader
+/// holding a pen is waiting on the answer.
+fn local_timeouts_from(
+    general: Option<&str>,
+    interactive: Option<&str>,
+) -> (std::time::Duration, std::time::Duration) {
+    (
+        std::time::Duration::from_secs(providers::bounded_seconds(general, 120, 300)),
+        std::time::Duration::from_secs(providers::bounded_seconds(interactive, 20, 120)),
+    )
 }
 
 impl OcrEngine {
@@ -41,6 +70,7 @@ impl OcrEngine {
         if let Some(url) = &llama_url {
             info!(url, "Dedicated local OCR runtime selected");
         }
+        let (local_timeout, interactive_timeout) = local_timeouts();
         Ok(Self {
             debug_save,
             client,
@@ -49,10 +79,21 @@ impl OcrEngine {
             llama_url,
             openai: providers::OpenAi::from_env(),
             cache: Mutex::new(cache::RecognitionCache::default()),
+            local_timeout,
+            interactive_timeout,
         })
     }
 
     pub async fn recognize_image(&self, png: &[u8]) -> Result<String, String> {
+        self.recognize_image_within(png, self.local_timeout).await
+    }
+
+    /// Recognize with an explicit bound, for a caller with a deadline of its own.
+    pub async fn recognize_image_within(
+        &self,
+        png: &[u8],
+        timeout: std::time::Duration,
+    ) -> Result<String, String> {
         let t = Instant::now();
         let cell = self.cache.lock().await.entry(png, Instant::now());
         let hit = cell.get().is_some_and(Result::is_ok);
@@ -60,7 +101,7 @@ impl OcrEngine {
         let result = cell
             .get_or_init(|| {
                 initialized = true;
-                self.recognize_uncached(png)
+                self.recognize_uncached(png, timeout)
             })
             .await;
         if result.is_err() {
@@ -94,12 +135,16 @@ impl OcrEngine {
             .map_err(Clone::clone)
     }
 
-    async fn recognize_uncached(&self, png: &[u8]) -> Result<race::Recognition, String> {
+    async fn recognize_uncached(
+        &self,
+        png: &[u8],
+        timeout: std::time::Duration,
+    ) -> Result<race::Recognition, String> {
         if self.debug_save {
             let _ = save_debug_png(png).map(|path| info!(path = %path, "OCR debug PNG saved"));
         }
         let image = base64::engine::general_purpose::STANDARD.encode(png);
-        let local = race::observe("local", self.recognize_local(&image));
+        let local = race::observe("local", self.recognize_local(&image, timeout));
         let result = if let Some(openai) = &self.openai {
             race::first_valid(local, race::observe("openai", openai.recognize(&image))).await
         } else {
@@ -111,19 +156,35 @@ impl OcrEngine {
         Ok(result)
     }
 
-    async fn recognize_local(&self, image: &str) -> Result<String, String> {
+    async fn recognize_local(
+        &self,
+        image: &str,
+        timeout: std::time::Duration,
+    ) -> Result<String, String> {
         if let Some(url) = &self.llama_url {
-            providers::llama(&self.client, url, image).await
+            providers::llama(&self.client, url, image, timeout).await
         } else {
-            providers::ollama(&self.client, &self.ollama_url, &self.ollama_model, image).await
+            providers::ollama(
+                &self.client,
+                &self.ollama_url,
+                &self.ollama_model,
+                image,
+                timeout,
+            )
+            .await
         }
+    }
+
+    /// How long a call a reader is waiting on may take.
+    pub fn interactive_timeout(&self) -> std::time::Duration {
+        self.interactive_timeout
     }
 
     /// Explicit benchmark: bypasses the cache and lets both providers finish.
     /// Cloud calls still require EINK_OCR_OPENAI_ENABLED and a server-side key.
     pub async fn compare_image(&self, png: &[u8]) -> Vec<ProviderBenchmark> {
         let image = base64::engine::general_purpose::STANDARD.encode(png);
-        let local = race::benchmark("local", self.recognize_local(&image));
+        let local = race::benchmark("local", self.recognize_local(&image, self.local_timeout));
         if let Some(openai) = &self.openai {
             let (local, cloud) =
                 tokio::join!(local, race::benchmark("openai", openai.recognize(&image)));
@@ -138,6 +199,18 @@ impl OcrEngine {
         strokes: &[Vec<[f64; 2]>],
         pressures: &[Vec<f64>],
     ) -> Result<String, String> {
+        self.recognize_strokes_within(strokes, pressures, self.local_timeout)
+            .await
+    }
+
+    /// Recognize strokes with an explicit bound, for the path where a reader is waiting
+    /// on the answer.
+    pub async fn recognize_strokes_within(
+        &self,
+        strokes: &[Vec<[f64; 2]>],
+        pressures: &[Vec<f64>],
+        timeout: std::time::Duration,
+    ) -> Result<String, String> {
         if strokes.is_empty() {
             return Ok(String::new());
         }
@@ -148,7 +221,7 @@ impl OcrEngine {
             "OCR: rendering strokes"
         );
         let png = render_strokes_to_png(strokes, pressures)?;
-        self.recognize_image(&png).await
+        self.recognize_image_within(&png, timeout).await
     }
 }
 
@@ -327,6 +400,8 @@ mod tests {
                 llama_url: None,
                 openai: None,
                 cache: Mutex::new(cache::RecognitionCache::default()),
+                local_timeout: std::time::Duration::from_secs(2),
+                interactive_timeout: std::time::Duration::from_millis(200),
             },
             rx,
         )
@@ -476,6 +551,52 @@ mod tests {
         match OcrEngine::new() {
             Ok(_) => {}
             Err(e) => eprintln!("OCR engine init skipped: {e}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod bound_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn the_interactive_bound_is_shorter_than_the_batch_one_by_default() {
+        let (general, interactive) = local_timeouts_from(None, None);
+        assert_eq!(general, Duration::from_secs(120));
+        assert_eq!(
+            interactive,
+            Duration::from_secs(20),
+            "a reader waiting on OCR should not be held for the batch timeout"
+        );
+        assert!(interactive < general);
+    }
+
+    #[test]
+    fn the_bounds_follow_the_environment_when_it_is_usable() {
+        let (general, interactive) = local_timeouts_from(Some("300"), Some("90"));
+        assert_eq!(general, Duration::from_secs(300));
+        assert_eq!(interactive, Duration::from_secs(90));
+
+        let (general, interactive) = local_timeouts_from(Some("45"), None);
+        assert_eq!(general, Duration::from_secs(45));
+        assert_eq!(interactive, Duration::from_secs(20));
+    }
+
+    #[test]
+    fn an_unusable_bound_falls_back_rather_than_disabling_ocr() {
+        for (general, interactive) in [
+            (Some("0"), Some("9999")),
+            (Some("abc"), Some("-5")),
+            (Some("99999"), Some("0")),
+        ] {
+            let (general_secs, interactive_secs) = local_timeouts_from(general, interactive);
+            assert_eq!(general_secs, Duration::from_secs(120), "from {general:?}");
+            assert_eq!(
+                interactive_secs,
+                Duration::from_secs(20),
+                "from {interactive:?}"
+            );
         }
     }
 }

@@ -328,6 +328,10 @@ impl SessionManager {
         Some(s.version)
     }
 
+    pub fn state_dir(&self) -> &std::path::Path {
+        &self.state_dir
+    }
+
     pub fn count(&self) -> usize {
         self.sessions.len()
     }

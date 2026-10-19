@@ -81,11 +81,26 @@ class AnnotationRelocationTest {
     }
 
     @Test
-    fun aFreeNoteBindsToTheNearestParagraphHoweverFarItIs() {
-        // Proximity is the only rule for a stroke the reader never bound, and there is no
-        // distance cap: a note written in the margin or below the last paragraph belongs
-        // to the paragraph nearest it, so it travels with that paragraph rather than
-        // being archived on every edit.
+    fun aFreeNoteWithinReachTravelsWithItsParagraph() {
+        // A margin note: near enough to the text to belong to it, so it follows the
+        // paragraph when the paragraph moves.
+        val note = Stroke(listOf(30f to 110f), 3f)
+        val ink = relocateInk(
+            listOf(note), emptyList(),
+            listOf(element(1, 100f, "kept")),
+            listOf(element(8, 400f, "kept")),
+            listOf(8),
+        )
+        assertEquals("a margin note is kept", 1, ink.strokes.size)
+        assertEquals(listOf(30f to 410f), ink.strokes.single().points)
+        assertEquals(0, ink.orphanCount)
+    }
+
+    @Test
+    fun aFreeNoteFarFromEveryParagraphIsArchivedRatherThanMoved() {
+        // Beyond a paragraph's reach the ink belongs to no text. It is archived rather
+        // than attached to the nearest paragraph and dragged around with it on later
+        // edits, which is what a note in empty space used to do.
         val far = Stroke(listOf(1500f to 3000f), 3f)
         val ink = relocateInk(
             listOf(far), emptyList(),
@@ -93,9 +108,8 @@ class AnnotationRelocationTest {
             listOf(element(8, 400f, "kept")),
             listOf(8),
         )
-        assertEquals("a free note is kept", 1, ink.strokes.size)
-        assertEquals(listOf(1500f to 3300f), ink.strokes.single().points)
-        assertEquals(0, ink.orphanCount)
+        assertTrue("nothing should be drawn: ${ink.strokes}", ink.strokes.isEmpty())
+        assertEquals(1, ink.orphanCount)
     }
 
     @Test

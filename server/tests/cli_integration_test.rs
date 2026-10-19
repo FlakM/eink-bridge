@@ -69,10 +69,21 @@ async fn start_server() -> (String, tokio::task::JoinHandle<()>) {
     let handle = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-
-    // Give server a moment to start
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    wait_until_ready(&url).await;
     (url, handle)
+}
+
+/// Wait until the server is accepting connections instead of guessing how long it needs:
+/// a loaded machine can take much longer than the usual 50 ms, and a test that fails
+/// because of that teaches people to ignore failures.
+async fn wait_until_ready(url: &str) {
+    for _ in 0..500 {
+        if reqwest::get(format!("{url}/api/health")).await.is_ok() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("the test server never answered on {url}");
 }
 
 /// Submit a session with typed notes via HTTP.
@@ -1169,8 +1180,16 @@ async fn cli_remove_takes_the_review_away_and_cancel_keeps_it() {
             .status
             .success()
     );
+    // A live review is refused, so `remove` has to be deliberate about it.
+    let refused = run_cli(&server_url, &["remove", &removed]).await;
+    assert!(!refused.status.success());
     assert!(
-        run_cli(&server_url, &["remove", &removed])
+        String::from_utf8_lossy(&refused.stderr).contains("still being read"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(
+        run_cli(&server_url, &["remove", "--force", &removed])
             .await
             .status
             .success()

@@ -60,6 +60,8 @@ fn engine(local: &Mock, cloud: Option<&Mock>) -> OcrEngine {
         ollama_url: local.url.clone(),
         ollama_model: "local-model".into(),
         llama_url: None,
+        local_timeout: Duration::from_secs(2),
+        interactive_timeout: Duration::from_millis(200),
         openai: cloud.map(|mock| {
             providers::OpenAi::new(
                 "test-key",
@@ -413,4 +415,45 @@ async fn a_local_runtime_http_error_is_reported_with_its_status() {
         error.contains("500"),
         "the operator needs the status to tell a crash from a timeout: {error}"
     );
+}
+
+#[tokio::test]
+async fn a_model_that_never_answers_is_abandoned_at_the_bound() {
+    // A stalled model used to hold the caller for the engine's whole two-minute timeout,
+    // and on the interactive path that is a reader waiting with a pen in their hand.
+    let stalled = mock(
+        vec![(StatusCode::OK, json!({"response": "too late"}))],
+        Duration::from_secs(5),
+    )
+    .await;
+    let engine = engine(&stalled, None);
+
+    let started = std::time::Instant::now();
+    let error = engine
+        .recognize_image_within(b"png", Duration::from_millis(150))
+        .await
+        .unwrap_err();
+    assert!(
+        error.contains("timed out"),
+        "the caller should be told it was a timeout: {error}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the bound has to be the caller's, not the engine's"
+    );
+}
+
+#[tokio::test]
+async fn the_interactive_bound_is_shorter_than_the_general_one() {
+    // The tablet asks for OCR while the reader waits, so it must not inherit a bound
+    // meant for a batch job.
+    let engine = engine(
+        &mock(
+            vec![(StatusCode::OK, json!({"response": "x"}))],
+            Duration::ZERO,
+        )
+        .await,
+        None,
+    );
+    assert!(engine.interactive_timeout() < engine.local_timeout);
 }

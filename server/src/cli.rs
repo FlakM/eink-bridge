@@ -85,10 +85,13 @@ enum Command {
         /// Session ID
         id: String,
     },
-    /// Permanently remove a session (any status) from disk
+    /// Permanently remove a session from disk
     Remove {
         /// Session ID
         id: String,
+        /// Remove even a review that is still being read
+        #[arg(long)]
+        force: bool,
     },
     /// List sessions
     List {
@@ -145,7 +148,7 @@ async fn main() {
         Command::Watch { id, timeout } => cmd_push_interactive(&cli.server, &id, timeout).await,
         Command::Result { id, json } => cmd_result(&client, &cli.server, &id, json).await,
         Command::Cancel { id } => cmd_cancel(&client, &cli.server, &id).await,
-        Command::Remove { id } => cmd_remove(&client, &cli.server, &id).await,
+        Command::Remove { id, force } => cmd_remove(&client, &cli.server, &id, force).await,
         Command::List { status } => cmd_list(&client, &cli.server, status).await,
         Command::Star { id } => cmd_set_starred(&client, &cli.server, &id, true).await,
         Command::Unstar { id } => cmd_set_starred(&client, &cli.server, &id, false).await,
@@ -518,12 +521,15 @@ async fn cmd_cancel(client: &Client, server: &str, id: &str) -> anyhow::Result<(
     }
 }
 
-async fn cmd_remove(client: &Client, server: &str, id: &str) -> anyhow::Result<()> {
+async fn cmd_remove(client: &Client, server: &str, id: &str, force: bool) -> anyhow::Result<()> {
     // `?remove=true` forgets the session and deletes its files; a bare DELETE cancels it.
-    let resp = client
-        .delete(format!("{server}/api/sessions/{id}?remove=true"))
-        .send()
-        .await?;
+    // A review still being read is refused without `force`, because removing it throws
+    // away work someone is in the middle of.
+    let mut url = format!("{server}/api/sessions/{id}?remove=true");
+    if force {
+        url.push_str("&force=true");
+    }
+    let resp = client.delete(url).send().await?;
 
     match resp.status().as_u16() {
         200 => {
@@ -531,6 +537,7 @@ async fn cmd_remove(client: &Client, server: &str, id: &str) -> anyhow::Result<(
             Ok(())
         }
         404 => anyhow::bail!("session {id} not found"),
+        409 => anyhow::bail!("session {id} is still being read; cancel it first, or pass --force"),
         s => anyhow::bail!("failed to remove: {s}"),
     }
 }
