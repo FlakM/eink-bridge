@@ -447,10 +447,10 @@ When adding a new feature to `render.rs`:
 
 ### No authentication
 
-The server binds `0.0.0.0:3333` with no auth (see Security notes). That was acceptable
-while the API was effectively read-only; it now includes a destructive `remove` and
-`/metrics`. File reads and callbacks are fenced (loopback-only checkouts, validated
-`callback_url`), but anyone on the LAN can still read, edit, submit or remove a review. A
+The server binds `0.0.0.0:3333`. Without `EINK_TOKEN` it has no auth (see Security
+notes), which is acceptable only on a trusted network. File reads and callbacks are fenced
+(loopback-only checkouts, validated `callback_url`), and with a token set a LAN caller can
+read, edit, submit or remove nothing without it. A
 token for non-local callers is the obvious next step, and it has a cost: the tablet would
 have to carry it.
 

@@ -179,7 +179,8 @@ mutation-harness gradle retry.
 | 2 | landed | item 2 commit |
 | 3 | landed | item 3 commit |
 | 4 | landed | item 4 commit |
-| 5–11, s | queued | |
+| 5 | landed | item 5 commit |
+| 6–11, s | queued | |
 
 ## Log
 
@@ -232,3 +233,16 @@ mutation-harness gradle retry.
   Not done: flashing the consumed notes on the new page (FIXME's last tablet sentence).
   It needs the page to receive the consumed indices and a one-shot highlight, which is a
   separate change; recorded under *Stalled* rather than rushed.
+
+- **Item 5, landed (server + tablet).** `EINK_TOKEN` gates every route except
+  `/api/health` and `/metrics`; loopback is exempt. Non-loopback callers present a bearer
+  header, the `HttpOnly` cookie the page sets, or `?token=` on exactly `GET /session/{id}`,
+  `GET /ws/{id}` and the annotation image route. The query value is percent-decoded (the
+  tablet's `URLEncoder` escapes `+`, `%` and friends) and compared in constant time. The
+  tablet stores the token beside the server URL, builds every OkHttp client through
+  `HttpClients.withToken`, puts it in the WebSocket query, and sets the cookie plus the
+  header before loading a page. Unset token = today's behaviour, with the docs updated.
+  Decision: metrics stays open — the Grafana scraper on another host would otherwise need
+  a secret to say the server is alive, and it exposes counters, not titles or bodies.
+  Not done: no end-to-end test with a real LAN address (the harness has no second host);
+  the server matrix and the shared client factory are tested instead.
