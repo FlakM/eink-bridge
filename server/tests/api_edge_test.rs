@@ -1148,3 +1148,117 @@ async fn a_response_means_the_change_is_on_disk() {
     assert!(rewritten.contains("rewritten"), "{rewritten}");
     assert!(rewritten.contains("\"version\": 2"), "{rewritten}");
 }
+
+#[tokio::test]
+async fn a_code_reference_can_be_read_on_the_reader() {
+    // Tapping `path:line` in a review fetches those lines, so a short read costs a tap
+    // instead of a trip to the editor. The file comes from the checkout the review was
+    // pushed from, and only from there.
+    let checkout = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(checkout.path().join("server/src")).unwrap();
+    let file: String = (1..=40)
+        .map(|n| format!("line {n} of the expiry loop"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(checkout.path().join("server/src/app.rs"), &file).unwrap();
+    let secret = checkout.path().parent().unwrap().join("outside-secret.txt");
+    std::fs::write(&secret, b"do not read me").unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let app = test_app(dir.path().to_path_buf());
+
+    // The checkout is recorded on the session, which is what the CLI does on push.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::post("/api/sessions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "content": "# Review",
+                        "origin": { "cwd": checkout.path().to_string_lossy() },
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let id = serde_json::from_slice::<serde_json::Value>(
+        &resp.into_body().collect().await.unwrap().to_bytes(),
+    )
+    .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let (status, snippet) = get_json(
+        &app,
+        &format!("/api/sessions/{id}/source?ref=server/src/app.rs:20"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{snippet}");
+    assert_eq!(snippet["path"], "server/src/app.rs");
+    assert_eq!(snippet["start"], 14, "six lines of context above the reference");
+    assert_eq!(snippet["end"], 26);
+    let lines: Vec<&str> = snippet["lines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|line| line.as_str().unwrap())
+        .collect();
+    assert_eq!(lines.len(), 13);
+    assert!(
+        lines.contains(&"line 20 of the expiry loop"),
+        "the cited line is in the window: {lines:?}"
+    );
+
+    // Nothing outside the checkout, however the reference is written.
+    for escape in [
+        "ref=../../outside-secret.txt:1",
+        "ref=/etc/passwd:1",
+        "ref=server/src/../../../outside-secret.txt:1",
+        "ref=not-a-reference",
+        "ref=server/src/app.rs:0",
+    ] {
+        let (status, body) = send(
+            &app,
+            Request::get(format!("/api/sessions/{id}/source?{escape}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert!(
+            status == StatusCode::BAD_REQUEST || status == StatusCode::NOT_FOUND,
+            "{escape} must be refused, got {status}"
+        );
+        assert!(
+            !String::from_utf8_lossy(&body).contains("do not read me"),
+            "{escape} leaked the file"
+        );
+    }
+
+    // A line the file does not have is a clear answer, not an empty page.
+    let (status, body) = send(
+        &app,
+        Request::get(format!("/api/sessions/{id}/source?ref=server/src/app.rs:9999"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(String::from_utf8_lossy(&body).contains("40 lines"));
+
+    // And a review that never recorded a checkout says so.
+    let bare = create(&app, "# No origin").await;
+    let (status, body) = send(
+        &app,
+        Request::get(format!("/api/sessions/{bare}/source?ref=server/src/app.rs:1"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(String::from_utf8_lossy(&body).contains("checkout"));
+}

@@ -488,6 +488,29 @@ hr { border: none; border-top: 1px solid #333; margin: 24px 0; }
     font-size: 20px;
     color: #222;
 }
+/* A reference the reader can tap: `path:line` in prose. It is a pill rather than a link,
+   because a URL on the tablet is neither short nor useful. */
+.coderef {
+  font-family: 'Roboto Mono', 'Droid Sans Mono', 'DejaVu Sans Mono', monospace;
+  font-size: 0.92em;
+  color: #000;
+  background: #fff;
+  border: 1.5px solid #000;
+  border-radius: 5px;
+  padding: 1px 7px;
+  cursor: pointer;
+}
+.coderef[data-open="1"] { background: #000; color: #fff; }
+.coderef-wrap { margin: 10px 0 18px; }
+.coderef-caption {
+  font-family: 'Roboto Mono', 'Droid Sans Mono', 'DejaVu Sans Mono', monospace;
+  font-size: 14px;
+  font-weight: 700;
+  color: #333;
+  margin-bottom: 4px;
+}
+.coderef-note { font-size: 15px; color: #555; margin: 4px 0 0; }
+
 .snippet-block {
   margin: 16px 0;
   border: 1px solid #d0d0d0;
@@ -1526,7 +1549,51 @@ const BOOTSTRAP_JS: &str = r#"
 })();
 "#;
 
-const ELEMENT_MAP_JS: &str = r#"
+const CODEREF_JS: &str = r##"
+  // Tap a `path:line` reference to read that code here, without leaving the page.
+  // The block is fetched once and kept, so the second tap is instant.
+  document.addEventListener('click', function (event) {
+    var target = event.target && event.target.closest ? event.target.closest('.coderef') : null;
+    if (!target) return;
+    var ref = target.getAttribute('data-ref');
+    var existing = target.nextElementSibling;
+    var isOurs = existing && existing.classList && existing.classList.contains('coderef-wrap');
+    if (isOurs) {
+      var open = target.getAttribute('data-open') === '1';
+      target.setAttribute('data-open', open ? '0' : '1');
+      existing.style.display = open ? 'none' : 'block';
+      return;
+    }
+    target.setAttribute('data-open', '1');
+    var wrap = document.createElement('div');
+    wrap.className = 'coderef-wrap';
+    wrap.innerHTML = '<p class="coderef-note">reading ' + ref + '...</p>';
+    target.parentNode.insertBefore(wrap, target.nextSibling);
+    var session = document.body.getAttribute('data-session-id') || '';
+    fetch('/api/sessions/' + encodeURIComponent(session) + '/source?ref=' + encodeURIComponent(ref))
+      .then(function (response) {
+        if (!response.ok) throw new Error(response.status === 404 ? 'not found' : 'unavailable');
+        return response.json();
+      })
+      .then(function (body) {
+        var caption = document.createElement('div');
+        caption.className = 'coderef-caption';
+        caption.textContent = body.path + ':' + body.start + (body.end > body.start ? '-' + body.end : '');
+        var pre = document.createElement('pre');
+        pre.className = 'coderef-body';
+        pre.textContent = body.lines.map(function (line) { return line; }).join('\n');
+        wrap.innerHTML = '';
+        wrap.appendChild(caption);
+        wrap.appendChild(pre);
+      })
+      .catch(function (error) {
+        // Say so rather than showing an empty block: the worktree may be gone.
+        wrap.innerHTML = '<p class="coderef-note">' + ref + ' is not available here (' + error.message + ')</p>';
+      });
+  });
+"##;
+
+const ELEMENT_MAP_JS: &str = r#"""
 (function() {
   var PALETTE = ['#e74c3c','#2196f3','#4caf50','#ff9800','#9c27b0','#009688'];
   var _groups = [];        // tap-link groups: [{id, color, items:[{i,tag,text}]}]
@@ -2045,12 +2112,95 @@ const ELEMENT_MAP_JS: &str = r#"
 })();
 "#;
 
+/// Turn `path:line` in prose into a tap target.
+///
+/// The Marks list is `- A -> path:line`, and that is exactly where the reader wants to
+/// look. On a tablet that should not mean opening an editor: tapping fetches a few lines
+/// around the reference and shows them in place, in the same paper-white code block every
+/// other snippet uses, so a short read costs a tap instead of a context switch.
+///
+/// Nothing inside a code block is touched -- those lines are already on the page.
+fn link_code_references(html: &str) -> String {
+    let mut out = String::new();
+    let mut rest = html;
+    let mut in_code = false;
+    while let Some(start) = rest.find('<') {
+        let text = &rest[..start];
+        out.push_str(&link_refs_in_text(text, in_code));
+        let end = rest[start..]
+            .find('>')
+            .map(|end| start + end + 1)
+            .unwrap_or(rest.len());
+        let tag = &rest[start..end];
+        out.push_str(tag);
+        let name = tag
+            .trim_start_matches('<')
+            .trim_start_matches('/')
+            .split(|c: char| c.is_whitespace() || c == '>')
+            .next()
+            .unwrap_or("");
+        if matches!(name, "pre" | "code") {
+            in_code = !tag.starts_with("</");
+        }
+        rest = &rest[end..];
+    }
+    out.push_str(&link_refs_in_text(rest, in_code));
+    out
+}
+
+fn link_refs_in_text(text: &str, in_code: bool) -> String {
+    if in_code || text.is_empty() {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut token = String::new();
+    for character in text.chars() {
+        if character.is_ascii_alphanumeric() || "/._-:".contains(character) {
+            token.push(character);
+            continue;
+        }
+        out.push_str(&linked_or_plain(&token));
+        token.clear();
+        out.push(character);
+    }
+    out.push_str(&linked_or_plain(&token));
+    out
+}
+
+fn linked_or_plain(token: &str) -> String {
+    match split_reference(token) {
+        Some(_) => format!(
+            "<button class=\"coderef\" data-ref=\"{}\" type=\"button\">{}</button>",
+            html_utils::escape_html(token),
+            html_utils::escape_html(token)
+        ),
+        None => token.to_string(),
+    }
+}
+
+/// Split `path/file.rs:170` into its parts, or nothing if it does not look like one.
+fn split_reference(token: &str) -> Option<(&str, u32)> {
+    let (path, line) = token.rsplit_once(':')?;
+    if path.len() < 3 || path.contains(':') {
+        return None;
+    }
+    let line: u32 = line.parse().ok().filter(|line| *line > 0)?;
+    let extension = path.rsplit_once('.')?.1.to_ascii_lowercase();
+    const SOURCE: &[&str] = &[
+        "rs", "kt", "java", "ts", "tsx", "js", "jsx", "py", "go", "rb", "c", "h", "cpp",
+        "hpp", "cs", "swift", "php", "scala", "sh", "sql", "toml", "yaml", "yml", "json",
+        "md", "nix", "css", "html", "xml", "proto", "gradle",
+    ];
+    SOURCE.contains(&extension.as_str()).then_some((path, line))
+}
+
 pub fn to_eink_html(markdown: &str, session_id: &str) -> String {
     let content = parse_chunks(markdown)
         .into_iter()
         .map(render_chunk)
         .collect::<Vec<_>>()
         .join("");
+    let content = link_code_references(&content);
 
     format!(
         r#"<!DOCTYPE html>
@@ -2068,6 +2218,7 @@ pub fn to_eink_html(markdown: &str, session_id: &str) -> String {
 <script>{bootstrap_js}</script>
 <script>{toc_js}</script>
 <script>{element_map_js}</script>
+<script>{coderef_js}</script>
 </body>
 </html>"#,
         css = EINK_CSS,
@@ -2076,6 +2227,7 @@ pub fn to_eink_html(markdown: &str, session_id: &str) -> String {
         bootstrap_js = BOOTSTRAP_JS,
         toc_js = TOC_JS,
         element_map_js = ELEMENT_MAP_JS,
+        coderef_js = CODEREF_JS,
     )
 }
 
@@ -2416,7 +2568,7 @@ mod tests {
     fn a_reference_with_spaces_stays_in_the_caption() {
         let html =
             render("```snippet\nrust server/src/app.rs:170 (expiry) | note\nlet x = 1;\n```\n");
-        assert!(html.contains("server/src/app.rs:170 (expiry) — note"));
+        assert!(visible_text(&html).contains("server/src/app.rs:170 (expiry) — note"));
         assert!(
             html.contains("data-lang=\"rust\""),
             "the language is still read"
@@ -2432,7 +2584,7 @@ mod tests {
             "```snippet\nserver/src/app.rs:170 (expiry) | the expiry loop\nlet x = 1;\n```\n",
         );
         assert!(
-            html.contains("server/src/app.rs:170 (expiry) — the expiry loop"),
+            visible_text(&html).contains("server/src/app.rs:170 (expiry) — the expiry loop"),
             "the file stays named: {html}"
         );
         assert!(
@@ -2480,14 +2632,14 @@ mod tests {
         // standing on its own when the file is obvious from the section.
         let reference_only = render("```snippet\nrust server/src/app.rs:170\nlet x = 1;\n```\n");
         assert!(
-            reference_only.contains("<figcaption>server/src/app.rs:170</figcaption>"),
+            visible_text(&reference_only).contains("server/src/app.rs:170"),
             "a bare reference is the caption: {reference_only}"
         );
         assert!(reference_only.contains("data-lang=\"rust\""));
 
         let caption_only = render("```snippet\n| the expiry loop\nlet x = 1;\n```\n");
         assert!(
-            caption_only.contains("<figcaption>the expiry loop</figcaption>"),
+            visible_text(&caption_only).contains("the expiry loop"),
             "a caption with no reference: {caption_only}"
         );
         assert!(!caption_only.contains("data-lang"), "no language was given");
@@ -2583,7 +2735,7 @@ mod tests {
         );
         assert!(html.contains("data-lang=\"rust\""), "language not recorded");
         assert!(
-            html.contains("server/src/app.rs:170 — the expiry loop"),
+            visible_text(&html).contains("server/src/app.rs:170 — the expiry loop"),
             "caption should name the reference and the point"
         );
         assert!(
@@ -3247,5 +3399,52 @@ mod tests {
             !html.contains("class=\"diff-add\""),
             "plain bash block must not get diff styling"
         );
+    }
+}
+
+#[cfg(test)]
+mod coderef_tests {
+    use super::*;
+
+    const INLINE: &str = "<p>See server/src/app.rs:170 for the expiry loop.</p>";
+    const WITH_CODE: &str = "<pre><span>server/src/app.rs:170</span></pre><p>and app.rs:12</p>";
+
+    #[test]
+    fn a_reference_in_prose_becomes_a_tap_target() {
+        let linked = link_code_references(INLINE);
+        assert!(
+            linked.contains("<button class=\"coderef\" data-ref=\"server/src/app.rs:170\" type=\"button\">server/src/app.rs:170</button>"),
+            "{linked}"
+        );
+    }
+
+    #[test]
+    fn nothing_inside_a_code_block_is_touched() {
+        // Those lines are already on the page; a tap target there would do nothing useful.
+        let linked = link_code_references(WITH_CODE);
+        let code = linked.split("</pre>").next().unwrap();
+        assert!(!code.contains("coderef"), "the code block was rewritten: {code}");
+        assert!(linked.contains("data-ref=\"app.rs:12\""), "{linked}");
+    }
+
+    #[test]
+    fn only_source_references_are_linked() {
+        for text in [
+            "<p>a 12:30 appointment</p>",
+            "<p>ratio 16:9 in prose</p>",
+            "<p>the label B → path:line literal</p>",
+            "<p>https://example.com/a.rs:12</p>",
+            "<p>Cargo.toml</p>",
+        ] {
+            let linked = link_code_references(text);
+            assert!(!linked.contains("coderef"), "{text} should not be a reference: {linked}");
+        }
+    }
+
+    #[test]
+    fn a_marks_list_line_is_linked() {
+        // The brief's Marks section is exactly this shape.
+        let marks = "<ul><li>A &rarr; server/src/app.rs:170</li></ul>";
+        assert!(link_code_references(marks).contains("data-ref=\"server/src/app.rs:170\""));
     }
 }

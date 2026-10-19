@@ -216,6 +216,7 @@ pub fn build_app(state: AppState) -> Router {
             "/api/sessions/{id}/annotation/{index}",
             get(annotation_image),
         )
+        .route("/api/sessions/{id}/source", get(source_snippet))
         .route("/api/sessions/{id}/submit", post(submit_review))
         .route("/api/sessions/{id}/request_update", post(request_update))
         .route("/ws/{id}", get(crate::ws::ws_handler))
@@ -659,8 +660,104 @@ async fn purge_sessions(State(state): State<AppState>) -> Json<serde_json::Value
     Json(serde_json::json!({ "purged": count }))
 }
 
+/// The lines around a `path:line` reference in a review, so the reader can look at the code
+/// on the tablet instead of opening an editor.
+///
+/// The file is read from the directory the review came from -- the worktree the CLI pushed
+/// from -- and only from there: the path is joined to it, canonicalised, and required to
+/// stay inside, so a session document cannot turn into a way to read the machine.
+#[derive(Deserialize)]
+struct SourceParams {
+    #[serde(rename = "ref")]
+    reference: String,
+    #[serde(default)]
+    context: Option<usize>,
+}
+
+const SOURCE_CONTEXT_MAX: usize = 20;
+const SOURCE_LINES_MAX: usize = 60;
+
+async fn source_snippet(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(params): Query<SourceParams>,
+) -> Response {
+    let root = {
+        let mgr = state.sessions.read().await;
+        match mgr.get(&id) {
+            None => return StatusCode::NOT_FOUND.into_response(),
+            Some(session) => match session.origin.as_ref().and_then(|origin| origin.cwd.clone()) {
+                Some(cwd) => std::path::PathBuf::from(cwd),
+                // Without a recorded checkout there is nothing to read from, and guessing
+                // would be worse than saying so.
+                None => {
+                    return (StatusCode::NOT_FOUND, "this review did not record its checkout")
+                        .into_response()
+                }
+            },
+        }
+    };
+
+    let Some((relative, wanted)) = split_source_reference(&params.reference) else {
+        return (StatusCode::BAD_REQUEST, "expected a reference like path/file.rs:120").into_response();
+    };
+    let context = params.context.unwrap_or(6).min(SOURCE_CONTEXT_MAX);
+    let Ok(root) = root.canonicalize() else {
+        return (StatusCode::NOT_FOUND, "the checkout is gone").into_response();
+    };
+    let candidate = root.join(&relative);
+    let Ok(path) = candidate.canonicalize() else {
+        return (StatusCode::NOT_FOUND, "no such file in the checkout").into_response();
+    };
+    if !path.starts_with(&root) || !path.is_file() {
+        return (StatusCode::NOT_FOUND, "outside the checkout").into_response();
+    }
+    let Ok(text) = tokio::fs::read_to_string(&path).await else {
+        return (StatusCode::NOT_FOUND, "unreadable").into_response();
+    };
+    let lines: Vec<&str> = text.lines().collect();
+    let total = lines.len();
+    if wanted > total {
+        return (StatusCode::NOT_FOUND, format!("the file has {total} lines")).into_response();
+    }
+    let start = wanted.saturating_sub(context + 1);
+    let end = (wanted + context).min(total);
+    let window: Vec<&str> = lines[start..end].to_vec();
+    Json(serde_json::json!({
+        "path": relative,
+        "start": start + 1,
+        "end": end,
+        "total": total,
+        "truncated": window.len() > SOURCE_LINES_MAX,
+        "lines": window.into_iter().take(SOURCE_LINES_MAX).collect::<Vec<_>>(),
+        "first": start + 1,
+    }))
+    .into_response()
+}
+
+/// Split `path/file.rs:120` into the path and the line, refusing anything that could
+/// escape the checkout before the filesystem is touched.
+fn split_source_reference(reference: &str) -> Option<(String, usize)> {
+    let (relative, line) = reference.rsplit_once(':')?;
+    let line: usize = line.trim().parse().ok()?;
+    let relative = relative.trim();
+    if relative.is_empty() || line == 0 {
+        return None;
+    }
+    let path = std::path::Path::new(relative);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+    Some((relative.to_string(), line))
+}
+
 #[derive(Deserialize)]
 struct UpdateContentBody {
+
     content: String,
     #[serde(default)]
     consumed_annotations: Vec<i32>,
