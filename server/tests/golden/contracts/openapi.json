@@ -163,6 +163,13 @@
             },
             "type": "array"
           },
+          "annotation_urls": {
+            "description": "Fetchable URLs for the annotation images, in the same order as annotation_images",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "annotations": {
             "items": {
               "$ref": "#/components/schemas/AnnotationGroup"

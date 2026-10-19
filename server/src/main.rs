@@ -39,8 +39,21 @@ async fn main() {
         }
     });
 
-    tracing::info!(%addr, "eink-serve listening");
+    // A port already in use is the first thing that goes wrong after a reboot, and a
+    // panic trace in the journal is no way to learn it. Say what happened and stop.
+    let listener = match tokio::net::TcpListener::bind(addr).await {
+        Ok(listener) => listener,
+        Err(error) => {
+            eprintln!("eink-serve: cannot listen on {addr}: {error}");
+            tracing::error!(%addr, %error, "cannot listen");
+            std::process::exit(1);
+        }
+    };
 
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    tracing::info!(%addr, "eink-serve listening");
+    if let Err(error) = axum::serve(listener, app).await {
+        eprintln!("eink-serve: server stopped: {error}");
+        tracing::error!(%error, "server stopped");
+        std::process::exit(1);
+    }
 }

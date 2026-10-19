@@ -55,38 +55,48 @@ pub async fn ws_handler(
     ws.on_upgrade(move |socket| handle_ws(socket, id, state))
 }
 
+/// What a client needs in order to be in sync: the last content update and any feedback
+/// it has not acknowledged, for a session that is still being read.
+async fn durable_snapshot(state: &AppState, id: &str) -> Vec<serde_json::Value> {
+    let mgr = state.sessions.read().await;
+    mgr.get(id)
+        .filter(|s| s.status == crate::session::SessionStatus::Active)
+        .map(|s| [s.last_content_update.clone(), s.pending_feedback.clone()])
+        .unwrap_or_default()
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
+async fn send_snapshot(socket: &mut WebSocket, state: &AppState, id: &str) -> Result<(), ()> {
+    for message in durable_snapshot(state, id).await {
+        if socket
+            .send(Message::Text(message.to_string().into()))
+            .await
+            .is_err()
+        {
+            return Err(());
+        }
+    }
+    Ok(())
+}
+
 async fn handle_ws(mut socket: WebSocket, id: String, state: AppState) {
     info!(session_id = %id, "ws connected");
     crate::metrics::WS_CONNECTIONS_ACTIVE.inc();
-    let mut rx = state.ws_subscribe(&id).await;
-
     // Subscribe before reading the durable snapshot: an update cannot fall between
     // snapshot and subscription. Duplicates are possible; losing feedback is not.
-    let (update, replay) = {
-        let mgr = state.sessions.read().await;
-        mgr.get(&id)
-            .filter(|s| s.status == crate::session::SessionStatus::Active)
-            .map(|s| (s.last_content_update.clone(), s.pending_feedback.clone()))
-            .unwrap_or_default()
-    };
-    if let Some(update) = update
-        && socket
-            .send(Message::Text(update.to_string().into()))
-            .await
-            .is_err()
-    {
+    let mut rx = state.ws_subscribe(&id).await;
+    if send_snapshot(&mut socket, &state, &id).await.is_err() {
         crate::metrics::WS_CONNECTIONS_ACTIVE.dec();
         return;
     }
-    if let Some(feedback) = replay
-        && socket
-            .send(Message::Text(feedback.to_string().into()))
-            .await
-            .is_err()
-    {
-        crate::metrics::WS_CONNECTIONS_ACTIVE.dec();
-        return;
-    }
+
+    let heartbeat = state.ws_heartbeat_seconds;
+    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(heartbeat.max(1)));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    ticker.tick().await; // the first tick fires immediately
+    let mut last_seen = tokio::time::Instant::now();
 
     loop {
         tokio::select! {
@@ -101,16 +111,27 @@ async fn handle_ws(mut socket: WebSocket, id: String, state: AppState) {
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        warn!(session_id = %id, skipped = n, "ws receiver lagged");
-                        continue;
+                        // The client is connected but fell behind, so it has missed
+                        // messages -- and the ones it lost may include the only copy of a
+                        // note. Re-send the durable state instead of pretending it is in
+                        // sync; the snapshot is what a reconnecting client gets.
+                        warn!(session_id = %id, skipped = n, "ws receiver lagged, resyncing");
+                        if send_snapshot(&mut socket, &state, &id).await.is_err() {
+                            break;
+                        }
+                        last_seen = tokio::time::Instant::now();
                     }
                 }
             }
             msg = socket.recv() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
+                        last_seen = tokio::time::Instant::now();
                         info!(session_id = %id, msg_type = extract_type(&text), "ws message received");
                         // Only Subscribe is expected; ignore unknown messages.
+                    }
+                    Some(Ok(Message::Pong(_))) | Some(Ok(Message::Ping(_))) => {
+                        last_seen = tokio::time::Instant::now();
                     }
                     Some(Ok(Message::Close(_))) => {
                         info!(session_id = %id, "ws closed by client");
@@ -125,6 +146,19 @@ async fn handle_ws(mut socket: WebSocket, id: String, state: AppState) {
                         break;
                     }
                     _ => {}
+                }
+            }
+            // A half-open socket looks connected to both ends: a NAT rebind or a tablet
+            // that went to sleep leaves the server writing into a void and the gauge
+            // reporting a client that is not there. Ping, and give up on silence.
+            _ = ticker.tick(), if heartbeat > 0 => {
+                if last_seen.elapsed() > std::time::Duration::from_secs(heartbeat * 3) {
+                    warn!(session_id = %id, "no word from the client, closing");
+                    break;
+                }
+                if socket.send(Message::Ping(Vec::new().into())).await.is_err() {
+                    warn!(session_id = %id, "ws ping failed, closing");
+                    break;
                 }
             }
         }
@@ -220,6 +254,73 @@ mod tests {
         .unwrap();
         assert!(message.get("consumed_annotations").is_none());
         assert!(message.get("consumed_strokes").is_none());
+    }
+
+    #[tokio::test]
+    async fn the_durable_snapshot_is_what_a_client_needs_to_be_in_sync() {
+        use crate::app::AppState;
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::with_config(dir.path().to_path_buf(), 5);
+        let id = {
+            let mut mgr = state.sessions.write().await;
+            mgr.create(
+                "# Review".into(),
+                None,
+                None,
+                Default::default(),
+                false,
+                None,
+            )
+            .id
+        };
+
+        // Nothing has happened yet.
+        assert!(durable_snapshot(&state, &id).await.is_empty());
+        // An unknown session has nothing to say either.
+        assert!(durable_snapshot(&state, "ghost").await.is_empty());
+
+        {
+            let mut mgr = state.sessions.write().await;
+            // A fresh session is at version 1, and feedback is only accepted for the
+            // version it was written against.
+            let update = serde_json::json!({"type": "version_updated", "version": 1});
+            mgr.record_content_update(&id, update.clone(), false);
+            let feedback = serde_json::json!({
+                "type": "annotation_result", "feedback_id": "abc", "version": 1,
+                "annotations": [{"recognized_text": "WRITE A TLDR"}],
+            });
+            assert!(mgr.record_feedback(&id, 1, feedback.clone()));
+        }
+        let snapshot = durable_snapshot(&state, &id).await;
+        assert_eq!(snapshot.len(), 2, "the update and the unacknowledged note");
+        assert!(snapshot.iter().any(|m| m["type"] == "version_updated"));
+        assert!(snapshot.iter().any(|m| m["type"] == "annotation_result"));
+    }
+
+    #[tokio::test]
+    async fn a_finished_session_has_no_snapshot_to_replay() {
+        // Replaying to a session that is over would look like the review was reopened.
+        use crate::app::AppState;
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::with_config(dir.path().to_path_buf(), 5);
+        let id = {
+            let mut mgr = state.sessions.write().await;
+            mgr.create(
+                "# Review".into(),
+                None,
+                None,
+                Default::default(),
+                false,
+                None,
+            )
+            .id
+        };
+        {
+            let mut mgr = state.sessions.write().await;
+            mgr.record_content_update(&id, serde_json::json!({"version": 2}), false);
+            mgr.submit(&id, "LGTM".into(), vec![], None, None, vec![]);
+        }
+        assert!(durable_snapshot(&state, &id).await.is_empty());
     }
 
     #[test]

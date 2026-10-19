@@ -135,6 +135,10 @@ pub struct SessionResultResponse {
     pub verdict: Option<&'static str>,
     pub typed_notes: Option<String>,
     pub annotation_images: Vec<String>,
+    /// Fetchable URLs for the same images, in the same order. `annotation_images` are
+    /// filesystem paths that only a client on this machine can open; a webhook receiver
+    /// or a browser needs these.
+    pub annotation_urls: Vec<String>,
     pub has_annotation: bool,
     pub review_duration_seconds: Option<i64>,
     pub tags: HashMap<String, String>,
@@ -203,6 +207,9 @@ impl SessionResultResponse {
             verdict: session.verdict.as_ref().map(|v| v.as_str()),
             typed_notes: session.typed_notes.clone(),
             annotation_images: session.annotation_images.clone(),
+            annotation_urls: (0..session.annotation_images.len())
+                .map(|index| format!("/api/sessions/{}/annotation/{index}", session.id))
+                .collect(),
             // Any of the three carries ink. The rendered images are usually present, but
             // a submission whose images were never written still has the strokes.
             has_annotation: !session.annotation_images.is_empty()
@@ -515,6 +522,11 @@ pub fn openapi_spec() -> serde_json::Value {
                         "verdict": {"type": ["string", "null"]},
                         "typed_notes": {"type": ["string", "null"]},
                         "annotation_images": {"type": "array", "items": {"type": "string"}},
+                        "annotation_urls": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Fetchable URLs for the annotation images, in the same order as annotation_images"
+                        },
                         "has_annotation": {"type": "boolean"},
                         "review_duration_seconds": {"type": ["integer", "null"]},
                         "tags": {"type": "object", "additionalProperties": {"type": "string"}},

@@ -33,6 +33,10 @@ pub struct AppState {
     pub long_poll_seconds: u64,
     pub assets_dir: PathBuf,
     pub ocr_engine: Option<Arc<OcrEngine>>,
+    /// Seconds between WebSocket pings; 0 disables the heartbeat. A client that says
+    /// nothing for three intervals is dropped, which is what makes a half-open socket
+    /// visible instead of silently dead.
+    pub ws_heartbeat_seconds: u64,
 }
 
 impl AppState {
@@ -41,6 +45,7 @@ impl AppState {
     }
 
     pub fn with_config(state_dir: PathBuf, long_poll_seconds: u64) -> Self {
+        let ws_heartbeat_seconds = 30;
         let ocr_engine = match OcrEngine::new() {
             Ok(engine) => {
                 tracing::info!("OCR engine initialized");
@@ -67,6 +72,7 @@ impl AppState {
             long_poll_seconds,
             assets_dir: default_assets_dir(),
             ocr_engine,
+            ws_heartbeat_seconds,
         }
     }
 
@@ -178,6 +184,10 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/sessions/{id}/reanchor", post(reanchor))
         .route("/api/sessions/{id}/feedback", get(pending_feedback))
         .route("/api/sessions/{id}/star", put(set_starred))
+        .route(
+            "/api/sessions/{id}/annotation/{index}",
+            get(annotation_image),
+        )
         .route("/api/sessions/{id}/submit", post(submit_review))
         .route("/api/sessions/{id}/request_update", post(request_update))
         .route("/ws/{id}", get(crate::ws::ws_handler))
@@ -485,6 +495,46 @@ async fn pending_feedback(State(state): State<AppState>, Path(id): Path<String>)
     match mgr.get(&id) {
         None => StatusCode::NOT_FOUND.into_response(),
         Some(s) => Json(serde_json::json!({"status":s.status,"version":s.version,"pending":s.pending_feedback,"last_content_update":s.last_content_update})).into_response(),
+    }
+}
+
+/// Resolve a recorded annotation path, refusing anything outside that session's own
+/// annotations directory.
+///
+/// The names are written by `save_annotation`, so a value that escapes means the session
+/// file was edited by hand -- and this is the one place a client-supplied index reaches
+/// the filesystem. Canonicalising resolves symlinks before the containment check, which
+/// is why the check is on the resolved path and not on the string.
+pub fn resolve_annotation_path(
+    state_dir: &std::path::Path,
+    recorded: &str,
+) -> Option<std::path::PathBuf> {
+    let root = state_dir.join("annotations").canonicalize().ok()?;
+    let candidate = std::path::Path::new(recorded).canonicalize().ok()?;
+    candidate.starts_with(&root).then_some(candidate)
+}
+
+async fn annotation_image(
+    State(state): State<AppState>,
+    Path((id, index)): Path<(String, usize)>,
+) -> Response {
+    let session = {
+        let mgr = state.sessions.read().await;
+        match mgr.get(&id) {
+            Some(session) => session.clone(),
+            None => return StatusCode::NOT_FOUND.into_response(),
+        }
+    };
+    let Some(recorded) = session.annotation_images.get(index) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Some(path) = resolve_annotation_path(&session.state_dir, recorded) else {
+        tracing::warn!(id = %id, index, "refused an annotation path outside the session");
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => ([(header::CONTENT_TYPE, "image/png")], bytes).into_response(),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
     }
 }
 

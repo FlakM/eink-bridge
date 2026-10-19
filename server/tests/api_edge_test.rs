@@ -616,10 +616,46 @@ async fn an_uploaded_annotation_is_stored_and_served_back_byte_for_byte() {
     assert_eq!(images.len(), 1, "{result}");
     let path = images[0].as_str().unwrap();
 
-    // The path is a real file on the server, which is where the local agent reads it;
-    // nothing serves it over HTTP.
+    // The path is a real file on the server, which is where a client on this machine
+    // reads it.
     let stored = std::fs::read(path).expect("the image was written");
     assert_eq!(stored.as_slice(), png, "the bytes landed changed");
+
+    // A remote consumer -- a webhook receiver, a browser, an agent on another host --
+    // cannot open that path, so the same images are also addressable.
+    let urls = result["annotation_urls"].as_array().unwrap();
+    assert_eq!(urls.len(), 1, "one image, one url: {result}");
+    let url = urls[0].as_str().unwrap();
+    assert_eq!(url, format!("/api/sessions/{id}/annotation/0"));
+
+    let resp = app
+        .clone()
+        .oneshot(Request::get(url).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
+        Some("image/png")
+    );
+    let served = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        served.as_ref(),
+        png,
+        "the served bytes differ from the upload"
+    );
+
+    // Nothing outside the list is reachable, and the id is part of the address.
+    for missing in [
+        format!("/api/sessions/{id}/annotation/1"),
+        format!("/api/sessions/{id}/annotation/999"),
+        "/api/sessions/ghost/annotation/0".to_string(),
+    ] {
+        let (status, _) = send(&app, Request::get(&missing).body(Body::empty()).unwrap()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
+    }
 }
 
 #[tokio::test]
@@ -664,6 +700,43 @@ async fn server_side_ocr_of_an_empty_canvas_is_an_empty_answer() {
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
     let reply: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(reply["text"], "");
+}
+
+#[tokio::test]
+async fn an_annotation_index_cannot_escape_the_session_directory() {
+    // The recorded paths are written by the server, so a value that escapes means the
+    // session file was edited by hand -- and the index is client-supplied.
+    let dir = tempfile::tempdir().unwrap();
+    let session_dir = dir.path().join("sessions").join("abc");
+    let annotations = session_dir.join("annotations");
+    std::fs::create_dir_all(&annotations).unwrap();
+    std::fs::write(annotations.join("img_1.png"), b"\x89PNG-in").unwrap();
+    let outside = dir.path().join("secret.png");
+    std::fs::write(&outside, b"secret").unwrap();
+    // A symlink that points out of the directory after resolving.
+    std::os::unix::fs::symlink(&outside, annotations.join("link.png")).unwrap();
+
+    assert!(
+        eink_bridge::app::resolve_annotation_path(
+            &session_dir,
+            annotations.join("img_1.png").to_str().unwrap()
+        )
+        .is_some()
+    );
+
+    for escape in [
+        outside.to_str().unwrap(),
+        outside.to_str().unwrap(),
+        annotations.join("link.png").to_str().unwrap(),
+        "/etc/passwd",
+        "../secret.png",
+        "annotations/../../secret.png",
+    ] {
+        assert!(
+            eink_bridge::app::resolve_annotation_path(&session_dir, escape).is_none(),
+            "{escape} should be refused"
+        );
+    }
 }
 
 #[tokio::test]

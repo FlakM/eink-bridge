@@ -29,6 +29,7 @@ METRICS = SERVER / "src/metrics.rs"
 WSI = SERVER / "src/ws.rs"
 OCRI = SERVER / "src/ocr.rs"
 PROVIDERSI = SERVER / "src/ocr/providers.rs"
+MAINI = SERVER / "src/main.rs"
 THEME = SERVER / "assets/eink-theme.tmTheme"
 
 
@@ -49,6 +50,9 @@ TARGETS = {
     "a_label_value_cannot_break_the_pushed_body": "--bin eink-review",
     "the_webhook_metric_counts_what_actually_happened": "--test api_edge_test",
     "the_cli_pushes_its_own_command_metrics": "--test cli_integration_test",
+    "an_annotation_index_cannot_escape_the_session_directory": "--test api_edge_test",
+    "a_client_that_stops_answering_is_dropped": "--test ws_heartbeat_test",
+    "an_occupied_port_is_reported_in_words": "--test startup_test",
     "the_cloud_timeout_stays_inside_a_usable_range": "--lib",
     "a_local_runtime_http_error_is_reported_with_its_status": "--lib",
     "handwriting_with_nothing_drawn_makes_no_request": "--lib",
@@ -602,6 +606,48 @@ CASES = [
     return;""",
         ),
         "the_cli_pushes_its_own_command_metrics",
+    ),
+    (
+        "an annotation path may point outside the session",
+        text_edit(
+            APPI,
+            "    candidate.starts_with(&root).then_some(candidate)",
+            "    Some(candidate)",
+        ),
+        "an_annotation_index_cannot_escape_the_session_directory",
+    ),
+    (
+        "a finished session still replays its old update",
+        text_edit(
+            WSI,
+            '        .filter(|s| s.status == crate::session::SessionStatus::Active)',
+            "        .filter(|_| true)",
+        ),
+        "a_finished_session_has_no_snapshot_to_replay",
+    ),
+    (
+        "a silent client is never dropped",
+        text_edit(
+            WSI,
+            "if last_seen.elapsed() > std::time::Duration::from_secs(heartbeat * 3) {",
+            "if false {",
+        ),
+        "a_client_that_stops_answering_is_dropped",
+    ),
+    (
+        "an occupied port panics again",
+        text_edit(
+            MAINI,
+            """        Err(error) => {
+            eprintln!("eink-serve: cannot listen on {addr}: {error}");
+            tracing::error!(%addr, %error, "cannot listen");
+            std::process::exit(1);
+        }
+    };""",
+            """        Err(error) => panic!("cannot listen on {addr}: {error}"),
+    };""",
+        ),
+        "an_occupied_port_is_reported_in_words",
     ),
 ]
 
