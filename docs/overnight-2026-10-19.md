@@ -159,7 +159,7 @@ mutation-harness gradle retry.
 |---|---|---|---|
 | 1 | Channel per instance | `test_feedback_delivery.py`: unsubscribed → 404; two instances start | python, n/a |
 | 2 | Feedback survives restart | flaky receiver (fail, fail, succeed); skill asset test names `subscribe_session` | retry loop removed → flaky test red |
-| 3 | CLI round trip | `cli_integration_test` per command; `test_cli_flags.py` | exit code 3 → 0; bare DELETE in update |
+| 3 | CLI round trip | `cli_integration_test` per command; `test_cli_flags.py` | pending exits 0; unguarded update lands |
 | 4 | Progress narration | `ws_test`, `api_edge_test`, CLI test, channel test, Android test | progress not cleared on update |
 | 5 | Bearer token | `api_edge_test` 401 matrix; Android interceptor test | token check skipped |
 | 6 | Retention + disk gauge | session unit tests; metrics reference test | sweep keeps unstarred terminal |
@@ -177,7 +177,8 @@ mutation-harness gradle retry.
 | plan | landed | — |
 | 1 | landed | item 1 commit |
 | 2 | landed | item 2 commit |
-| 3–11, s | queued | |
+| 3 | landed | item 3 commit |
+| 4–11, s | queued | |
 
 ## Log
 
@@ -203,3 +204,16 @@ mutation-harness gradle retry.
   `subscribe_session` again (which re-registers the callback and re-reads `/feedback`);
   the portable path keeps the watcher. Proved by a receiver that refuses twice and then
   accepts, plus an asset test that the continue section names both.
+
+- **Item 3, landed.** `update` takes `--expected-version`, `--feedback-id` and `--consumed`
+  and sends JSON only when one is used, so an ordinary read-and-rewrite stays plain text.
+  New `content` and `source` commands print markdown and the lines around a reference;
+  `push --tag k=v` is repeatable; `list --json` prints the array and checks the status;
+  `--server` reads `EINK_SERVER_URL`.
+  **Deviation from FIXME:** "still active" exits **5**, not 3. `3` already means *reject*
+  in `verdict_exit_code`, and a pipeline must never read "nobody reviewed this" as
+  "reviewed and refused". Documented next to the constant.
+  The skills' flags are now checked by `test_cli_flags.py`, which extracts each
+  `eink-review <cmd> --flag` from the skill files and asks the binary's `--help`; the
+  `eink-update` skill carries the acknowledgement flags directly instead of pointing at a
+  JSON fallback.

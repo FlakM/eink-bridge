@@ -67,7 +67,14 @@ async fn start_server() -> (String, tokio::task::JoinHandle<()>) {
     let url = format!("http://{addr}");
 
     let handle = tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        // Without ConnectInfo every caller looks unknown, and an unknown caller is
+        // treated as remote -- which quietly disabled `/source` in these tests.
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
     wait_until_ready(&url).await;
     (url, handle)
@@ -471,7 +478,11 @@ async fn cli_result_on_active_session_shows_pending() {
         .await
         .unwrap();
 
-    assert!(out.status.success());
+    assert_eq!(
+        out.status.code(),
+        Some(5),
+        "a review that has not happened must not exit 0: a pipeline would read it as a pass"
+    );
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(
         stderr.contains("still active"),
@@ -1320,4 +1331,135 @@ async fn the_cli_pushes_its_own_command_metrics() {
             "malformed line would be rejected wholesale: {line}"
         );
     }
+}
+
+/// Run the CLI and return (exit code, stdout, stderr).
+async fn run_cli_raw(args: &[&str], env: &[(&str, &str)]) -> (i32, String, String) {
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_eink-review"));
+    command.args(args);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let output = command.output().await.unwrap();
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout).to_string(),
+        String::from_utf8_lossy(&output.stderr).to_string(),
+    )
+}
+
+#[tokio::test]
+async fn the_cli_reads_content_and_source_and_guards_an_update() {
+    let (server, handle) = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let first = dir.path().join("first.md");
+    let second = dir.path().join("second.md");
+    std::fs::write(&first, "# First\n\nOne paragraph.\n").unwrap();
+    std::fs::write(&second, "# Second\n\nTwo paragraphs.\n").unwrap();
+    let first = first.to_str().unwrap();
+    let second = second.to_str().unwrap();
+
+    let (code, stdout, stderr) = run_cli_raw(
+        &[
+            "--server", &server, "push", "--async", "--tag", "env=test", first,
+        ],
+        &[],
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    let id = stdout.trim().to_string();
+
+    // `list --json` is the machine-readable list, tags included.
+    let (code, stdout, stderr) = run_cli_raw(&["--server", &server, "list", "--json"], &[]).await;
+    assert_eq!(code, 0, "{stderr}");
+    let listed: Vec<serde_json::Value> = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(listed[0]["id"], id);
+    assert_eq!(listed[0]["tags"]["env"], "test");
+
+    // `content` is the raw markdown on stdout, so it can be redirected.
+    let (code, stdout, stderr) = run_cli_raw(&["--server", &server, "content", &id], &[]).await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("# First"), "{stdout}");
+
+    // `source` reads from the checkout the review was pushed from.
+    let (code, stdout, stderr) = run_cli_raw(
+        &["--server", &server, "source", &id, "src/cli.rs:10", "--context", "1"],
+        &[],
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("src/cli.rs:9-11"), "{stdout}");
+    assert!(
+        stdout.contains("use eink_bridge::session::SessionOrigin"),
+        "the cited lines must be printed: {stdout}"
+    );
+
+    // A stale version is refused and the document is untouched.
+    let (code, _, stderr) = run_cli_raw(
+        &[
+            "--server", &server, "update", &id, second, "--expected-version", "99",
+        ],
+        &[],
+    )
+    .await;
+    assert_ne!(code, 0, "a stale update must fail");
+    assert!(stderr.contains("stale version"), "{stderr}");
+    let (_, stdout, _) = run_cli_raw(&["--server", &server, "content", &id], &[]).await;
+    assert!(stdout.contains("# First"), "the refused update must not land: {stdout}");
+
+    // The matching version lands.
+    let (code, _, stderr) = run_cli_raw(
+        &[
+            "--server", &server, "update", &id, second, "--expected-version", "1",
+        ],
+        &[],
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    let (_, stdout, _) = run_cli_raw(&["--server", &server, "content", &id], &[]).await;
+    assert!(stdout.contains("# Second"), "{stdout}");
+
+    // A feedback id that is not pending is refused, and the refusal names the reason
+    // rather than reporting a stale version.
+    let (code, _, stderr) = run_cli_raw(
+        &[
+            "--server", &server, "update", &id, second, "--feedback-id", "not-pending",
+            "--consumed", "0",
+        ],
+        &[],
+    )
+    .await;
+    assert_ne!(code, 0);
+    assert!(stderr.contains("update refused"), "{stderr}");
+
+    handle.abort();
+}
+
+#[tokio::test]
+async fn a_review_that_has_not_happened_is_not_success() {
+    let (server, handle) = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("review.md");
+    std::fs::write(&file, "# Waiting\n").unwrap();
+    let file = file.to_str().unwrap();
+    let (_, stdout, _) = run_cli_raw(
+        &["--server", &server, "push", "--async", file],
+        &[],
+    )
+    .await;
+    let id = stdout.trim().to_string();
+
+    let (code, _, stderr) = run_cli_raw(&["--server", &server, "result", &id], &[]).await;
+    assert_eq!(code, 5, "pending must be distinguishable from lgtm: {stderr}");
+    assert!(stderr.contains("still active"), "{stderr}");
+    handle.abort();
+}
+
+#[tokio::test]
+async fn the_server_url_defaults_to_the_environment() {
+    let (server, handle) = start_server().await;
+    let (code, stdout, stderr) = run_cli_raw(&["list", "--json"], &[("EINK_SERVER_URL", &server)]).await;
+    assert_eq!(code, 0, "EINK_SERVER_URL was ignored: {stderr}");
+    let _: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    handle.abort();
 }

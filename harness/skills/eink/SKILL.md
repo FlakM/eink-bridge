@@ -48,9 +48,14 @@ it delegates delivery back to this skill's contract.
      already sent without a callback.
    A server session alone does not connect this conversation.
 
-3. Recover the current markdown once from `GET /api/sessions/<id>/content` if it is
-   absent from this conversation. Confirm the intended review focus if it is unknown.
-   Keep the content and version for subsequent rounds rather than fetching on every note.
+3. Recover the current markdown once if it is absent from this conversation, with the
+   CLI rather than curl:
+   ```bash
+   eink-review content <id>                  # markdown, version and status
+   eink-review source <id> path/to/file.rs:120  # the lines around a reference
+   ```
+   Confirm the intended review focus if it is unknown. Keep the content and version for
+   subsequent rounds rather than fetching on every note.
 
 ---
 

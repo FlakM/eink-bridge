@@ -568,7 +568,10 @@ async fn a_webhook_that_fails_twice_is_retried_until_it_lands() {
         .unwrap();
     assert!(resp.status().is_success());
 
-    let payload = received.wait(3000).await.expect("the third attempt was not delivered");
+    let payload = received
+        .wait(3000)
+        .await
+        .expect("the third attempt was not delivered");
     assert_eq!(payload["id"], id);
     assert_eq!(
         attempts.load(Ordering::SeqCst),

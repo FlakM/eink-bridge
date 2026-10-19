@@ -12,7 +12,8 @@ use eink_bridge::session::SessionOrigin;
 #[derive(Parser)]
 #[command(name = "eink-review", about = "E-ink review session CLI")]
 struct Cli {
-    #[arg(long, default_value = "http://localhost:3333")]
+    /// Server base URL (default: $EINK_SERVER_URL, then localhost:3333)
+    #[arg(long, env = "EINK_SERVER_URL", default_value = "http://localhost:3333")]
     server: String,
 
     #[command(subcommand)]
@@ -46,6 +47,9 @@ enum Command {
         /// Mark the session as starred (pinned — survives purge/expire, reloads across reboots)
         #[arg(long)]
         star: bool,
+        /// Attach a tag to the session (repeatable), k=v
+        #[arg(long = "tag", value_name = "K=V")]
+        tags: Vec<String>,
     },
     /// Pin a session so it survives purge, expire, and server restarts
     Star {
@@ -63,6 +67,33 @@ enum Command {
         id: String,
         /// File with updated content
         file: String,
+        /// Refuse the update unless the document is at this version
+        #[arg(long)]
+        expected_version: Option<u32>,
+        /// Acknowledge this feedback id in the same request
+        #[arg(long)]
+        feedback_id: Option<String>,
+        /// Zero-based annotation indices incorporated, comma-separated
+        #[arg(long, value_delimiter = ',')]
+        consumed: Vec<u32>,
+    },
+    /// Print a session's current markdown
+    Content {
+        /// Session ID
+        id: String,
+        /// Print the whole response as JSON (content, version, status)
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print the lines around a path:line reference in the session's checkout
+    Source {
+        /// Session ID
+        id: String,
+        /// A reference like src/lib.rs:120
+        reference: String,
+        /// Lines of context on each side
+        #[arg(long, default_value = "6")]
+        context: usize,
     },
     /// Watch an existing session for events via WebSocket (emits same events as push --interactive)
     Watch {
@@ -98,6 +129,9 @@ enum Command {
         /// Filter by status
         #[arg(long)]
         status: Option<String>,
+        /// Print the raw JSON array
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -108,6 +142,8 @@ async fn main() {
 
     let command_name = match &cli.command {
         Command::Push { .. } => "push",
+        Command::Content { .. } => "content",
+        Command::Source { .. } => "source",
         Command::Update { .. } => "update",
         Command::Watch { .. } => "watch",
         Command::Result { .. } => "result",
@@ -129,6 +165,7 @@ async fn main() {
             interactive,
             callback_url,
             star,
+            tags,
         } => {
             cmd_push(
                 &client,
@@ -141,15 +178,38 @@ async fn main() {
                 interactive,
                 callback_url,
                 star,
+                tags,
             )
             .await
         }
-        Command::Update { id, file } => cmd_update(&cli.server, &id, &file).await,
+        Command::Update {
+            id,
+            file,
+            expected_version,
+            feedback_id,
+            consumed,
+        } => {
+            cmd_update(
+                &cli.server,
+                &id,
+                &file,
+                expected_version,
+                feedback_id,
+                consumed,
+            )
+            .await
+        }
+        Command::Content { id, json } => cmd_content(&client, &cli.server, &id, json).await,
+        Command::Source {
+            id,
+            reference,
+            context,
+        } => cmd_source(&client, &cli.server, &id, &reference, context).await,
         Command::Watch { id, timeout } => cmd_push_interactive(&cli.server, &id, timeout).await,
         Command::Result { id, json } => cmd_result(&client, &cli.server, &id, json).await,
         Command::Cancel { id } => cmd_cancel(&client, &cli.server, &id).await,
         Command::Remove { id, force } => cmd_remove(&client, &cli.server, &id, force).await,
-        Command::List { status } => cmd_list(&client, &cli.server, status).await,
+        Command::List { status, json } => cmd_list(&client, &cli.server, status, json).await,
         Command::Star { id } => cmd_set_starred(&client, &cli.server, &id, true).await,
         Command::Unstar { id } => cmd_set_starred(&client, &cli.server, &id, false).await,
     };
@@ -225,7 +285,18 @@ async fn cmd_push(
     interactive: bool,
     callback_url: Option<String>,
     star: bool,
+    tags: Vec<String>,
 ) -> anyhow::Result<()> {
+    let mut tag_map = std::collections::HashMap::new();
+    for tag in tags {
+        let Some((key, value)) = tag.split_once('=') else {
+            anyhow::bail!("--tag expects k=v, got {tag:?}");
+        };
+        if key.is_empty() {
+            anyhow::bail!("--tag expects a key before '='");
+        }
+        tag_map.insert(key.to_string(), value.to_string());
+    }
     let content = if file == "-" {
         let mut buf = String::new();
         std::io::stdin().read_to_string(&mut buf)?;
@@ -245,6 +316,7 @@ async fn cmd_push(
             "content": content,
             "callback_url": callback_url,
             "starred": star,
+            "tags": tag_map,
             "origin": origin,
         }))
         .send()
@@ -445,15 +517,34 @@ async fn observer_retry(delay: &mut Duration, deadline: Instant) {
     *delay = (*delay * 2).min(Duration::from_secs(2));
 }
 
-async fn cmd_update(server: &str, id: &str, file: &str) -> anyhow::Result<()> {
+async fn cmd_update(
+    server: &str,
+    id: &str,
+    file: &str,
+    expected_version: Option<u32>,
+    feedback_id: Option<String>,
+    consumed: Vec<u32>,
+) -> anyhow::Result<()> {
     let content = std::fs::read_to_string(file)?;
     let client = Client::new();
-    let resp = client
-        .put(format!("{server}/api/sessions/{id}/content"))
-        .header("content-type", "text/plain")
-        .body(content)
-        .send()
-        .await?;
+    // A plain-text update stays the default: it is what the watcher and older agents do,
+    // and it cannot acknowledge anything by accident.
+    let guarded = expected_version.is_some() || feedback_id.is_some() || !consumed.is_empty();
+    let mut request = client.put(format!("{server}/api/sessions/{id}/content"));
+    request = if guarded {
+        request.header("content-type", "application/json").body(
+            serde_json::json!({
+                "content": content,
+                "expected_version": expected_version,
+                "feedback_id": feedback_id,
+                "consumed_annotations": consumed,
+            })
+            .to_string(),
+        )
+    } else {
+        request.header("content-type", "text/plain").body(content)
+    };
+    let resp = request.send().await?;
     match resp.status().as_u16() {
         200 => {
             let body: serde_json::Value = resp.json().await?;
@@ -461,8 +552,85 @@ async fn cmd_update(server: &str, id: &str, file: &str) -> anyhow::Result<()> {
             eprintln!("version updated to {version}");
             Ok(())
         }
+        400 => {
+            let reason = resp.text().await.unwrap_or_default();
+            anyhow::bail!("update refused: {reason}")
+        }
         404 => anyhow::bail!("session not found"),
-        409 => anyhow::bail!("session not in processing state"),
+        409 => anyhow::bail!(
+            "stale version, or the feedback id is not the one pending; fetch /feedback and retry"
+        ),
+        s => anyhow::bail!("unexpected status: {s}"),
+    }
+}
+
+async fn cmd_content(client: &Client, server: &str, id: &str, json: bool) -> anyhow::Result<()> {
+    let resp = client
+        .get(format!("{server}/api/sessions/{id}/content"))
+        .send()
+        .await?;
+    match resp.status().as_u16() {
+        200 => {
+            let body: serde_json::Value = resp.json().await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&body)?);
+            } else {
+                eprintln!(
+                    "session {id} version {} ({})",
+                    body["version"].as_u64().unwrap_or(0),
+                    body["status"].as_str().unwrap_or("unknown")
+                );
+                println!("{}", body["content"].as_str().unwrap_or_default());
+            }
+            Ok(())
+        }
+        404 => anyhow::bail!("session {id} not found"),
+        s => anyhow::bail!("unexpected status: {s}"),
+    }
+}
+
+async fn cmd_source(
+    client: &Client,
+    server: &str,
+    id: &str,
+    reference: &str,
+    context: usize,
+) -> anyhow::Result<()> {
+    let url = reqwest::Url::parse_with_params(
+        &format!("{server}/api/sessions/{id}/source"),
+        &[
+            ("ref", reference),
+            ("context", &context.min(40).to_string()),
+        ],
+    )?;
+    let resp = client.get(url).send().await?;
+    match resp.status().as_u16() {
+        200 => {
+            let body: serde_json::Value = resp.json().await?;
+            let start = body["start"].as_u64().unwrap_or(1);
+            let end = body["end"].as_u64().unwrap_or(start);
+            let total = body["total"].as_u64().unwrap_or(end);
+            println!(
+                "{}:{start}-{end} of {total}",
+                body["path"].as_str().unwrap_or(reference)
+            );
+            for (offset, line) in body["lines"].as_array().into_iter().flatten().enumerate() {
+                println!(
+                    "{:>5} {}",
+                    start + offset as u64,
+                    line.as_str().unwrap_or_default()
+                );
+            }
+            Ok(())
+        }
+        400 => {
+            let reason = resp.text().await.unwrap_or_default();
+            anyhow::bail!("bad reference: {reason}")
+        }
+        404 => {
+            let reason = resp.text().await.unwrap_or_default();
+            anyhow::bail!("cannot read {reference}: {reason}")
+        }
         s => anyhow::bail!("unexpected status: {s}"),
     }
 }
@@ -499,7 +667,9 @@ async fn cmd_result(
         }
         204 => {
             eprintln!("session still active (not yet submitted)");
-            Ok(())
+            // 3 is already "reject" in `verdict_exit_code`; a pipeline must not confuse a
+            // review that has not happened with one that failed. 5 is free.
+            std::process::exit(PENDING_EXIT_CODE);
         }
         410 => anyhow::bail!("session was cancelled"),
         404 => anyhow::bail!("session not found"),
@@ -542,14 +712,29 @@ async fn cmd_remove(client: &Client, server: &str, id: &str, force: bool) -> any
     }
 }
 
-async fn cmd_list(client: &Client, server: &str, status: Option<String>) -> anyhow::Result<()> {
+async fn cmd_list(
+    client: &Client,
+    server: &str,
+    status: Option<String>,
+    json: bool,
+) -> anyhow::Result<()> {
     let mut url = format!("{server}/api/sessions");
     if let Some(s) = &status {
         url = format!("{url}?status={s}");
     }
 
     let resp = client.get(&url).send().await?;
+    if !resp.status().is_success() {
+        let code = resp.status();
+        let detail = resp.text().await.unwrap_or_default();
+        anyhow::bail!("listing failed: {code}: {detail}");
+    }
     let sessions: Vec<serde_json::Value> = resp.json().await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&sessions)?);
+        return Ok(());
+    }
 
     if sessions.is_empty() {
         eprintln!("no sessions");
@@ -569,8 +754,12 @@ fn exit_for_verdict(body: &serde_json::Value) {
     }
 }
 
+/// The exit code for "no verdict yet". Deliberately not 3: that is `reject` below, and
+/// "nobody has reviewed this" must not read as "reviewed and refused".
+pub const PENDING_EXIT_CODE: i32 = 5;
+
 /// The exit code a submitted review carries, which is what a pipeline gates on.
-/// 0 = lgtm (or no verdict at all), 2 = changes, 3 = reject, 4 = question.
+/// 0 = lgtm (or no verdict at all), 2 = changes, 3 = reject, 4 = question, 5 = pending.
 fn verdict_exit_code(body: &serde_json::Value) -> i32 {
     match body["verdict"].as_str() {
         Some("changes") => 2,

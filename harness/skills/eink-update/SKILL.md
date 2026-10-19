@@ -53,14 +53,18 @@ EOF
 ### 4. Push the update
 
 ```bash
-eink-review update <session-id> /tmp/eink-update-XXXXX.md
+eink-review update <session-id> /tmp/eink-update-XXXXX.md \
+  [--expected-version <n>] [--feedback-id <id>] [--consumed 0,2]
 ```
 
 On success, the server responds with the new version number. Retained native ink is
 repositioned using server text matches; deleted/ambiguous targets are archived.
-This command changes content only: to respond to feedback and retire incorporated
-annotations, follow the `eink` skill's JSON update with `feedback_id`,
-`expected_version`, and zero-based `consumed_annotations` indices.
+
+When the update answers a note, pass `--feedback-id` and the zero-based annotation
+indices you incorporated in `--consumed`; those notes are then retired. Leave a note out
+of `--consumed` and it follows the remaining text instead of disappearing. `--consumed`
+without the matching `--feedback-id` is refused: an acknowledgement must name what it
+consumes.
 Attach the `eink` skill's background observer and confirm its handshake before
 claiming further feedback will reach the conversation. When handling an annotation,
 rearm immediately on receipt rather than waiting until the rewrite finishes.
