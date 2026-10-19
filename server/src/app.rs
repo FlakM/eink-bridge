@@ -722,17 +722,60 @@ async fn source_snippet(
     }
     let start = wanted.saturating_sub(context + 1);
     let end = (wanted + context).min(total);
-    let window: Vec<&str> = lines[start..end].to_vec();
+    let window: Vec<&str> = lines[start..end].iter().take(SOURCE_LINES_MAX).copied().collect();
+    // Rendered here rather than in the browser: the page has one highlighter, and it is
+    // this one. The cited line is marked the same way a snippet marks it.
+    let html = crate::render::source_block(
+        language_for(&relative),
+        &format!("{relative}:{}", start + 1),
+        &window,
+        Some(wanted - start),
+    );
     Json(serde_json::json!({
         "path": relative,
         "start": start + 1,
         "end": end,
         "total": total,
         "truncated": window.len() > SOURCE_LINES_MAX,
-        "lines": window.into_iter().take(SOURCE_LINES_MAX).collect::<Vec<_>>(),
-        "first": start + 1,
+        "lines": window,
+        "html": html,
     }))
     .into_response()
+}
+
+/// The highlighter's name for a file, or nothing when it does not know the language (the
+/// page falls back to plain text, exactly as it does for a snippet it cannot highlight).
+fn language_for(path: &str) -> &'static str {
+    match path.rsplit('.').next().unwrap_or("").to_ascii_lowercase().as_str() {
+        "rs" => "rust",
+        "kt" | "kts" => "kotlin",
+        "ts" => "typescript",
+        "tsx" => "tsx",
+        "js" | "jsx" | "mjs" => "javascript",
+        "py" => "python",
+        "rb" => "ruby",
+        "go" => "go",
+        "java" => "java",
+        "c" | "h" => "c",
+        "cpp" | "cc" | "hpp" => "c++",
+        "cs" => "c#",
+        "swift" => "swift",
+        "php" => "php",
+        "scala" => "scala",
+        "sh" | "bash" => "bash",
+        "sql" => "sql",
+        "yaml" | "yml" => "yaml",
+        "json" => "json",
+        "toml" => "toml",
+        "md" => "markdown",
+        "nix" => "nix",
+        "css" => "css",
+        "html" | "htm" => "html",
+        "xml" => "xml",
+        "proto" => "protobuf",
+        "gradle" => "groovy",
+        _ => "",
+    }
 }
 
 /// Split `path/file.rs:120` into the path and the line, refusing anything that could

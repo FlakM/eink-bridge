@@ -1214,6 +1214,15 @@ async fn a_code_reference_can_be_read_on_the_reader() {
         "the cited line is in the window: {lines:?}"
     );
 
+    // The expansion is rendered, not handed over as text: the same palette and the same
+    // cited-line mark as every other code block, so the reader is not looking at two kinds
+    // of code.
+    let html = snippet["html"].as_str().expect("the snippet is rendered server-side");
+    assert!(html.contains("snippet-block"), "{html}");
+    assert!(html.contains("color:#"), "it has to be coloured: {html}");
+    assert!(html.contains("snippet-hit"), "the cited line is marked: {html}");
+    assert!(html.contains("data-lang=\"rust\""), "rust, from the .rs extension: {html}");
+
     // Nothing outside the checkout, however the reference is written.
     for escape in [
         "ref=../../outside-secret.txt:1",

@@ -1576,15 +1576,10 @@ const CODEREF_JS: &str = r##"
         return response.json();
       })
       .then(function (body) {
-        var caption = document.createElement('div');
-        caption.className = 'coderef-caption';
-        caption.textContent = body.path + ':' + body.start + (body.end > body.start ? '-' + body.end : '');
-        var pre = document.createElement('pre');
-        pre.className = 'coderef-body';
-        pre.textContent = body.lines.map(function (line) { return line; }).join('\n');
-        wrap.innerHTML = '';
-        wrap.appendChild(caption);
-        wrap.appendChild(pre);
+        // The server renders it: the same highlighter, palette, caption and cited-line
+        // mark as every other code block on the page. Inserting the lines as text here
+        // made the expansion the only uncoloured code on the tablet.
+        wrap.innerHTML = body.html;
       })
       .catch(function (error) {
         // Say so rather than showing an empty block: the worktree may be gone.
@@ -2192,6 +2187,26 @@ fn split_reference(token: &str) -> Option<(&str, u32)> {
         "md", "nix", "css", "html", "xml", "proto", "gradle",
     ];
     SOURCE.contains(&extension.as_str()).then_some((path, line))
+}
+
+/// Render a window of a source file as a snippet block, the way the rest of the review
+/// renders code.
+///
+/// Used by the tap-a-reference expansion: it has to look exactly like every other code
+/// block on the page -- highlighted with the same palette, paper white, wrapping, with the
+/// cited line marked -- or the reader is looking at two different kinds of code.
+pub fn source_block(language: &str, reference: &str, lines: &[&str], cited: Option<usize>) -> String {
+    let mut header = String::new();
+    if !language.is_empty() {
+        header.push_str(language);
+        header.push(' ');
+    }
+    header.push_str(reference);
+    if let Some(cited) = cited {
+        header.push_str(&format!(" #L{cited}"));
+    }
+    let source = format!("{header}\n{}", lines.join("\n"));
+    diagrams::render_snippet(&source)
 }
 
 pub fn to_eink_html(markdown: &str, session_id: &str) -> String {
@@ -3439,6 +3454,26 @@ mod coderef_tests {
             let linked = link_code_references(text);
             assert!(!linked.contains("coderef"), "{text} should not be a reference: {linked}");
         }
+    }
+
+    #[test]
+    fn the_expansion_is_rendered_like_any_other_code_block() {
+        // Plain text would make the expansion the only uncoloured code on the tablet.
+        let block = source_block("rust", "server/src/app.rs:168", &["fn main() {", "    let x = 1;", "}"], Some(2));
+        assert!(block.contains("snippet-block"), "it is a snippet: {block}");
+        assert!(block.contains("data-lang=\"rust\""), "{block}");
+        assert!(block.contains("color:#"), "highlighted with the palette: {block}");
+        // The highlighted line is split across spans, so the mark is what to look for.
+        assert!(block.contains("mark class=\"snippet-hit\""), "the cited line is marked: {block}");
+        assert!(block.contains("server/src/app.rs:168 — ") || block.contains("server/src/app.rs:168"),
+                "{block}");
+    }
+
+    #[test]
+    fn a_language_the_highlighter_does_not_know_renders_plain() {
+        let block = source_block("", "notes.txt:1", &["just text"], None);
+        assert!(block.contains("just text"));
+        assert!(!block.contains("data-lang"), "{block}");
     }
 
     #[test]
