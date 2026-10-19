@@ -556,12 +556,12 @@ async fn require_token(
     let mut response = next.run(request).await;
     // The page's images and its JS fetches carry no Authorization header; the cookie is
     // what makes them work without putting the token in the markup.
-    if path.starts_with("/session/") {
-        if let Ok(cookie) = header::HeaderValue::from_str(&format!(
+    if path.starts_with("/session/")
+        && let Ok(cookie) = header::HeaderValue::from_str(&format!(
             "eink_token={token}; Path=/; HttpOnly; SameSite=Strict"
-        )) {
-            response.headers_mut().append(header::SET_COOKIE, cookie);
-        }
+        ))
+    {
+        response.headers_mut().append(header::SET_COOKIE, cookie);
     }
     response
 }

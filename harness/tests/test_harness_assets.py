@@ -95,7 +95,11 @@ class ContinueFlowTests(unittest.TestCase):
 
     def section(self, heading, next_heading):
         text = (SKILLS / "eink" / "SKILL.md").read_text()
-        return text[text.index(heading):text.index(next_heading)]
+        start = text.index(heading)
+        # Search *after* the heading: "**Portable path" also appears earlier in the file,
+        # and slicing to an earlier index silently yields "".
+        end = text.find(next_heading, start)
+        return text[start : end if end != -1 else len(text)]
 
     def test_continue_resubscribes_and_reads_pending_feedback(self):
         section = self.section("## Steps for `/eink continue", "## Steps for a new push")
