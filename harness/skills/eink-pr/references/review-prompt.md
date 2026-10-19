@@ -73,6 +73,13 @@ Open with three lines, in this order, one sentence each (≤ 25 words):
 
 Then `## Checks` — failures and skips; one "All green: <names>." line when clean.
 
+Then `## Interfaces` — **only when the change touches a contract** (a proto, schema, IDL or
+OpenAPI document, or a companion PR in a proto repo). Show the contract itself, in a
+`diff` or `snippet` block: messages, fields, methods, defaults, and what this means for a
+caller that has not changed yet. The implementation behind it gets one line. The reader is
+approving an interface; the code can be read later, and an interface cannot be un-agreed
+with.
+
 Then `## Important pieces` — at most 6, ranked, each:
   - **A** — <problem in one clause>. <what to do, verb first>.
 Keep every file:line, number, flag and error string exactly as they are.

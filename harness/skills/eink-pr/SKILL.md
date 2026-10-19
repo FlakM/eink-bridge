@@ -185,6 +185,25 @@ Collect every reviewer's findings into one file:
 python3 <skill-base>/scripts/review.py validate --findings findings.json   # schema check
 ```
 
+## 5b. Put the contract in front of the reader
+
+If the change touches a **contract** -- a proto, a schema, an IDL, an OpenAPI document --
+or if the PR has a **companion PR in a proto/interface repo**, that is the part the reader
+is being asked to agree with. Show it, ahead of the implementation:
+
+- Find the interface diff: `git diff` for `.proto`/`.avsc`/`.thrift`/`.graphql`/OpenAPI
+  files in this change, and any linked companion PR (the PR body usually names it). Read
+  it from the sibling worktree, or fetch that PR's diff if it is not checked out.
+- Present it as its own `## Interfaces` section: the messages, fields, methods, defaults,
+  and what breaks or stays compatible. A short `snippet` with a `diff` block is the right
+  form -- it is the contract, so it earns the space.
+- Keep the implementation to one line per change. The reader can read code later; they
+  cannot un-agree with an interface.
+
+`review.py filter --changed-file <path>` (repeatable, or `--changed-files-from <list>`)
+ranks findings on contract files first, and `review.py lint --changed-file <path>` **fails a
+brief that touches a contract and has no `## Interfaces` section**.
+
 ## 6. Filter to only relevant feedback
 
 This is the step that keeps the tablet readable. Run it before anything is written for

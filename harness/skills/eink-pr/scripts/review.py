@@ -158,14 +158,47 @@ def claim_similar(a, b, threshold=0.6):
     return len(left & right) / len(union) >= threshold
 
 
-def rank_key(finding):
+INTERFACE_SUFFIXES = (
+    ".proto", ".graphql", ".graphqls", ".avsc", ".thrift", ".capnp", ".fbs", ".wsdl",
+)
+INTERFACE_NAMES = (
+    "openapi.json", "openapi.yaml", "openapi.yml",
+    "swagger.json", "swagger.yaml", "swagger.yml",
+)
+
+
+def interface_files(paths):
+    """The changed files that are a contract rather than an implementation.
+
+    A proto, a schema, an IDL, an OpenAPI document: these are what a reviewer has to agree
+    with, because everything that follows is downstream of them. The implementation can be
+    read later; the interface change has to be in front of the reader.
+    """
+    found = []
+    for path in paths or []:
+        lowered = path.lower()
+        name = lowered.rstrip("/").split("/")[-1]
+        if lowered.endswith(INTERFACE_SUFFIXES) or name in INTERFACE_NAMES:
+            found.append(path)
+    return found
+
+
+def rank_key(finding, interfaces=None):
+    severity = SEVERITY_WEIGHT.get(finding.get("severity"), 0)
+    confidence = float(finding.get("confidence", 0.5))
+    boost = sum(TAG_BOOST.get(tag, 0.0) for tag in finding.get("tags", []) or [])
+    # A finding on a contract outranks the same finding on an implementation file: the
+    # reader is approving an interface.
+    on_contract = 1 if finding.get("file") in set(interfaces or []) else 0
+    return (on_contract, severity, confidence, boost)
     severity = SEVERITY_WEIGHT.get(finding.get("severity"), 0)
     confidence = float(finding.get("confidence", 0.5))
     boost = sum(TAG_BOOST.get(tag, 0.0) for tag in finding.get("tags", []) or [])
     return (severity, confidence, boost)
 
 
-def filter_findings(findings, checkout=None, limit=6, per_file=2, allow_nits=False):
+def filter_findings(findings, checkout=None, limit=6, per_file=2, allow_nits=False,
+                    interfaces=None):
     """Return (kept, dropped) where dropped is a list of (finding, reason)."""
     dropped = []
     valid = []
@@ -196,7 +229,7 @@ def filter_findings(findings, checkout=None, limit=6, per_file=2, allow_nits=Fal
             continue
         valid.append(finding)
 
-    valid.sort(key=rank_key, reverse=True)
+    valid.sort(key=lambda finding: rank_key(finding, interfaces=interfaces), reverse=True)
 
     # Deduplicate near-identical findings, best-ranked first.
     deduped = []
@@ -218,7 +251,7 @@ def filter_findings(findings, checkout=None, limit=6, per_file=2, allow_nits=Fal
     # If nothing else survived, keep the best nit: something beats an empty page.
     if not deduped:
         if nits:
-            nits.sort(key=rank_key, reverse=True)
+            nits.sort(key=lambda finding: rank_key(finding, interfaces=interfaces), reverse=True)
             for extra in nits[1:]:
                 dropped.append((extra, "nit (noise unless nothing else survives)"))
             return nits[:1], dropped
@@ -336,7 +369,8 @@ def render_brief(pr, findings, links=None, title_prefix="PR"):
 
 # ── lint ──────────────────────────────────────────────────────────────────────
 
-def lint_brief(markdown, max_words=420, max_bullet_words=30, max_sentence_words=24):
+def lint_brief(markdown, max_words=420, max_bullet_words=30, max_sentence_words=24,
+               interfaces=None):
     """Return a list of problems. Empty means the brief is deliverable."""
     problems = []
     body_lines = markdown.splitlines()
@@ -403,6 +437,12 @@ def lint_brief(markdown, max_words=420, max_bullet_words=30, max_sentence_words=
                 problems.append((0, "missing-opening", f"brief must state '{label}' before findings"))
         if "## Checks" not in markdown:
             problems.append((0, "missing-checks", "brief must say what was checked in the background"))
+        if interfaces and "## Interfaces" not in markdown:
+            names = ", ".join(interfaces[:3])
+            problems.append((0, "missing-interfaces",
+                             f"this change touches a contract ({names}); show the interface "
+                             "diff in an '## Interfaces' section -- the implementation "
+                             "matters less than what callers have to agree with"))
     for heading in headings:
         if heading in SUMMARY_HEADINGS:
             problems.append((0, "summary-stack", f"'{heading}' heading duplicates the overview"))
@@ -477,9 +517,14 @@ def cmd_render(args):
 def cmd_lint(args):
     with open(args.file) as handle:
         markdown = handle.read()
+    changed = list(getattr(args, "changed_file", None) or [])
+    if getattr(args, "changed_files_from", None):
+        with open(args.changed_files_from) as handle:
+            changed += [line.strip() for line in handle if line.strip()]
     problems = lint_brief(markdown, max_words=args.max_words,
                           max_bullet_words=args.max_bullet_words,
-                          max_sentence_words=args.max_sentence_words)
+                          max_sentence_words=args.max_sentence_words,
+                          interfaces=interface_files(changed))
     if not problems:
         print("brief ok")
         return 0
@@ -507,6 +552,12 @@ def main(argv=None):
     watch.add_argument("--max", type=int, default=6)
     watch.add_argument("--per-file", type=int, default=2)
     watch.add_argument("--allow-nits", action="store_true")
+    # The files the change touches: a contract in the diff outranks an implementation file,
+    # because the contract is what the reviewer is being asked to agree with.
+    watch.add_argument("--changed-file", action="append",
+                       help="a path the change touches (repeatable)")
+    watch.add_argument("--changed-files-from",
+                       help="a file listing the changed paths, one per line")
     watch.set_defaults(func=cmd_filter)
 
     render = sub.add_parser("render", help="findings -> brief + mark letters")
@@ -522,6 +573,13 @@ def main(argv=None):
     lint.add_argument("--max-words", type=int, default=420)
     lint.add_argument("--max-bullet-words", type=int, default=30)
     lint.add_argument("--max-sentence-words", type=int, default=24)
+    # The files the change touches, so the brief can be held to showing the contract. A
+    # proto or schema in the diff means the reader is being asked to agree with an
+    # interface, not to read an implementation.
+    lint.add_argument("--changed-file", action="append",
+                      help="a path the change touches (repeatable)")
+    lint.add_argument("--changed-files-from",
+                      help="a file listing the changed paths, one per line")
     lint.set_defaults(func=cmd_lint)
 
     validate = sub.add_parser("validate", help="check findings against the schema")

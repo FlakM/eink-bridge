@@ -310,3 +310,71 @@ class ReferenceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InterfaceChangesTest(unittest.TestCase):
+    """A change to a contract is what the reviewer has to agree with.
+
+    The implementation can be read later; a proto, schema or OpenAPI change is the thing
+    that other teams build against, so the brief has to show it -- and a finding on a
+    contract outranks the same finding on an implementation file.
+    """
+
+    BRIEF = """**What changed** - the session cookie gains a scope claim
+
+**Why** - the gateway reads it to authorise the websocket upgrade
+
+**Wider system** - identity-service mints it, the workspace API consumes it
+
+## Checks
+
+- not run
+"""
+
+    def test_contract_files_are_recognised(self):
+        changed = [
+            "services/auth/src/main.rs",
+            "proto/identity/v2/session.proto",
+            "api/openapi.yaml",
+            "events/session.avsc",
+            "models/session.thrift",
+            "README.md",
+        ]
+        self.assertEqual(
+            review.interface_files(changed),
+            ["proto/identity/v2/session.proto", "api/openapi.yaml",
+             "events/session.avsc", "models/session.thrift"],
+        )
+
+    def test_implementation_only_change_is_not_asked_for_interfaces(self):
+        self.assertEqual(review.interface_files(["src/app.rs", "src/lib.rs"]), [])
+        rules = [rule for _line, rule, _message in review.lint_brief(self.BRIEF)]
+        self.assertNotIn("missing-interfaces", rules)
+
+    def test_a_contract_change_must_be_presented(self):
+        problems = review.lint_brief(self.BRIEF, interfaces=["proto/session.proto"])
+        rules = {rule: message for _line, rule, message in problems}
+        self.assertIn("missing-interfaces", rules)
+        self.assertIn("matters less", rules["missing-interfaces"])
+
+    def test_the_section_is_enough_to_satisfy_it(self):
+        brief = self.BRIEF.replace("## Checks", "## Interfaces\n\n- `Session.scope: string` is new; old clients ignore it.\n\n## Checks")
+        rules = [rule for _line, rule, _message in review.lint_brief(brief, interfaces=["proto/session.proto"])]
+        self.assertNotIn("missing-interfaces", rules)
+
+    def test_a_finding_on_a_contract_outranks_one_on_the_implementation(self):
+        import json
+        from pathlib import Path
+        contract = {"file": "proto/session.proto", "line": 12, "severity": "medium",
+                    "confidence": 0.9, "claim": "the scope field is required but defaults to empty"}
+        implementation = dict(contract, file="services/auth/src/main.rs", line=88)
+        findings = [implementation, contract]
+        # The caller sorts descending (worst first, contract over implementation).
+        ranked = sorted(findings, key=lambda f: review.rank_key(f, interfaces=["proto/session.proto"]),
+                        reverse=True)
+        self.assertEqual(ranked[0]["file"], "proto/session.proto",
+                         "the contract has to come first in the brief")
+        # Without the interface list the two are ranked on their own merits.
+        same = sorted(findings, key=review.rank_key, reverse=True)
+        self.assertEqual({f["file"] for f in same[:2]},
+                         {"proto/session.proto", "services/auth/src/main.rs"})
