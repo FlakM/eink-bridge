@@ -445,14 +445,14 @@ When adding a new feature to `render.rs`:
 
 ## Known weak points
 
-### No authentication
+### Authentication is opt-in
 
 The server binds `0.0.0.0:3333`. Without `EINK_TOKEN` it has no auth (see Security
-notes), which is acceptable only on a trusted network. File reads and callbacks are fenced
-(loopback-only checkouts, validated `callback_url`), and with a token set a LAN caller can
-read, edit, submit or remove nothing without it. A
-token for non-local callers is the obvious next step, and it has a cost: the tablet would
-have to carry it.
+notes), which is acceptable only on a trusted network. With a token set, a LAN caller
+cannot list, read, edit, submit or remove a review without presenting it; loopback callers
+never need it. File reads and callbacks are fenced either way (loopback-only checkouts,
+validated `callback_url`). What remains open by design: `/api/health` and `/metrics`, and
+the tablet has to carry the token in its settings.
 
 ### A SIGKILL between the write and the response still loses that one write
 

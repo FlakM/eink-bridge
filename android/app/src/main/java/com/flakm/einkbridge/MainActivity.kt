@@ -624,11 +624,11 @@ class MainActivity : AppCompatActivity() {
         android.webkit.CookieManager.getInstance().flush()
     }
 
-    private fun loadSessionPage(sessionId: String) {
+    internal fun loadSessionPage(sessionId: String) {
         installSessionCookie()
         val token = sessionRepo.token().trim()
         if (token.isEmpty()) {
-            loadSessionPage(sessionId)
+            webView.loadUrl("$serverUrl/session/$sessionId")
         } else {
             webView.loadUrl(
                 "$serverUrl/session/$sessionId",

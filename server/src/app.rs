@@ -444,6 +444,7 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 /// can set an `Authorization` header on the request that matters.
 fn query_token_allowed(path: &str) -> bool {
     path.starts_with("/session/")
+        || path.starts_with("/review/")
         || path.starts_with("/ws/")
         || (path.starts_with("/api/sessions/") && path.contains("/annotation/"))
 }
@@ -547,16 +548,13 @@ async fn require_token(
         .flatten()
         .any(|candidate| constant_time_eq(candidate.as_bytes(), token.as_bytes()));
     if !authorized {
-        crate::metrics::HTTP_REQUESTS
-            .with_label_values(&["GET", "unauthorized", "401"])
-            .inc_by(0);
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
     let mut response = next.run(request).await;
     // The page's images and its JS fetches carry no Authorization header; the cookie is
     // what makes them work without putting the token in the markup.
-    if path.starts_with("/session/")
+    if (path.starts_with("/session/") || path.starts_with("/review/"))
         && let Ok(cookie) = header::HeaderValue::from_str(&format!(
             "eink_token={token}; Path=/; HttpOnly; SameSite=Strict"
         ))
@@ -575,6 +573,7 @@ mod auth_tests {
         assert_eq!(percent_decode("s3%2Bcret").as_deref(), Some("s3+cret"));
         assert_eq!(percent_decode("a+b").as_deref(), Some("a b"));
         assert!(query_token_allowed("/session/abc"));
+        assert!(query_token_allowed("/review/abc"));
         assert!(query_token_allowed("/ws/abc"));
         assert!(query_token_allowed("/api/sessions/abc/annotation/0"));
         assert!(!query_token_allowed("/api/sessions"));

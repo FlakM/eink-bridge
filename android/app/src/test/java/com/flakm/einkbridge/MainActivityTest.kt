@@ -11,6 +11,7 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 
 /**
@@ -338,6 +339,26 @@ class MainActivityTest {
             activity.handleWsMessage("version_updated", JSONObject().put("version", 7))
             assertEquals("the rewrite landed, so the button is an action again", "Update", button.text.toString())
             assertEquals(View.GONE, bar.visibility)
+        }
+    }
+
+    // Found in review: with no token stored, the no-token branch called itself and the
+    // app died with a StackOverflowError on the first tap of any session.
+    @Test
+    fun aPageLoadsWithoutATokenAndCarriesTheHeaderWithOne() {
+        scenario.onActivity { activity ->
+            val repo = SessionRepository(activity)
+            repo.saveToken("")
+            activity.loadSessionPage("abc")
+            val shadow = shadowOf(activity.webView)
+            assertTrue(shadow.lastLoadedUrl.endsWith("/session/abc"))
+            assertTrue(shadow.lastAdditionalHttpHeaders.isNullOrEmpty())
+
+            repo.saveToken("s3cret")
+            activity.loadSessionPage("def")
+            assertTrue(shadowOf(activity.webView).lastLoadedUrl.endsWith("/session/def"))
+            assertEquals("Bearer s3cret", shadowOf(activity.webView).lastAdditionalHttpHeaders["Authorization"])
+            repo.saveToken("")
         }
     }
 }

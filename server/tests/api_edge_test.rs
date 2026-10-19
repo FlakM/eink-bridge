@@ -1901,6 +1901,19 @@ async fn a_token_keeps_the_lan_out_and_this_machine_in() {
         .to_string();
     assert!(cookie.contains("eink_token=s3+cret"), "{cookie}");
     assert!(cookie.contains("HttpOnly"), "{cookie}");
+
+    // A browser on the LAN opens the review page the same way, and gets the same cookie.
+    let review = app
+        .clone()
+        .oneshot(
+            Request::get(format!("/review/{id}?token=s3%2Bcret"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(review.status(), StatusCode::OK);
+    assert!(review.headers().contains_key("set-cookie"));
 }
 
 #[tokio::test]
