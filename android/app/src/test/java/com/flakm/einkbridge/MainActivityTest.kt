@@ -173,7 +173,7 @@ class MainActivityTest {
         scenario.onActivity { activity ->
             activity.enterBindMode()
             assertTrue(activity.bindModeActive)
-            activity.findViewById<android.widget.Button>(R.id.btnPencil).performClick()
+            activity.findViewById<android.widget.ImageButton>(R.id.btnPencil).performClick()
             assertFalse("Bind mode must exit when pencil is tapped", activity.bindModeActive)
         }
     }
@@ -182,7 +182,7 @@ class MainActivityTest {
     fun brushButtonClick_exitsBind_whenBindModeActive() {
         scenario.onActivity { activity ->
             activity.enterBindMode()
-            activity.findViewById<android.widget.Button>(R.id.btnBrush).performClick()
+            activity.findViewById<android.widget.ImageButton>(R.id.btnBrush).performClick()
             assertFalse("Bind mode must exit when brush is tapped", activity.bindModeActive)
         }
     }
@@ -191,7 +191,7 @@ class MainActivityTest {
     fun eraserButtonClick_exitsBind_whenBindModeActive() {
         scenario.onActivity { activity ->
             activity.enterBindMode()
-            activity.findViewById<android.widget.Button>(R.id.btnEraser).performClick()
+            activity.findViewById<android.widget.ImageButton>(R.id.btnEraser).performClick()
             assertFalse("Bind mode must exit when eraser is tapped", activity.bindModeActive)
         }
     }
@@ -201,7 +201,7 @@ class MainActivityTest {
     @Test
     fun clearButtonClick_showsAlertDialog() {
         scenario.onActivity { activity ->
-            activity.findViewById<android.widget.Button>(R.id.btnClear).performClick()
+            activity.findViewById<android.widget.ImageButton>(R.id.btnClear).performClick()
             val dialog = org.robolectric.shadows.ShadowAlertDialog.getLatestAlertDialog()
             assertNotNull("Clear must show a confirmation dialog", dialog)
         }
@@ -241,7 +241,7 @@ class MainActivityTest {
     @Test
     fun btnLink_isToggle_entersThenExitsBindMode() {
         scenario.onActivity { activity ->
-            val btn = activity.findViewById<android.widget.Button>(R.id.btnLink)
+            val btn = activity.findViewById<android.widget.ImageButton>(R.id.btnLink)
             assertFalse(activity.bindModeActive)
             btn.performClick()
             assertTrue("First click must enter bind mode", activity.bindModeActive)
@@ -275,9 +275,9 @@ class MainActivityTest {
     @Test
     fun rapid_mode_button_taps_end_in_draw_mode_with_drawControls_visible() {
         scenario.onActivity { activity ->
-            val btnLink = activity.findViewById<android.widget.Button>(R.id.btnLink)
-            val btnSelect = activity.findViewById<android.widget.Button>(R.id.btnSelect)
-            val btnPencil = activity.findViewById<android.widget.Button>(R.id.btnPencil)
+            val btnLink = activity.findViewById<android.widget.ImageButton>(R.id.btnLink)
+            val btnSelect = activity.findViewById<android.widget.ImageButton>(R.id.btnSelect)
+            val btnPencil = activity.findViewById<android.widget.ImageButton>(R.id.btnPencil)
             val drawControls = activity.findViewById<View>(R.id.drawControls)
 
             repeat(10) {

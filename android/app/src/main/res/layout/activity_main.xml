@@ -206,74 +206,38 @@
             <FrameLayout
                 android:layout_width="60dp"
                 android:layout_height="64dp">
-                <Button
-                    android:id="@+id/btnPencil"
-                    style="?android:attr/buttonBarButtonStyle"
-                    android:layout_width="60dp"
-                    android:layout_height="64dp"
-                    android:text="✎"
-                    android:textSize="34sp"
-                    android:textColor="#000000" />
-                <View
-                    android:id="@+id/dotPencil"
-                    android:layout_width="10dp"
-                    android:layout_height="10dp"
-                    android:layout_gravity="bottom|center_horizontal"
-                    android:layout_marginBottom="3dp"
-                    android:background="@drawable/indicator_dot"
-                    android:visibility="gone" />
+                <ImageButton
+                android:id="@+id/btnPencil"
+                style="@style/Widget.ToolButton"
+                android:contentDescription="@string/btnPencil_desc"
+                android:src="@drawable/ic_pencil" />
             </FrameLayout>
 
             <FrameLayout
                 android:layout_width="60dp"
                 android:layout_height="64dp">
-                <Button
-                    android:id="@+id/btnBrush"
-                    style="?android:attr/buttonBarButtonStyle"
-                    android:layout_width="60dp"
-                    android:layout_height="64dp"
-                    android:text="▓"
-                    android:textSize="34sp"
-                    android:textColor="#000000" />
-                <View
-                    android:id="@+id/dotBrush"
-                    android:layout_width="10dp"
-                    android:layout_height="10dp"
-                    android:layout_gravity="bottom|center_horizontal"
-                    android:layout_marginBottom="3dp"
-                    android:background="@drawable/indicator_dot"
-                    android:visibility="gone" />
+                <ImageButton
+                android:id="@+id/btnBrush"
+                style="@style/Widget.ToolButton"
+                android:contentDescription="@string/btnBrush_desc"
+                android:src="@drawable/ic_brush" />
             </FrameLayout>
 
             <FrameLayout
                 android:layout_width="60dp"
                 android:layout_height="64dp">
-                <Button
-                    android:id="@+id/btnEraser"
-                    style="?android:attr/buttonBarButtonStyle"
-                    android:layout_width="60dp"
-                    android:layout_height="64dp"
-                    android:text="⌫"
-                    android:textSize="34sp"
-                    android:textColor="#000000" />
-                <View
-                    android:id="@+id/dotEraser"
-                    android:layout_width="10dp"
-                    android:layout_height="10dp"
-                    android:layout_gravity="bottom|center_horizontal"
-                    android:layout_marginBottom="3dp"
-                    android:background="@drawable/indicator_dot"
-                    android:visibility="gone" />
+                <ImageButton
+                android:id="@+id/btnEraser"
+                style="@style/Widget.ToolButton"
+                android:contentDescription="@string/btnEraser_desc"
+                android:src="@drawable/ic_eraser" />
             </FrameLayout>
 
-            <Button
+            <ImageButton
                 android:id="@+id/btnColor"
-                style="?android:attr/buttonBarButtonStyle"
-                android:layout_width="44dp"
-                android:layout_height="44dp"
-                android:text="⬤"
-                android:textSize="24sp"
-                android:textColor="#000000" />
+                style="@style/Widget.ToolButton"
+                android:contentDescription="@string/btnColor_desc"
+                android:src="@drawable/ic_color" />
 
         </LinearLayout>
 
@@ -289,46 +253,22 @@
         <FrameLayout
             android:layout_width="60dp"
             android:layout_height="64dp">
-            <Button
+            <ImageButton
                 android:id="@+id/btnLink"
-                style="?android:attr/buttonBarButtonStyle"
-                android:layout_width="60dp"
-                android:layout_height="64dp"
-                android:text="⊙"
-                android:textSize="32sp"
-                android:textColor="#000000"
-                android:alpha="0.5" />
-            <View
-                android:id="@+id/dotLink"
-                android:layout_width="10dp"
-                android:layout_height="10dp"
-                android:layout_gravity="bottom|center_horizontal"
-                android:layout_marginBottom="3dp"
-                android:background="@drawable/indicator_dot"
-                android:visibility="gone" />
+                style="@style/Widget.ToolButton"
+                android:contentDescription="@string/btnLink_desc"
+                android:src="@drawable/ic_lasso" />
         </FrameLayout>
 
         <!-- MOVE MODE: tap and drag annotation groups or labels to reposition -->
         <FrameLayout
             android:layout_width="60dp"
             android:layout_height="64dp">
-            <Button
+            <ImageButton
                 android:id="@+id/btnSelect"
-                style="?android:attr/buttonBarButtonStyle"
-                android:layout_width="60dp"
-                android:layout_height="64dp"
-                android:text="↖"
-                android:textSize="32sp"
-                android:textColor="#000000"
-                android:alpha="0.5" />
-            <View
-                android:id="@+id/dotSelect"
-                android:layout_width="10dp"
-                android:layout_height="10dp"
-                android:layout_gravity="bottom|center_horizontal"
-                android:layout_marginBottom="3dp"
-                android:background="@drawable/indicator_dot"
-                android:visibility="gone" />
+                style="@style/Widget.ToolButton"
+                android:contentDescription="@string/btnSelect_desc"
+                android:src="@drawable/ic_move" />
         </FrameLayout>
 
         <!-- CONTEXT BAR: shown when a group is selected in Move mode -->
@@ -375,23 +315,11 @@
         <FrameLayout
             android:layout_width="52dp"
             android:layout_height="64dp">
-            <Button
+            <ImageButton
                 android:id="@+id/btnAnnotations"
-                style="?android:attr/buttonBarButtonStyle"
-                android:layout_width="52dp"
-                android:layout_height="64dp"
-                android:text="👁"
-                android:textSize="28sp"
-                android:textColor="#000000"
-                android:alpha="0.35" />
-            <View
-                android:id="@+id/dotAnnotations"
-                android:layout_width="10dp"
-                android:layout_height="10dp"
-                android:layout_gravity="bottom|center_horizontal"
-                android:layout_marginBottom="3dp"
-                android:background="@drawable/indicator_dot"
-                android:visibility="gone" />
+                style="@style/Widget.ToolButton"
+                android:contentDescription="@string/btnAnnotations_desc"
+                android:src="@drawable/ic_visibility" />
         </FrameLayout>
 
         <View
@@ -401,45 +329,27 @@
             android:layout_marginEnd="4dp"
             android:background="#999999" />
 
-        <Button
-            android:id="@+id/btnUndo"
-            style="?android:attr/buttonBarButtonStyle"
-            android:layout_width="56dp"
-            android:layout_height="64dp"
-            android:text="↩"
-            android:textSize="34sp"
-            android:textColor="#000000" />
+        <ImageButton
+                android:id="@+id/btnUndo"
+                style="@style/Widget.ToolButton"
+                android:contentDescription="@string/btnUndo_desc"
+                android:src="@drawable/ic_undo" />
 
-        <Button
-            android:id="@+id/btnClear"
-            style="?android:attr/buttonBarButtonStyle"
-            android:layout_width="56dp"
-            android:layout_height="64dp"
-            android:text="✕"
-            android:textSize="34sp"
-            android:textColor="#000000" />
+        <ImageButton
+                android:id="@+id/btnClear"
+                style="@style/Widget.ToolButton"
+                android:contentDescription="@string/btnClear_desc"
+                android:src="@drawable/ic_clear" />
 
-        <Button
+        <androidx.appcompat.widget.AppCompatButton
             android:id="@+id/btnRequestUpdate"
-            android:layout_width="wrap_content"
-            android:layout_height="52dp"
-            android:minWidth="110dp"
-            android:text="↻ Update"
-            android:textSize="17sp"
-            android:textColor="#FFFFFF"
-            android:backgroundTint="#555555"
-            android:layout_marginStart="4dp"
-            android:layout_marginEnd="4dp" />
+            style="@style/Widget.ActionButton"
+            android:text="@string/action_update" />
 
-        <Button
+        <androidx.appcompat.widget.AppCompatButton
             android:id="@+id/btnSubmit"
-            android:layout_width="wrap_content"
-            android:layout_height="52dp"
-            android:minWidth="110dp"
-            android:text="✓ Done"
-            android:textSize="19sp"
-            android:textColor="#FFFFFF"
-            android:backgroundTint="#000000" />
+            style="@style/Widget.ActionButton.Primary"
+            android:text="@string/action_done" />
     </LinearLayout>
 
     <!-- Processing overlay: shown while OCR / agent update is in flight -->

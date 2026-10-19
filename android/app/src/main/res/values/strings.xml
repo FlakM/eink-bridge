@@ -1,4 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">E-Ink Bridge</string>
+
+    <!-- Spoken names for the toolbar, which is icon-only. -->
+    <string name="btnPencil_desc">Draw</string>
+    <string name="btnBrush_desc">Brush</string>
+    <string name="btnEraser_desc">Eraser</string>
+    <string name="btnColor_desc">Ink colour</string>
+    <string name="btnLink_desc">Link to text</string>
+    <string name="btnSelect_desc">Move ink</string>
+    <string name="btnAnnotations_desc">Show annotations</string>
+    <string name="btnUndo_desc">Undo</string>
+    <string name="btnClear_desc">Clear all ink</string>
+    <string name="action_update">UPDATE</string>
+    <string name="action_done">DONE</string>
 </resources>

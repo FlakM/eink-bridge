@@ -278,14 +278,14 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private val styleButtons = mutableListOf<Button>()
+    private val styleButtons = mutableListOf<ImageButton>()
     internal lateinit var strokeSlider: SeekBar
-    private lateinit var btnLink: Button
-    private lateinit var btnColor: Button
+    private lateinit var btnLink: ImageButton
+    private lateinit var btnColor: ImageButton
     private lateinit var colorDrawer: LinearLayout
     private val colorDots = mutableListOf<View>()
-    private lateinit var btnAnnotations: Button
-    private lateinit var btnSelect: Button
+    private lateinit var btnAnnotations: ImageButton
+    private lateinit var btnSelect: ImageButton
     private var selectedStyleIndex = 0
     internal var toolMode: ToolMode = ToolMode.DRAW
         private set
@@ -297,7 +297,6 @@ class MainActivity : AppCompatActivity() {
     private var epdRestoreRunnable: Runnable? = null
     private var processingJob: Job? = null
 
-    private val styleDotIds = listOf(R.id.dotPencil, R.id.dotBrush, R.id.dotEraser)
 
     private val colorPalette = intArrayOf(
         Color.BLACK,
@@ -315,20 +314,20 @@ class MainActivity : AppCompatActivity() {
         drawControls = findViewById(R.id.drawControls)
         contextBar = findViewById(R.id.contextBar)
         strokeSlider = findViewById(R.id.strokeSlider)
-        val btnPencil = findViewById<Button>(R.id.btnPencil)
-        val btnBrush = findViewById<Button>(R.id.btnBrush)
-        val btnUndo = findViewById<Button>(R.id.btnUndo)
-        val btnClear = findViewById<Button>(R.id.btnClear)
+        val btnPencil = findViewById<ImageButton>(R.id.btnPencil)
+        val btnBrush = findViewById<ImageButton>(R.id.btnBrush)
+        val btnUndo = findViewById<ImageButton>(R.id.btnUndo)
+        val btnClear = findViewById<ImageButton>(R.id.btnClear)
         btnLink = findViewById(R.id.btnLink)
         btnColor = findViewById(R.id.btnColor)
         colorDrawer = findViewById(R.id.colorDrawer)
         buildColorDrawer()
-        btnColor.setTextColor(currentStrokeColor)
+        btnColor.imageTintList = android.content.res.ColorStateList.valueOf(currentStrokeColor)
         btnColor.setOnClickListener { toggleColorDrawer() }
         btnAnnotations = findViewById(R.id.btnAnnotations)
         btnSelect = findViewById(R.id.btnSelect)
 
-        val btnEraser = findViewById<Button>(R.id.btnEraser)
+        val btnEraser = findViewById<ImageButton>(R.id.btnEraser)
         styleButtons.addAll(listOf(btnPencil, btnBrush, btnEraser))
 
         strokeSlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
@@ -374,10 +373,7 @@ class MainActivity : AppCompatActivity() {
         }
         btnAnnotations.setOnClickListener {
             annotationModeActive = !annotationModeActive
-            btnAnnotations.alpha = if (annotationModeActive) 1.0f else 0.35f
-            btnAnnotations.textSize = if (annotationModeActive) 30f else 26f
-            findViewById<View>(R.id.dotAnnotations).visibility =
-                if (annotationModeActive) View.VISIBLE else View.GONE
+            btnAnnotations.isSelected = annotationModeActive
             penOverlay?.annotationMode = annotationModeActive
         }
         findViewById<Button>(R.id.btnReOcr).setOnClickListener {
@@ -395,34 +391,23 @@ class MainActivity : AppCompatActivity() {
         selectStyle(0)
     }
 
-    private fun setModeButtonActive(btn: Button, dotId: Int, active: Boolean) {
-        if (active) {
-            btn.background = android.graphics.drawable.GradientDrawable().apply {
-                shape = android.graphics.drawable.GradientDrawable.RECTANGLE
-                cornerRadius = resources.displayMetrics.density * 8
-                setColor(Color.parseColor("#222222"))
-            }
-            btn.setTextColor(Color.WHITE)
-            btn.alpha = 1.0f
-        } else {
-            btn.setBackgroundColor(Color.TRANSPARENT)
-            btn.setTextColor(Color.BLACK)
-            btn.alpha = 0.5f
-        }
-        btn.textSize = if (active) 36f else 32f
-        findViewById<View>(dotId).visibility = if (active) View.VISIBLE else View.GONE
+    /**
+     * Mark a mode button as the active one.
+     *
+     * The button's own selected state is the signal -- a filled black pill against the
+     * paper-white row. It used to be three signals at once (a background, an alpha and a
+     * separate red dot) and it grew the glyph when selected, so the row moved under the
+     * reader's finger.
+     */
+    private fun setModeButtonActive(btn: ImageButton, active: Boolean) {
+        btn.isSelected = active
     }
 
     private fun selectStyle(idx: Int) {
         selectedStyleIndex = idx
-        styleButtons.forEachIndexed { i, btn ->
-            val active = i == idx
-            btn.alpha = if (active) 1.0f else 0.35f
-            btn.textSize = if (active) 42f else 34f
-        }
-        styleDotIds.forEachIndexed { i, id ->
-            findViewById<View>(id).visibility = if (i == idx) View.VISIBLE else View.GONE
-        }
+        // The chosen style is inverted; the others stay at full contrast. Alpha made them
+        // ghostly on e-ink and said "broken" rather than "not chosen".
+        styleButtons.forEachIndexed { i, btn -> btn.isSelected = i == idx }
     }
 
     /**
@@ -440,15 +425,14 @@ class MainActivity : AppCompatActivity() {
         }
         toolMode = mode
         colorDrawer.visibility = View.GONE
-        setModeButtonActive(btnLink, R.id.dotLink, mode == ToolMode.TAG)
-        setModeButtonActive(btnSelect, R.id.dotSelect, mode == ToolMode.MOVE)
+        setModeButtonActive(btnLink, mode == ToolMode.TAG)
+        setModeButtonActive(btnSelect, mode == ToolMode.MOVE)
         val drawMode = mode == ToolMode.DRAW
         drawControls.visibility = if (drawMode) View.VISIBLE else View.GONE
         contextBar.visibility = View.GONE
         if (!drawMode) {
             currentContextGroupId = null
-            styleDotIds.forEach { findViewById<View>(it).visibility = View.GONE }
-            styleButtons.forEach { it.isEnabled = false; it.alpha = 0.2f }
+            styleButtons.forEach { it.isEnabled = false }
         } else {
             styleButtons.forEach { it.isEnabled = true }
             selectStyle(selectedStyleIndex)
@@ -489,7 +473,7 @@ class MainActivity : AppCompatActivity() {
                 setOnClickListener {
                     currentStrokeColor = color
                     penOverlay?.setStrokeColor(color)
-                    btnColor.setTextColor(color)
+                    btnColor.imageTintList = android.content.res.ColorStateList.valueOf(color)
                     updateColorDotSelection()
                     colorDrawer.visibility = View.GONE
                 }
@@ -535,15 +519,13 @@ class MainActivity : AppCompatActivity() {
         penOverlay?.destroy()
         penOverlay = null
         annotationModeActive = false
-        btnAnnotations.alpha = 0.35f
-        btnAnnotations.textSize = 26f
-        findViewById<View>(R.id.dotAnnotations).visibility = View.GONE
+        btnAnnotations.isSelected = false
         currentContextGroupId = null
         contextBar.visibility = View.GONE
         // Force the UI back to draw mode. setToolMode is a no-op if already DRAW.
         toolMode = ToolMode.DRAW
-        setModeButtonActive(btnLink, R.id.dotLink, false)
-        setModeButtonActive(btnSelect, R.id.dotSelect, false)
+        setModeButtonActive(btnLink, false)
+        setModeButtonActive(btnSelect, false)
         drawControls.visibility = View.VISIBLE
         styleButtons.forEach { it.isEnabled = true }
         selectStyle(selectedStyleIndex)
@@ -670,8 +652,8 @@ class MainActivity : AppCompatActivity() {
         currentContextGroupId = null
         colorDrawer.visibility = View.GONE
         toolMode = ToolMode.DRAW
-        setModeButtonActive(btnLink, R.id.dotLink, false)
-        setModeButtonActive(btnSelect, R.id.dotSelect, false)
+        setModeButtonActive(btnLink, false)
+        setModeButtonActive(btnSelect, false)
         drawControls.visibility = View.VISIBLE
         contextBar.visibility = View.GONE
         styleButtons.forEach { it.isEnabled = true }
