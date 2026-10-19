@@ -119,21 +119,39 @@ internal class SessionViewModel(app: Application) : AndroidViewModel(app) {
         )
     }
 
+    /** How many pages a refresh will follow before giving up on a runaway list. */
+    internal companion object {
+        const val SESSION_PAGE_SIZE = 50
+        const val SESSION_PAGE_LIMIT = 20
+    }
+
     private fun sortStarredFirst(sessions: List<SessionInfo>): List<SessionInfo> =
         sessions.sortedWith(compareByDescending<SessionInfo> { it.starred }.thenByDescending { it.updatedAt })
 
     private suspend fun fetchSessions() {
         withContext(Dispatchers.IO) {
             try {
-                val response = client.newCall(
-                    Request.Builder().url("$serverUrl/api/sessions").build()
-                ).execute()
-                if (response.isSuccessful) {
+                // Page rather than fetch everything: the list grows without bound, and
+                // this runs on every refresh.
+                val fetched = mutableListOf<SessionInfo>()
+                var cursor: String? = null
+                var pages = 0
+                while (pages < SESSION_PAGE_LIMIT) {
+                    pages++
+                    val response = client.newCall(
+                        Request.Builder().url(sessionsPageUrl(serverUrl, cursor)).build()
+                    ).execute()
+                    if (!response.isSuccessful) break
                     val body = response.body?.string() ?: "[]"
                     val arr = JSONArray(body)
-                    val sessions = sortStarredFirst(
-                        (0 until arr.length()).map { i -> parseSession(arr.getJSONObject(i)) }
-                    )
+                    for (i in 0 until arr.length()) {
+                        fetched.add(parseSession(arr.getJSONObject(i)))
+                    }
+                    cursor = response.header("x-next-cursor")
+                    if (cursor == null) break
+                }
+                if (fetched.isNotEmpty() || pages > 0) {
+                    val sessions = sortStarredFirst(fetched)
                     docCache.saveSessions(sessions)
                     val pending = sessions.filter { sessionRepo.hasStrokes(it.id) }.map { it.id }.toSet()
                     val cached = sessions.filter { docCache.hasCached(it.id) }.map { it.id }.toSet()
@@ -147,5 +165,15 @@ internal class SessionViewModel(app: Application) : AndroidViewModel(app) {
                 _state.value = SessionListState(cached, pending, cachedIds, status)
             }
         }
+    }
+}
+
+/** The URL for one page of the session list. Kept pure so the paging policy is testable. */
+internal fun sessionsPageUrl(serverUrl: String, cursor: String?): String {
+    val base = "$serverUrl/api/sessions?limit=${SessionViewModel.SESSION_PAGE_SIZE}"
+    return if (cursor == null) {
+        base
+    } else {
+        "$base&cursor=${java.net.URLEncoder.encode(cursor, "UTF-8")}"
     }
 }

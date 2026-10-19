@@ -953,3 +953,198 @@ async fn health_says_what_is_actually_wrong() {
         "an unwritable state directory must be visible: {health}"
     );
 }
+
+#[tokio::test]
+async fn the_session_list_pages_without_repeating_or_dropping_a_session() {
+    // The tablet reads this list on every refresh, and it used to fetch everything ever
+    // written. Paging has to be exact: a session seen twice or skipped looks like a
+    // review that vanished.
+    let dir = tempfile::tempdir().unwrap();
+    let app = test_app(dir.path().to_path_buf());
+    let mut created = Vec::new();
+    for n in 0..7 {
+        created.push(create(&app, &format!("# Review {n}")).await);
+    }
+    // Pin one so it has to sort first on every page.
+    let pinned = created[2].clone();
+    send(
+        &app,
+        Request::put(format!("/api/sessions/{pinned}/star"))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"starred": true}"#))
+            .unwrap(),
+    )
+    .await;
+
+    let mut seen: Vec<String> = Vec::new();
+    let mut cursor: Option<String> = None;
+    let mut pages = 0;
+    loop {
+        pages += 1;
+        assert!(pages < 20, "the cursor is not making progress");
+        let uri = match &cursor {
+            Some(cursor) => format!("/api/sessions?limit=3&cursor={cursor}"),
+            None => "/api/sessions?limit=3".to_string(),
+        };
+        let resp = app
+            .clone()
+            .oneshot(Request::get(&uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+        let next = resp
+            .headers()
+            .get("x-next-cursor")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        let mut body = resp.into_body().collect().await.unwrap().to_bytes();
+        let page: Vec<serde_json::Value> = serde_json::from_slice(&mut body).unwrap();
+        assert!(page.len() <= 3, "limit honoured: {}", page.len());
+        for session in &page {
+            seen.push(session["id"].as_str().unwrap().to_string());
+        }
+        match next {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+
+    assert_eq!(pages, 3, "seven sessions at three per page is three pages");
+    let mut unique = seen.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(
+        unique.len(),
+        seen.len(),
+        "no session may appear twice: {seen:?}"
+    );
+    let mut expected = created.clone();
+    expected.sort();
+    unique.sort();
+    assert_eq!(unique, expected, "every session must appear exactly once");
+
+    // Pinned first, on the first page, which is what the reader expects.
+    let first = app
+        .clone()
+        .oneshot(
+            Request::get("/api/sessions?limit=1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let page: Vec<serde_json::Value> =
+        serde_json::from_slice(&first.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(page[0]["id"].as_str().unwrap(), pinned);
+    assert_eq!(page[0]["starred"], true);
+}
+
+#[tokio::test]
+async fn a_list_without_a_limit_is_still_everything() {
+    // Compatibility: every existing client asks for the whole list and must keep getting
+    // it, or the tablet shows an arbitrary subset after an upgrade.
+    let dir = tempfile::tempdir().unwrap();
+    let app = test_app(dir.path().to_path_buf());
+    for n in 0..5 {
+        create(&app, &format!("# Review {n}")).await;
+    }
+    let resp = app
+        .clone()
+        .oneshot(Request::get("/api/sessions").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert!(
+        resp.headers().get("x-next-cursor").is_none(),
+        "no limit, no cursor"
+    );
+    let page: Vec<serde_json::Value> =
+        serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(page.len(), 5);
+
+    // A page size above the ceiling is clamped rather than refused.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::get("/api/sessions?limit=100000")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_page_size_of_zero_or_a_bad_cursor_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = test_app(dir.path().to_path_buf());
+    create(&app, "# Review").await;
+
+    for uri in [
+        "/api/sessions?limit=0",
+        "/api/sessions?limit=5&cursor=not-a-cursor",
+        "/api/sessions?limit=5&cursor=1-abc-",
+    ] {
+        let (status, _) = send(&app, Request::get(uri).body(Body::empty()).unwrap()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+    }
+}
+
+#[tokio::test]
+async fn a_response_means_the_change_is_on_disk() {
+    // Writes are queued so the session lock is never held during disk I/O. The other half
+    // of that bargain: when a mutation answers, the write has landed, or a crash right
+    // after would lose work the client was told was safe.
+    let dir = tempfile::tempdir().unwrap();
+    let app = test_app(dir.path().to_path_buf());
+    let id = create(&app, "# Review\n\nv1").await;
+    let on_disk = || {
+        std::fs::read_to_string(dir.path().join("sessions").join(&id).join("session.json"))
+            .unwrap_or_default()
+    };
+    assert!(
+        on_disk().contains("v1"),
+        "creating a session is durable before its URL is handed out"
+    );
+
+    let mp = "--b\r\nContent-Disposition: form-data; name=\"typed_notes\"\r\n\r\nCHANGES: see above\r\n--b--\r\n";
+    send(
+        &app,
+        Request::post(format!("/api/sessions/{id}/submit"))
+            .header("content-type", "multipart/form-data; boundary=b")
+            .body(Body::from(mp))
+            .unwrap(),
+    )
+    .await;
+    let after_submit = on_disk();
+    assert!(
+        after_submit.contains("CHANGES: see above"),
+        "the submitted review is on disk when the response arrives: {after_submit}"
+    );
+    assert!(after_submit.contains("Submitted"));
+
+    // And the same for a content update, which a client relies on when it comes back.
+    send(
+        &app,
+        Request::put(format!("/api/sessions/{id}/content"))
+            .header("content-type", "text/plain")
+            .body(Body::from("# Review\n\nv2"))
+            .unwrap(),
+    )
+    .await;
+    // A submitted session rejects content updates, so use a fresh one for that half.
+    let live = create(&app, "# Second").await;
+    send(
+        &app,
+        Request::put(format!("/api/sessions/{live}/content"))
+            .header("content-type", "text/plain")
+            .body(Body::from("# Second\n\nrewritten"))
+            .unwrap(),
+    )
+    .await;
+    let rewritten =
+        std::fs::read_to_string(dir.path().join("sessions").join(&live).join("session.json"))
+            .unwrap();
+    assert!(rewritten.contains("rewritten"), "{rewritten}");
+    assert!(rewritten.contains("\"version\": 2"), "{rewritten}");
+}

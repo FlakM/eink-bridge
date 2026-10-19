@@ -98,6 +98,45 @@ pub struct Session {
     #[serde(default)]
     pub origin: Option<SessionOrigin>,
     pub state_dir: PathBuf,
+    #[serde(skip, default)]
+    writer: Option<tokio::sync::mpsc::UnboundedSender<WriteRequest>>,
+}
+
+/// A disk write that has been moved off the session lock.
+pub enum WriteRequest {
+    Snapshot {
+        path: PathBuf,
+        json: String,
+    },
+    /// Asks the drain task to confirm everything before it has landed. Ordering in the
+    /// channel is what makes this a barrier.
+    Barrier {
+        ack: tokio::sync::oneshot::Sender<()>,
+    },
+}
+
+/// Write snapshots in the order they were produced, until the queue closes.
+pub async fn drain_writes(mut rx: tokio::sync::mpsc::UnboundedReceiver<WriteRequest>) {
+    while let Some(request) = rx.recv().await {
+        match request {
+            WriteRequest::Snapshot { path, json } => write_snapshot(&path, &json),
+            WriteRequest::Barrier { ack } => {
+                let _ = ack.send(());
+            }
+        }
+    }
+}
+
+fn write_snapshot(path: &std::path::Path, json: &str) {
+    if let Some(dir) = path.parent()
+        && let Err(e) = fs::create_dir_all(dir)
+    {
+        error!(path = %dir.display(), error = %e, "failed to create session dir");
+        return;
+    }
+    if let Err(e) = fs::write(path, json) {
+        error!(path = %path.display(), error = %e, "failed to persist session");
+    }
 }
 
 impl Session {
@@ -114,18 +153,30 @@ impl Session {
         path.to_string_lossy().to_string()
     }
 
+    /// Serialize now (cheap, and done while the caller holds the session), write later.
+    ///
+    /// The write used to happen right here, inside the manager's write lock, so every
+    /// mutation waited on the disk and a slow or full disk stalled the whole API. Handing
+    /// it to the drain task keeps the lock short; callers that must be durable before they
+    /// answer ask the manager to flush.
     fn persist(&self) {
-        if let Err(e) = fs::create_dir_all(&self.state_dir) {
-            error!(path = %self.state_dir.display(), error = %e, "failed to create session dir");
-            return;
-        }
         let path = self.state_dir.join("session.json");
         match serde_json::to_string_pretty(self) {
-            Ok(json) => {
-                if let Err(e) = fs::write(&path, json) {
-                    error!(path = %path.display(), error = %e, "failed to persist session");
+            Ok(json) => match &self.writer {
+                Some(writer) => {
+                    if writer
+                        .send(WriteRequest::Snapshot {
+                            path: path.clone(),
+                            json: json.clone(),
+                        })
+                        .is_err()
+                    {
+                        // The drain task is gone; do not drop the write on the floor.
+                        write_snapshot(&path, &json);
+                    }
                 }
-            }
+                None => write_snapshot(&path, &json),
+            },
             Err(e) => error!(session = %self.id, error = %e, "failed to serialize session"),
         }
     }
@@ -134,6 +185,7 @@ impl Session {
 pub struct SessionManager {
     sessions: HashMap<String, Session>,
     state_dir: PathBuf,
+    writer: Option<tokio::sync::mpsc::UnboundedSender<WriteRequest>>,
 }
 
 impl SessionManager {
@@ -144,6 +196,25 @@ impl SessionManager {
         let mut mgr = Self {
             sessions: HashMap::new(),
             state_dir,
+            writer: None,
+        };
+        mgr.load_from_disk();
+        mgr
+    }
+
+    /// A manager whose writes are queued for a drain task, so no mutation waits on the
+    /// disk while holding the session lock.
+    pub fn with_writer(
+        state_dir: PathBuf,
+        writer: tokio::sync::mpsc::UnboundedSender<WriteRequest>,
+    ) -> Self {
+        if let Err(e) = fs::create_dir_all(&state_dir) {
+            error!(path = %state_dir.display(), error = %e, "failed to create state dir");
+        }
+        let mut mgr = Self {
+            sessions: HashMap::new(),
+            state_dir,
+            writer: Some(writer),
         };
         mgr.load_from_disk();
         mgr
@@ -171,6 +242,8 @@ impl SessionManager {
                     if session.starred {
                         loaded_starred += 1;
                     }
+                    let mut session = session;
+                    session.writer = self.writer.clone();
                     self.sessions.insert(session.id.clone(), session);
                     loaded += 1;
                 }
@@ -224,6 +297,7 @@ impl SessionManager {
             starred,
             origin,
             state_dir: session_dir,
+            writer: self.writer.clone(),
         };
         session.persist();
         self.sessions.insert(id, session.clone());
@@ -722,6 +796,98 @@ mod disk_trouble {
         assert!(
             !manager.delete(&session.id),
             "removing twice is not a success"
+        );
+    }
+}
+
+#[cfg(test)]
+mod write_queue {
+    use super::*;
+
+    fn session_json(dir: &std::path::Path, id: &str) -> PathBuf {
+        dir.join("sessions").join(id).join("session.json")
+    }
+
+    #[tokio::test]
+    async fn a_queued_write_does_not_hold_the_caller() {
+        // With a drain task that is not running, the mutation still returns: the write is
+        // a channel push, so the session lock is never held while the disk is written.
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut manager = SessionManager::with_writer(dir.path().to_path_buf(), tx);
+
+        let session = manager.create(
+            "# Review".into(),
+            Some("title".into()),
+            None,
+            HashMap::new(),
+            false,
+            None,
+        );
+        assert!(
+            manager.get(&session.id).is_some(),
+            "the session is readable immediately"
+        );
+        assert!(
+            !session_json(dir.path(), &session.id).exists(),
+            "and the disk has not been touched yet"
+        );
+
+        // Draining lands the write. Every sender has to be gone first or the drain waits
+        // for more work: the manager holds one, and so does the clone `create` returned.
+        let id = session.id.clone();
+        drop(session);
+        drop(manager);
+        crate::session::drain_writes(rx).await;
+        let on_disk = fs::read_to_string(session_json(dir.path(), &id)).unwrap();
+        assert!(on_disk.contains("# Review"));
+    }
+
+    #[tokio::test]
+    async fn queued_writes_land_in_the_order_they_were_produced() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut manager = SessionManager::with_writer(dir.path().to_path_buf(), tx);
+        let id = manager
+            .create("# v1".into(), None, None, HashMap::new(), false, None)
+            .id;
+
+        for version in 2..=5 {
+            assert_eq!(
+                manager.update_content(&id, format!("# v{version}")),
+                Some(version)
+            );
+        }
+        drop(manager);
+        crate::session::drain_writes(rx).await;
+
+        let on_disk = fs::read_to_string(session_json(dir.path(), &id)).unwrap();
+        assert!(
+            on_disk.contains("# v5"),
+            "the last write wins, so a stale snapshot cannot overwrite a newer one"
+        );
+    }
+
+    #[tokio::test]
+    async fn without_a_writer_the_write_is_inline() {
+        // The synchronous path is what unit tests and any embedder without a runtime use.
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = SessionManager::new(dir.path().to_path_buf());
+        let session = manager.create("# Inline".into(), None, None, HashMap::new(), false, None);
+        assert!(session_json(dir.path(), &session.id).exists());
+    }
+
+    #[tokio::test]
+    async fn a_dropped_drain_task_does_not_lose_the_write() {
+        // If the queue is gone, the write falls back to the caller rather than vanishing.
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        drop(rx);
+        let mut manager = SessionManager::with_writer(dir.path().to_path_buf(), tx);
+        let session = manager.create("# Orphaned".into(), None, None, HashMap::new(), false, None);
+        assert!(
+            session_json(dir.path(), &session.id).exists(),
+            "a dead queue must not mean a lost session"
         );
     }
 }

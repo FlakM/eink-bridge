@@ -32,6 +32,7 @@ PROVIDERSI = SERVER / "src/ocr/providers.rs"
 MAINI = SERVER / "src/main.rs"
 STROKEBUFFER = SERVER.parent / "android/app/src/main/java/com/flakm/einkbridge/StrokeBuffer.kt"
 FLAKE = SERVER.parent / "flake.nix"
+SESSIONI = SERVER / "src/session.rs"
 THEME = SERVER / "assets/eink-theme.tmTheme"
 
 
@@ -57,6 +58,9 @@ TARGETS = {
     "an_occupied_port_is_reported_in_words": "--test startup_test",
     "the_allowlist_matches_the_filter_in_the_flake": "--test build_source_test",
     "health_says_what_is_actually_wrong": "--test api_edge_test",
+    "the_session_list_pages_without_repeating_or_dropping_a_session": "--test api_edge_test",
+    "a_page_size_of_zero_or_a_bad_cursor_is_refused": "--test api_edge_test",
+    "a_response_means_the_change_is_on_disk": "--test api_edge_test",
     "remove_forgets_the_session_and_deletes_its_files": "--test api_edge_test",
     "the_cloud_timeout_stays_inside_a_usable_range": "--lib",
     "a_local_runtime_http_error_is_reported_with_its_status": "--lib",
@@ -743,6 +747,57 @@ CASES = [
             """              false;""",
         ),
         "the_allowlist_matches_the_filter_in_the_flake",
+    ),
+    (
+        "a page ignores its own cursor and repeats itself",
+        text_edit(
+            APPI,
+            """        if let Some((starred, micros, id)) = &after {""",
+            """        if let Some((starred, micros, id)) = None::<&(bool, i64, String)> {""",
+        ),
+        "the_session_list_pages_without_repeating_or_dropping_a_session",
+    ),
+    (
+        "a page size of zero is served",
+        text_edit(
+            APPI,
+            """    if params.limit == Some(0) {
+        return (StatusCode::BAD_REQUEST, "limit must be at least 1").into_response();
+    }""",
+            "",
+        ),
+        "a_page_size_of_zero_or_a_bad_cursor_is_refused",
+    ),
+    (
+        "the sort loses its tiebreaker",
+        text_edit(
+            APPI,
+            "    (session.starred, session.updated_at, session.id.clone())",
+            "    (session.starred, session.updated_at, String::new())",
+        ),
+        "the_session_list_pages_without_repeating_or_dropping_a_session",
+    ),
+    (
+        "the response stops waiting for the write",
+        text_edit(
+            APPI,
+            """    if mutating && response.status().is_success() {
+        state.flush_writes().await;
+    }""",
+            "",
+        ),
+        "a_response_means_the_change_is_on_disk",
+    ),
+    (
+        "the write queue is bypassed and the caller waits on the disk",
+        text_edit(
+            SESSIONI,
+            """                Some(writer) => {
+                    if writer""",
+            """                Some(_writer) => {
+                    if false""",
+        ),
+        "a_queued_write_does_not_hold_the_caller",
     ),
 ]
 

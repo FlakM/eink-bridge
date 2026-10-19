@@ -28,6 +28,9 @@ use crate::verdict::{Verdict, parse_verdict};
 #[derive(Clone)]
 pub struct AppState {
     pub sessions: Arc<RwLock<SessionManager>>,
+    /// The queue the session writes go through, so the session lock is never held while
+    /// the disk is being written.
+    write_tx: tokio::sync::mpsc::UnboundedSender<crate::session::WriteRequest>,
     pub notifiers: Arc<RwLock<HashMap<String, Arc<Notify>>>>,
     pub ws_senders: Arc<RwLock<HashMap<String, broadcast::Sender<crate::ws::ServerMessage>>>>,
     pub long_poll_seconds: u64,
@@ -45,6 +48,11 @@ impl AppState {
     }
 
     pub fn with_config(state_dir: PathBuf, long_poll_seconds: u64) -> Self {
+        // Writes are queued so that no mutation holds the session lock while the disk is
+        // being written; callers that must be durable before they answer call
+        // `flush_writes`.
+        let (write_tx, write_rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(crate::session::drain_writes(write_rx));
         let ws_heartbeat_seconds = 30;
         let ocr_engine = match OcrEngine::new() {
             Ok(engine) => {
@@ -56,7 +64,7 @@ impl AppState {
                 None
             }
         };
-        let mgr = SessionManager::new(state_dir);
+        let mgr = SessionManager::with_writer(state_dir, write_tx.clone());
         let active = mgr
             .list()
             .iter()
@@ -67,12 +75,28 @@ impl AppState {
         crate::metrics::SESSIONS_STARRED.set(mgr.starred_count() as i64);
         Self {
             sessions: Arc::new(RwLock::new(mgr)),
+            write_tx,
             notifiers: Arc::new(RwLock::new(HashMap::new())),
             ws_senders: Arc::new(RwLock::new(HashMap::new())),
             long_poll_seconds,
             assets_dir: default_assets_dir(),
             ocr_engine,
             ws_heartbeat_seconds,
+        }
+    }
+
+    /// Wait until every queued write has landed.
+    ///
+    /// Used on the paths where a response promises durability: the review that was just
+    /// submitted, the cancellation, the content update a client will rely on.
+    pub async fn flush_writes(&self) {
+        let (ack, waited) = tokio::sync::oneshot::channel();
+        if self
+            .write_tx
+            .send(crate::session::WriteRequest::Barrier { ack })
+            .is_ok()
+        {
+            let _ = waited.await;
         }
     }
 
@@ -114,6 +138,10 @@ impl AppState {
 
     pub async fn expire_stale(&self, timeout: Duration) -> usize {
         let expired = self.sessions.write().await.expire_stale_ids(timeout);
+        if !expired.is_empty() {
+            // Expiry is persisted state: what is on disk is what a restart reloads.
+            self.flush_writes().await;
+        }
         for id in &expired {
             self.notify_and_cleanup(id).await;
             self.ws_send(
@@ -193,6 +221,10 @@ pub fn build_app(state: AppState) -> Router {
         .route("/ws/{id}", get(crate::ws::ws_handler))
         .route("/session/{id}", get(render_session))
         .route("/review/{id}", get(render_review))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            durable_writes,
+        ))
         .route_layer(axum::middleware::from_fn(track_metrics))
         .nest_service("/assets", ServeDir::new(assets_dir))
         .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY_SIZE))
@@ -209,6 +241,23 @@ async fn metrics_handler() -> impl IntoResponse {
         )],
         body,
     )
+}
+
+/// A response to a mutation is a promise that the change is on disk.
+///
+/// Writes are queued (see `SessionManager::persist`), so the lock is never held during
+/// the write; this is where the queue is drained before the client is told it worked.
+/// Doing it here rather than in each handler means a new mutating route cannot forget.
+async fn durable_writes(State(state): State<AppState>, req: Request, next: Next) -> Response {
+    let mutating = !matches!(
+        *req.method(),
+        axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS
+    );
+    let response = next.run(req).await;
+    if mutating && response.status().is_success() {
+        state.flush_writes().await;
+    }
+    response
 }
 
 async fn track_metrics(req: Request, next: Next) -> Response {
@@ -393,40 +442,115 @@ async fn create_session(
         .into_response()
 }
 
+/// The largest page the server will serve, whatever a client asks for.
+const SESSION_PAGE_MAX: usize = 200;
+
 #[derive(Deserialize, Default)]
 struct ListParams {
     status: Option<String>,
     starred: Option<bool>,
+    /// How many sessions to return. Absent means all of them, which is what every client
+    /// did before paging existed.
+    limit: Option<usize>,
+    /// Opaque marker from the previous page's `x-next-cursor` header.
+    cursor: Option<String>,
+}
+
+/// The order the list is served in, and the reason it is total: without the id a tie on
+/// `updated_at` (two sessions created in the same millisecond) could swap places between
+/// pages, and a client following the cursor would miss one or see one twice.
+fn session_sort_key(
+    session: &crate::session::Session,
+) -> (bool, chrono::DateTime<chrono::Utc>, String) {
+    (session.starred, session.updated_at, session.id.clone())
+}
+
+fn encode_cursor(session: &crate::session::Session) -> String {
+    format!(
+        "{}-{}-{}",
+        if session.starred { 1 } else { 0 },
+        session.updated_at.timestamp_micros(),
+        session.id
+    )
+}
+
+/// Parse a cursor back into the key it was made from. A cursor the server cannot read is
+/// a client bug, and answering with a 400 is better than silently restarting the list.
+fn decode_cursor(cursor: &str) -> Option<(bool, i64, String)> {
+    let mut parts = cursor.splitn(3, '-');
+    let starred = match parts.next()? {
+        "1" => true,
+        "0" => false,
+        _ => return None,
+    };
+    let micros = parts.next()?.parse().ok()?;
+    let id = parts.next()?;
+    if id.is_empty() || id.len() > 64 {
+        return None;
+    }
+    Some((starred, micros, id.to_string()))
 }
 
 async fn list_sessions(
     State(state): State<AppState>,
     Query(params): Query<ListParams>,
-) -> Json<Vec<SessionSummaryResponse>> {
-    let mgr = state.sessions.read().await;
-    let all = mgr.list();
-    let mut filtered: Vec<_> = all
-        .into_iter()
-        .filter(|s| match &params.status {
-            Some(st) => s.status.as_str().eq_ignore_ascii_case(st),
-            None => true,
-        })
-        .filter(|s| match params.starred {
-            Some(want) => s.starred == want,
-            None => true,
-        })
-        .collect();
-    filtered.sort_by(|a, b| {
-        b.starred
-            .cmp(&a.starred)
-            .then_with(|| b.updated_at.cmp(&a.updated_at))
-    });
-    Json(
-        filtered
+) -> Response {
+    if params.limit == Some(0) {
+        return (StatusCode::BAD_REQUEST, "limit must be at least 1").into_response();
+    }
+    let after = match params.cursor.as_deref() {
+        Some(cursor) => match decode_cursor(cursor) {
+            Some(key) => Some(key),
+            None => return (StatusCode::BAD_REQUEST, "unreadable cursor").into_response(),
+        },
+        None => None,
+    };
+
+    let limit = params.limit.map(|limit| limit.min(SESSION_PAGE_MAX));
+    let (page, next) = {
+        let mgr = state.sessions.read().await;
+        let mut filtered: Vec<_> = mgr
+            .list()
+            .into_iter()
+            .filter(|s| match &params.status {
+                Some(st) => s.status.as_str().eq_ignore_ascii_case(st),
+                None => true,
+            })
+            .filter(|s| match params.starred {
+                Some(want) => s.starred == want,
+                None => true,
+            })
+            .collect();
+        // Newest first, pinned first, with the id as the tiebreaker (see `session_sort_key`).
+        filtered.sort_by_key(|session| std::cmp::Reverse(session_sort_key(session)));
+
+        if let Some((starred, micros, id)) = &after {
+            filtered.retain(|s| {
+                let key = session_sort_key(s);
+                // Strictly after the cursor in the sort order.
+                (&key.0, key.1.timestamp_micros(), &key.2) < (starred, *micros, id)
+            });
+        }
+
+        let next = match limit {
+            Some(limit) if filtered.len() > limit => Some(encode_cursor(filtered[limit - 1])),
+            _ => None,
+        };
+        let page: Vec<SessionSummaryResponse> = filtered
             .iter()
+            .take(limit.unwrap_or(usize::MAX))
             .map(|s| SessionSummaryResponse::from_session(s))
-            .collect(),
-    )
+            .collect();
+        (page, next)
+    };
+
+    let mut response = Json(page).into_response();
+    if let Some(cursor) = next
+        && let Ok(value) = axum::http::HeaderValue::from_str(&cursor)
+    {
+        response.headers_mut().insert("x-next-cursor", value);
+    }
+    response
 }
 
 async fn get_session(
@@ -473,6 +597,9 @@ async fn delete_session(
                     .into_response();
             }
         }
+        // Let any queued write for this session land first: the drain creates the
+        // directory it writes into, so a straggler would resurrect what we just deleted.
+        state.flush_writes().await;
         let removed = state.sessions.write().await.delete(&id);
         if !removed {
             return StatusCode::NOT_FOUND.into_response();
