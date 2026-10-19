@@ -184,6 +184,19 @@ mutation-harness gradle retry.
 | 7 | landed | item 7 commit |
 | 8–11, s | queued | |
 
+**Mutation harness:** all **71** cases caught (66 existing + 5 new: webhook retry, progress
+clearing, the token gate, retention selection, and the pending exit code), and the suite was
+green again after every revert.
+
+**One incident worth recording:** the first overnight commit (`f0eb004`) was made *while
+the mutation harness was running*, so `git add -A` captured the harness's mutated
+`element-map.js` — the `.diff-block` binding was missing, and the Nix build failed its
+`every_block_kind_can_be_bound_by_a_tap` test. Restored in `13a98bb`. The harness verifies
+its own reverts byte for byte, but git can snapshot the tree mid-mutation; **never commit
+while `just test-mutations` runs**. The rebuild then succeeded and the installed skill and
+profile CLI were checked (`report_progress`, `subscribe_session`, `content`, `source`,
+`progress`).
+
 **Gate at the end of the night:** 223 Rust lib tests plus every integration binary green,
 clippy clean, 284 Android tests (0 failures, 3 skipped), 75 harness tests, render and
 contract goldens green. Deployed server `6pbvg028…` with `just verify-deploy` matching the
