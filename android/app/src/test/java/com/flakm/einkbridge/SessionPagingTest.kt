@@ -35,4 +35,22 @@ class SessionPagingTest {
         // A server that keeps handing out cursors must not keep the tablet spinning.
         assertTrue(SessionViewModel.SESSION_PAGE_LIMIT in 1..100)
     }
+
+    @Test
+    fun aFailedRefreshKeepsTheListRatherThanBlankingIt() {
+        // A transient failure on the first page used to show an empty list and, worse,
+        // let the empty result stand in as the offline list.
+        assertEquals(ListOutcome.UseCached, listOutcome(fetchedCount = 0, complete = false))
+        assertEquals(ListOutcome.UseCached, listOutcome(fetchedCount = 0, complete = true))
+    }
+
+    @Test
+    fun onlyACompleteWalkIsWorthRemembering() {
+        assertEquals(ListOutcome.UseFetchedAndCache, listOutcome(50, complete = true))
+        assertEquals(
+            "a partial page must not become the offline list",
+            ListOutcome.UseFetchedOnly,
+            listOutcome(50, complete = false)
+        )
+    }
 }

@@ -116,10 +116,21 @@ pub enum WriteRequest {
 }
 
 /// Write snapshots in the order they were produced, until the queue closes.
+///
+/// The write runs on a blocking thread: moving it off the session lock is only half the
+/// job, because `fs::write` inside the async task would still pin a runtime worker and
+/// stall every other request while the disk works.
 pub async fn drain_writes(mut rx: tokio::sync::mpsc::UnboundedReceiver<WriteRequest>) {
     while let Some(request) = rx.recv().await {
         match request {
-            WriteRequest::Snapshot { path, json } => write_snapshot(&path, &json),
+            WriteRequest::Snapshot { path, json } => {
+                if tokio::task::spawn_blocking(move || write_snapshot(&path, &json))
+                    .await
+                    .is_err()
+                {
+                    error!("the writer thread panicked; a session snapshot was lost");
+                }
+            }
             WriteRequest::Barrier { ack } => {
                 let _ = ack.send(());
             }
@@ -139,18 +150,23 @@ fn write_snapshot(path: &std::path::Path, json: &str) {
     }
 }
 
+/// Write one uploaded annotation image and return the path recorded for it.
+pub fn write_annotation(state_dir: &std::path::Path, data: &[u8]) -> String {
+    let dir = state_dir.join("annotations");
+    if let Err(e) = fs::create_dir_all(&dir) {
+        error!(path = %dir.display(), error = %e, "failed to create annotations dir");
+    }
+    let filename = format!("img_{}.png", Uuid::new_v4().as_simple());
+    let path = dir.join(&filename);
+    if let Err(e) = fs::write(&path, data) {
+        error!(path = %path.display(), error = %e, "failed to write annotation");
+    }
+    path.to_string_lossy().to_string()
+}
+
 impl Session {
     pub fn save_annotation(&self, data: &[u8]) -> String {
-        let dir = self.state_dir.join("annotations");
-        if let Err(e) = fs::create_dir_all(&dir) {
-            error!(path = %dir.display(), error = %e, "failed to create annotations dir");
-        }
-        let filename = format!("img_{}.png", Uuid::new_v4().as_simple());
-        let path = dir.join(&filename);
-        if let Err(e) = fs::write(&path, data) {
-            error!(path = %path.display(), error = %e, "failed to write annotation");
-        }
-        path.to_string_lossy().to_string()
+        write_annotation(&self.state_dir, data)
     }
 
     /// Serialize now (cheap, and done while the caller holds the session), write later.

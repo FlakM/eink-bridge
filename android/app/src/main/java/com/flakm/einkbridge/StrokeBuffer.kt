@@ -110,6 +110,37 @@ internal data class ViewTransform(
     fun docToScreenWidth(w: Float) = w * scale
 }
 
+/** The page's visual viewport, exactly as the page reports it. */
+internal data class ViewportReport(
+    val scale: Float = 1f,
+    /** Visible width in CSS px. */
+    val widthCss: Float = 0f,
+    val heightCss: Float = 0f,
+    val pageLeftCss: Float = 0f,
+    val pageTopCss: Float = 0f,
+)
+
+/**
+ * How document CSS px map onto the view the ink is drawn on.
+ *
+ * Taken from the page rather than from `WebView.scale`/`scrollX`, which do not describe the
+ * visual viewport once it has been zoomed or panned. This device keeps a *constant* CSS
+ * viewport width while its scale changes with orientation (1.875 px per CSS px in portrait,
+ * 2.5 in landscape), so ink drawn from stale numbers lands a third of a paragraph away from
+ * the text it was written on -- which is what "the writing is not moved correctly when the
+ * orientation changes" looks like. The invariant that catches it: the content's left edge
+ * is the view's left edge in every orientation.
+ */
+internal fun viewTransformFor(viewWidthPx: Float, report: ViewportReport?): ViewTransform? {
+    if (report == null || report.widthCss <= 0f || viewWidthPx <= 0f) return null
+    val pxPerCss = viewWidthPx / report.widthCss
+    return ViewTransform(
+        scrollX = report.pageLeftCss * pxPerCss,
+        scrollY = report.pageTopCss * pxPerCss,
+        scale = pxPerCss,
+    )
+}
+
 /**
  * Pure-Kotlin stroke accumulator — no Android dependencies, fully unit-testable.
  *

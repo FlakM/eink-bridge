@@ -73,21 +73,21 @@ internal class SessionViewModel(app: Application) : AndroidViewModel(app) {
     suspend fun checkReachable(url: String): Boolean = withContext(Dispatchers.IO) {
         try {
             val req = Request.Builder().url("$url/api/health").build()
-            client.newCall(req).execute().isSuccessful
+            client.newCall(req).execute().use { it.isSuccessful }
         } catch (_: Exception) { false }
     }
 
     suspend fun clearFinishedSessions(): Boolean = withContext(Dispatchers.IO) {
         try {
             val request = Request.Builder().url("$serverUrl/api/sessions").delete().build()
-            client.newCall(request).execute().isSuccessful
+            client.newCall(request).execute().use { it.isSuccessful }
         } catch (_: Exception) { false }
     }
 
     suspend fun deleteSession(id: String): Boolean = withContext(Dispatchers.IO) {
         try {
             val request = Request.Builder().url("$serverUrl/api/sessions/$id").delete().build()
-            client.newCall(request).execute().isSuccessful
+            client.newCall(request).execute().use { it.isSuccessful }
         } catch (_: Exception) { false }
     }
 
@@ -99,7 +99,7 @@ internal class SessionViewModel(app: Application) : AndroidViewModel(app) {
                 .url("$serverUrl/api/sessions/$id/star")
                 .put(body)
                 .build()
-            val ok = client.newCall(request).execute().isSuccessful
+            val ok = client.newCall(request).execute().use { it.isSuccessful }
             if (ok) fetchSessions()
             ok
         } catch (_: Exception) { false }
@@ -125,6 +125,14 @@ internal class SessionViewModel(app: Application) : AndroidViewModel(app) {
         const val SESSION_PAGE_LIMIT = 20
     }
 
+    private fun showCachedList() {
+        val cached = sortStarredFirst(docCache.loadSessions())
+        val cachedIds = cached.filter { docCache.hasCached(it.id) }.map { it.id }.toSet()
+        val pending = cached.filter { sessionRepo.hasStrokes(it.id) }.map { it.id }.toSet()
+        val status = if (cached.isNotEmpty()) ConnectionStatus.Offline else ConnectionStatus.Unreachable
+        _state.value = SessionListState(cached, pending, cachedIds, status)
+    }
+
     private fun sortStarredFirst(sessions: List<SessionInfo>): List<SessionInfo> =
         sessions.sortedWith(compareByDescending<SessionInfo> { it.starred }.thenByDescending { it.updatedAt })
 
@@ -136,33 +144,45 @@ internal class SessionViewModel(app: Application) : AndroidViewModel(app) {
                 val fetched = mutableListOf<SessionInfo>()
                 var cursor: String? = null
                 var pages = 0
+                var complete = false
                 while (pages < SESSION_PAGE_LIMIT) {
                     pages++
-                    val response = client.newCall(
+                    val page = client.newCall(
                         Request.Builder().url(sessionsPageUrl(serverUrl, cursor)).build()
-                    ).execute()
-                    if (!response.isSuccessful) break
-                    val body = response.body?.string() ?: "[]"
-                    val arr = JSONArray(body)
-                    for (i in 0 until arr.length()) {
-                        fetched.add(parseSession(arr.getJSONObject(i)))
+                    ).execute().use { response ->
+                        if (!response.isSuccessful) return@use null
+                        val body = response.body?.string() ?: "[]"
+                        val arr = JSONArray(body)
+                        for (i in 0 until arr.length()) {
+                            fetched.add(parseSession(arr.getJSONObject(i)))
+                        }
+                        // One connection per page would leak on every refresh.
+                        response.header("x-next-cursor")
                     }
-                    cursor = response.header("x-next-cursor")
-                    if (cursor == null) break
+                    if (page == null) break
+                    cursor = page
+                    if (cursor == null) {
+                        complete = true
+                        break
+                    }
                 }
-                if (fetched.isNotEmpty() || pages > 0) {
-                    val sessions = sortStarredFirst(fetched)
-                    docCache.saveSessions(sessions)
-                    val pending = sessions.filter { sessionRepo.hasStrokes(it.id) }.map { it.id }.toSet()
-                    val cached = sessions.filter { docCache.hasCached(it.id) }.map { it.id }.toSet()
-                    _state.value = SessionListState(sessions, pending, cached, ConnectionStatus.Online)
+
+                when (listOutcome(fetched.size, complete)) {
+                    // A transient failure on the first page must not blank the list: show
+                    // what we had, and say it is offline.
+                    ListOutcome.UseCached -> showCachedList()
+                    ListOutcome.UseFetchedOnly, ListOutcome.UseFetchedAndCache -> {
+                        val sessions = sortStarredFirst(fetched)
+                        if (listOutcome(fetched.size, complete) == ListOutcome.UseFetchedAndCache) {
+                            docCache.saveSessions(sessions)
+                        }
+                        val pending = sessions.filter { sessionRepo.hasStrokes(it.id) }.map { it.id }.toSet()
+                        val cached = sessions.filter { docCache.hasCached(it.id) }.map { it.id }.toSet()
+                        _state.value = SessionListState(sessions, pending, cached, ConnectionStatus.Online)
+                    }
                 }
             } catch (_: Exception) {
-                val cached = sortStarredFirst(docCache.loadSessions())
-                val cachedIds = cached.filter { docCache.hasCached(it.id) }.map { it.id }.toSet()
-                val pending = cached.filter { sessionRepo.hasStrokes(it.id) }.map { it.id }.toSet()
-                val status = if (cached.isNotEmpty()) ConnectionStatus.Offline else ConnectionStatus.Unreachable
-                _state.value = SessionListState(cached, pending, cachedIds, status)
+                showCachedList()
             }
         }
     }
@@ -176,4 +196,23 @@ internal fun sessionsPageUrl(serverUrl: String, cursor: String?): String {
     } else {
         "$base&cursor=${java.net.URLEncoder.encode(cursor, "UTF-8")}"
     }
+}
+
+/** What a fetch should do with what it read. */
+internal enum class ListOutcome {
+    /** Nothing arrived: keep the cached list and say so. */
+    UseCached,
+
+    /** The walk finished: show it and remember it. */
+    UseFetchedAndCache,
+
+    /** Some pages arrived and then one failed: show them, keep the old cache. A half-read
+     *  list looks exactly like a real one, and would become the offline list too. */
+    UseFetchedOnly,
+}
+
+internal fun listOutcome(fetchedCount: Int, complete: Boolean): ListOutcome = when {
+    fetchedCount == 0 -> ListOutcome.UseCached
+    complete -> ListOutcome.UseFetchedAndCache
+    else -> ListOutcome.UseFetchedOnly
 }

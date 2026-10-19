@@ -33,6 +33,8 @@ MAINI = SERVER / "src/main.rs"
 STROKEBUFFER = SERVER.parent / "android/app/src/main/java/com/flakm/einkbridge/StrokeBuffer.kt"
 FLAKE = SERVER.parent / "flake.nix"
 SESSIONI = SERVER / "src/session.rs"
+SUBMISSION = SERVER.parent / "android/app/src/main/java/com/flakm/einkbridge/SubmissionManager.kt"
+SESSIONVM = SERVER.parent / "android/app/src/main/java/com/flakm/einkbridge/SessionViewModel.kt"
 THEME = SERVER / "assets/eink-theme.tmTheme"
 
 
@@ -798,6 +800,69 @@ CASES = [
                     if false""",
         ),
         "a_queued_write_does_not_hold_the_caller",
+    ),
+    (
+        "the submit response is opened and never closed",
+        text_edit(
+            SUBMISSION,
+            """            client.newCall(Request.Builder().url(url).post(builder.build()).build())
+                .execute()
+                .use { response ->""",
+            """            client.newCall(Request.Builder().url(url).post(builder.build()).build())
+                .execute()
+                .let { response ->""",
+        ),
+        "gradle:SubmissionManagerTest",
+    ),
+    (
+        "every HTTP code counts as a successful submission",
+        text_edit(
+            SUBMISSION,
+            "    val isSuccessful get() = this is Http && code in 200..299",
+            "    val isSuccessful get() = this is Http",
+        ),
+        "gradle:SubmissionManagerTest",
+    ),
+    (
+        "a partial page counts as a complete one",
+        text_edit(
+            SESSIONVM,
+            """    complete -> ListOutcome.UseFetchedAndCache
+    else -> ListOutcome.UseFetchedOnly""",
+            """    complete -> ListOutcome.UseFetchedOnly
+    else -> ListOutcome.UseFetchedAndCache""",
+        ),
+        "gradle:SessionPagingTest",
+    ),
+    (
+        "a failed refresh blanks the list",
+        text_edit(
+            SESSIONVM,
+            """    fetchedCount == 0 -> ListOutcome.UseCached
+""",
+            "",
+        ),
+        "gradle:SessionPagingTest",
+    ),
+    (
+        "the ink mapping uses the browser zoom factor instead of the view",
+        text_edit(
+            STROKEBUFFER,
+            """    val pxPerCss = viewWidthPx / report.widthCss""",
+            """    val pxPerCss = report.scale""",
+        ),
+        "gradle:ViewportTransformTest",
+    ),
+    (
+        "the ink mapping forgets the pan",
+        text_edit(
+            STROKEBUFFER,
+            """        scrollX = report.pageLeftCss * pxPerCss,
+        scrollY = report.pageTopCss * pxPerCss,""",
+            """        scrollX = 0f,
+        scrollY = 0f,""",
+        ),
+        "gradle:ViewportTransformTest",
     ),
 ]
 

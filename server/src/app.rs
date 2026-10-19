@@ -1210,7 +1210,14 @@ async fn parse_multipart_submit(
                         format!("failed to read annotation: {error}"),
                     )
                 })?;
-                images.push(session.save_annotation(&data));
+                // A reader's bitmap can be a few megabytes: write it off the async worker.
+                let state_dir = session.state_dir.clone();
+                let path = tokio::task::spawn_blocking(move || {
+                    crate::session::write_annotation(&state_dir, &data)
+                })
+                .await
+                .unwrap_or_default();
+                images.push(path);
             }
             "stroke_data" => {
                 let text = field.text().await.map_err(|error| {

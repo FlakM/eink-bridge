@@ -391,15 +391,62 @@ internal class PenOverlay(
         onOcrResultsChanged?.invoke(ocrResults.toList())
     }
 
+    /** The last viewport the page reported, and how wide the ink is drawn. */
+    private var viewportReport: ViewportReport? = null
+
+    internal fun setViewportReport(report: ViewportReport?) {
+        viewportReport = report
+        report?.let {
+            val transform = viewTransformFor(inkWidthPx(), it)
+            Log.i(
+                "EinkInkMap",
+                "viewport css=${it.widthCss}x${it.heightCss} zoom=${it.scale} pan=(${it.pageLeftCss},${it.pageTopCss}) " +
+                    "-> scale=${transform?.scale} scroll=(${transform?.scrollX},${transform?.scrollY}) " +
+                    "contentLeftOnScreen=${transform?.docToScreenX(704f)}"
+            )
+        }
+        notifyStrokeView()
+    }
+
+    /**
+     * Re-read the viewport on the next layout pass.
+     *
+     * A resize asks the page immediately, but the WebView has not finished relaying out at
+     * that moment: its report still describes the previous size, so the answer has to be
+     * taken again once the new layout is in place.
+     */
+    internal fun setViewportAfterLayout() {
+        webView.post {
+            bridge.queryViewport { report ->
+                if (report != null) setViewportReport(report)
+            }
+        }
+    }
+
+    /** Ask the page where it is, and redraw when the answer differs. */
+    internal fun refreshViewport() {
+        bridge.queryViewport { report ->
+            if (report != null) setViewportReport(report)
+        }
+    }
+
     @Suppress("DEPRECATION")
     internal fun currentTransform(): ViewTransform {
         transformOverride?.let { return it() }
+        // The page's own viewport is authoritative: it follows zoom, pan and rotation,
+        // where `webView.scale`/`scrollX` describe the layout rather than what is on screen.
+        viewTransformFor(inkWidthPx(), viewportReport)?.let { return it }
         val scale = try { webView.scale } catch (_: ClassCastException) { 1f }
         return ViewTransform(
             scrollX = webView.scrollX.toFloat(),
             scrollY = webView.scrollY.toFloat(),
             scale = scale,
         )
+    }
+
+    private fun inkWidthPx(): Float {
+        val width = strokeView?.width ?: 0
+        return if (width > 0) width.toFloat() else webView.width.toFloat()
     }
 
     private val layoutListener = object : View.OnLayoutChangeListener {

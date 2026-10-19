@@ -58,9 +58,15 @@ internal class SubmissionManager(private val client: OkHttpClient = OcrClient.bu
         val url = "$serverUrl/api/sessions/$sessionId/submit"
         Log.i(TAG, "submit POST $url")
         return try {
-            val response = client.newCall(Request.Builder().url(url).post(builder.build()).build()).execute()
-            Log.i(TAG, "submit response code=${response.code}")
-            SubmitResult.Http(response.code)
+            // `use` closes the response body. Without it the connection is never returned
+            // to the pool, so every submit and every request-update leaks one -- on the
+            // hot path, where the reader taps send over and over.
+            client.newCall(Request.Builder().url(url).post(builder.build()).build())
+                .execute()
+                .use { response ->
+                    Log.i(TAG, "submit response code=${response.code}")
+                    SubmitResult.Http(response.code)
+                }
         } catch (e: Exception) {
             Log.e(TAG, "submit exception", e)
             SubmitResult.Failure(e)
@@ -81,9 +87,10 @@ internal class SubmissionManager(private val client: OkHttpClient = OcrClient.bu
                 .url(url)
                 .post(body.toRequestBody("application/json".toMediaType()))
                 .build()
-            val response = client.newCall(request).execute()
-            Log.i(TAG, "requestUpdate response code=${response.code}")
-            response.isSuccessful
+            client.newCall(request).execute().use { response ->
+                Log.i(TAG, "requestUpdate response code=${response.code}")
+                response.isSuccessful
+            }
         } catch (e: Exception) {
             Log.e(TAG, "requestUpdate exception: ${e.javaClass.simpleName}: ${e.message}")
             false

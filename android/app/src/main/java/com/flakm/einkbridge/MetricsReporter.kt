@@ -69,13 +69,17 @@ internal object MetricsReporter {
                     .url(url)
                     .post(body.toRequestBody("text/plain".toMediaType()))
                     .build()
-                val resp = client.newCall(request).execute()
-                Log.d(TAG, "metrics pushed: HTTP ${resp.code}")
+                client.newCall(request).execute().use { resp ->
+                    Log.d(TAG, "metrics pushed: HTTP ${resp.code}")
+                }
             } catch (e: Exception) {
                 Log.w(TAG, "metrics push failed: ${e.message}")
             }
         }
     }
+
+    /** The exposition the pushgateway receives. Exposed so its shape can be tested. */
+    internal fun metricsText(): String = buildMetricsText()
 
     private fun buildMetricsText() = buildString {
         append("# HELP eink_android_ocr_requests_total OCR requests from Android app\n")

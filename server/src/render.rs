@@ -1891,6 +1891,33 @@ const ELEMENT_MAP_JS: &str = r#"
     return JSON.stringify({ i: best.i, tag: best.tag, id: best.id, text: best.text, anchored: true, color: group.color });
   };
 
+  // Where the page is on screen, in the page's own units.
+  //
+  // The app draws ink through a transform, and the WebView's own scroll/scale properties
+  // do not describe the visual viewport once it is zoomed or panned: on this device the
+  // visual viewport keeps a constant CSS width while its scale goes from 1 to 1.333 when
+  // the tablet is rotated, so ink drawn from the wrong numbers lands 33% off the text it
+  // was written on. These four numbers are the mapping: view px per CSS px is
+  // (view width in px) / width, and the pan is pageLeft/pageTop times that.
+  window.__einkViewport = function() {
+    var vv = window.visualViewport;
+    if (!vv) return JSON.stringify({ scale: 1, width: window.innerWidth || 0, height: window.innerHeight || 0, pageLeft: window.pageXOffset || 0, pageTop: window.pageYOffset || 0 });
+    return JSON.stringify({
+      scale: vv.scale, width: vv.width, height: vv.height,
+      pageLeft: vv.pageLeft, pageTop: vv.pageTop
+    });
+  };
+
+  // Keep the element map honest when the page reflows or rotates: the map is in document
+  // coordinates, so a rotation that only changes the viewport must not move anything --
+  // but a real reflow must.
+  window.addEventListener('resize', function() {
+    if (window.__einkRebuildElementMap) window.__einkRebuildElementMap();
+  });
+  window.addEventListener('orientationchange', function() {
+    if (window.__einkRebuildElementMap) window.__einkRebuildElementMap();
+  });
+
   window.__einkFindElements = function(left, top, right, bottom) {
     var map = window.__einkElementMap || [];
     var matched = [];

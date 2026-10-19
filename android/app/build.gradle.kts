@@ -41,6 +41,9 @@ android {
     testOptions {
         unitTests {
             isIncludeAndroidResources = true
+            // `android.util.Log` is a stub in JVM tests; without this any class that logs
+            // throws "not mocked" and the test says nothing about the behaviour.
+            isReturnDefaultValues = true
             all {
                 it.finalizedBy(tasks.named("jacocoTestReport"))
             }

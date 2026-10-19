@@ -24,6 +24,25 @@ internal fun parseFoundElements(raw: String?): List<FoundElement> {
     } catch (_: Exception) { emptyList() }
 }
 
+/** Parse the page's viewport report; null when the page could not answer. */
+internal fun parseViewport(raw: String?): ViewportReport? {
+    val cleaned = raw?.trim()?.removeSurrounding("\"")
+        ?.replace("\\\\", "\\")?.replace("\\\"", "\"") ?: return null
+    if (cleaned.isBlank() || cleaned == "null") return null
+    return try {
+        val obj = JSONObject(cleaned)
+        ViewportReport(
+            scale = obj.optDouble("scale", 1.0).toFloat(),
+            widthCss = obj.optDouble("width", 0.0).toFloat(),
+            heightCss = obj.optDouble("height", 0.0).toFloat(),
+            pageLeftCss = obj.optDouble("pageLeft", 0.0).toFloat(),
+            pageTopCss = obj.optDouble("pageTop", 0.0).toFloat(),
+        )
+    } catch (_: Exception) {
+        null
+    }
+}
+
 internal interface ElementLookup {
     fun findElements(left: Float, top: Float, right: Float, bottom: Float, callback: (List<FoundElement>) -> Unit)
     fun findNearestElement(cx: Float, cy: Float, callback: (List<FoundElement>) -> Unit)
@@ -76,6 +95,17 @@ internal class WebViewBridge(private val webView: WebView) {
     fun computeStrokeLinks() {
         webView.post {
             webView.evaluateJavascript("window.__einkComputeStrokeLinks && window.__einkComputeStrokeLinks([],[])", null)
+        }
+    }
+
+    /**
+     * Ask the page where it is on screen. The app draws ink through this mapping, and the
+     * WebView's own scroll/scale do not describe a visual viewport that has been zoomed or
+     * panned -- which is what moves the ink when the tablet is rotated.
+     */
+    fun queryViewport(callback: (ViewportReport?) -> Unit) {
+        webView.evaluateJavascript("window.__einkViewport ? window.__einkViewport() : null") { raw ->
+            callback(parseViewport(raw))
         }
     }
 

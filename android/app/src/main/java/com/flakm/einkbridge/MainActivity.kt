@@ -235,6 +235,10 @@ class MainActivity : AppCompatActivity() {
             override fun onPageFinished(view: WebView, url: String) {
                 val sid = currentSessionId ?: return
                 Log.d(TAG, "webview onPageFinished url=$url session=$sid")
+                // The ink mapping comes from the page, so it has to be read as soon as the
+                // page can answer -- otherwise the first strokes are drawn through the
+                // fallback until something happens to scroll or resize.
+                penOverlay?.refreshViewport()
                 view.evaluateJavascript("Number((document.querySelector('meta[name=eink-version]') || {}).content || 0)") { version ->
                     if (currentSessionId == sid) {
                         loadedVersion = version?.toIntOrNull() ?: 0
@@ -608,6 +612,20 @@ class MainActivity : AppCompatActivity() {
         webView.setOnScrollChangeListener { _, _, _, _, _ ->
             setEpdMode(UpdateMode.REGAL)
             scheduleEpdRestore(800)
+            // The page may have panned or zoomed, which changes the mapping the ink is
+            // drawn through; the report is what keeps the writing over its text.
+            overlay.refreshViewport()
+        }
+        // A rotation resizes the view without recreating the activity (configChanges), so
+        // this is the only signal that the mapping has changed. Without it the ink keeps
+        // the old scale and lands a third of a paragraph away from the text.
+        strokeView.addOnLayoutChangeListener { _, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
+            val resized = (right - left) != (oldRight - oldLeft) || (bottom - top) != (oldBottom - oldTop)
+            if (resized || left != oldLeft || top != oldTop) {
+                Log.i(TAG, "view resized: ${oldRight - oldLeft}x${oldBottom - oldTop} -> ${right - left}x${bottom - top}; refreshing the ink mapping")
+                overlay.refreshViewport()
+                overlay.setViewportAfterLayout()
+            }
         }
         resetInactivityTimer()
         startPeriodicMetrics()
@@ -731,17 +749,19 @@ class MainActivity : AppCompatActivity() {
             try {
                 val serverVersion = withContext(Dispatchers.IO) {
                     val req = Request.Builder().url("$serverUrl/api/sessions/$sessionId/feedback").build()
-                    val resp = client.newCall(req).execute()
-                    if (!resp.isSuccessful) return@withContext -1
-                    val body = resp.body?.string() ?: return@withContext -1
-                    val snapshot = org.json.JSONObject(body)
-                    withContext(Dispatchers.Main) {
-                        if (currentSessionId == sessionId) {
-                            penOverlay?.consumeStrokes(snapshot.optJSONObject("last_content_update")?.optJSONArray("consumed_strokes"))
-                            penOverlay?.let { sessionRepo.saveStrokes(sessionId, it.buf) }
+                    // This poll runs repeatedly; an unclosed body leaks a connection each time.
+                    client.newCall(req).execute().use { resp ->
+                        if (!resp.isSuccessful) return@withContext -1
+                        val body = resp.body?.string() ?: return@withContext -1
+                        val snapshot = org.json.JSONObject(body)
+                        withContext(Dispatchers.Main) {
+                            if (currentSessionId == sessionId) {
+                                penOverlay?.consumeStrokes(snapshot.optJSONObject("last_content_update")?.optJSONArray("consumed_strokes"))
+                                penOverlay?.let { sessionRepo.saveStrokes(sessionId, it.buf) }
+                            }
                         }
+                        snapshot.optInt("version", -1)
                     }
-                    snapshot.optInt("version", -1)
                 }
                 if (serverVersion > loadedVersion) {
                     Log.i(TAG, "reconnect: server version=$serverVersion > loaded=$loadedVersion — reloading")
