@@ -622,7 +622,10 @@ class MainActivity : AppCompatActivity() {
         strokeView.addOnLayoutChangeListener { _, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
             val resized = (right - left) != (oldRight - oldLeft) || (bottom - top) != (oldBottom - oldTop)
             if (resized || left != oldLeft || top != oldTop) {
-                Log.i(TAG, "view resized: ${oldRight - oldLeft}x${oldBottom - oldTop} -> ${right - left}x${bottom - top}; refreshing the ink mapping")
+                Log.i(TAG, "view resized: ${oldRight - oldLeft}x${oldBottom - oldTop} -> ${right - left}x${bottom - top}: refreshing the ink mapping and the pen state")
+                // A resize cancels in-flight gestures, so the pen must be re-armed as well as
+                // re-mapped -- otherwise a finger the rotation swallowed keeps drawing off.
+                overlay.onViewResized()
                 overlay.refreshViewport()
                 overlay.setViewportAfterLayout()
             }

@@ -752,9 +752,25 @@ internal class PenOverlay(
         return listOf(Rect(limit.left, limit.bottom - h, limit.right, limit.bottom))
     }
 
+    /**
+     * The view changed size (a rotation, a split screen, a window resize).
+     *
+     * An orientation change cancels in-flight gestures, so any recorded finger is stale by
+     * definition; leaving it set disables drawing for the rest of the session.
+     */
+    fun onViewResized() {
+        if (fingerDown) {
+            Log.i("EinkDraw", "onViewResized: clearing a finger that the resize cancelled")
+        }
+        fingerDown = false
+        applyDrawingState()
+    }
+
     /** Lifecycle hook — call from Activity.onResume. */
     fun onResumed() {
         paused = false
+        // Nothing can be in flight across a pause/resume either.
+        fingerDown = false
         if (!initialized) initController()
         applyDrawingState()
     }
@@ -872,6 +888,12 @@ internal class PenOverlay(
             selectedLabel = null
             onGroupSelectionChanged?.invoke(null)
         }
+        // A mode change is caused by a finger on the toolbar, and that same touch is what
+        // sets [fingerDown] on the page's touch router. If the matching UP is lost -- an
+        // orientation change cancels in-flight gestures -- the flag stays set and drawing
+        // never comes back while the toolbar still shows DRAW. The mode change itself is
+        // proof that no finger is on the page.
+        fingerDown = false
         // Mode transitions MUST NOT close+reopen Onyx's raw drawing layer — the close+reopen
         // sequence is fragile on some Boox firmware and has been observed to wedge the native
         // raw input reader. Only [setEnabled] is safe to toggle here.

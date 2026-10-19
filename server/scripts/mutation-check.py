@@ -35,6 +35,7 @@ FLAKE = SERVER.parent / "flake.nix"
 SESSIONI = SERVER / "src/session.rs"
 SUBMISSION = SERVER.parent / "android/app/src/main/java/com/flakm/einkbridge/SubmissionManager.kt"
 SESSIONVM = SERVER.parent / "android/app/src/main/java/com/flakm/einkbridge/SessionViewModel.kt"
+PENOVERLAY = SERVER.parent / "android/app/src/main/java/com/flakm/einkbridge/PenOverlay.kt"
 THEME = SERVER / "assets/eink-theme.tmTheme"
 
 
@@ -863,6 +864,32 @@ CASES = [
         scrollY = 0f,""",
         ),
         "gradle:ViewportTransformTest",
+    ),
+    (
+        "a mode change keeps the finger the toolbar tap left behind",
+        text_edit(
+            PENOVERLAY,
+            """        // proof that no finger is on the page.
+        fingerDown = false""",
+            """        // proof that no finger is on the page.""",
+        ),
+        "gradle:PenOverlayTest",
+    ),
+    (
+        "a resize keeps the finger the rotation cancelled",
+        text_edit(
+            PENOVERLAY,
+            """        fingerDown = false
+        applyDrawingState()
+    }
+
+    /** Lifecycle hook — call from Activity.onResume. */""",
+            """        applyDrawingState()
+    }
+
+    /** Lifecycle hook — call from Activity.onResume. */""",
+        ),
+        "gradle:PenOverlayTest",
     ),
 ]
 

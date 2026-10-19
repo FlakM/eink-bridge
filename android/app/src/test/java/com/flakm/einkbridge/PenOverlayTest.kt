@@ -25,6 +25,69 @@ class PenOverlayTest {
         assertEquals("replayed instructions must be idempotent", 1, buf.size)
     }
 
+    // ── The pen must come back after a mode change or a rotation ────────────────
+    //
+    // Reproduced on the tablet: a finger tap on a mode button reaches the page's touch
+    // router and sets `fingerDown`; the toolbar acts on it; and if the matching finger-UP
+    // is lost -- an orientation change cancels in-flight gestures -- drawing stays off
+    // while the toolbar still shows DRAW. The logs show `shouldDraw=false
+    // isBindMode=false isSelectMode=false fingerDown=true` and nothing clears it.
+
+    @Test
+    fun aModeChangeClearsAFingerTheToolbarTapLeftBehind() {
+        val fix = buildOverlayWithInit()
+        val webView = fix.webView
+        assertTrue("drawing is on to begin with", fix.mock.drawingEnabled)
+
+        webView.dispatchTouchEvent(buildFingerEvent(MotionEvent.ACTION_DOWN))
+        assertFalse("a finger on the page stops drawing", fix.mock.drawingEnabled)
+
+        // The reader taps MOVE and then DRAW. The finger-UP never arrives.
+        fix.overlay.setMode(ToolMode.MOVE)
+        fix.overlay.setMode(ToolMode.DRAW)
+        assertTrue(
+            "the pen must work again once the mode is draw: a mode change is proof that " +
+                "no finger is on the page",
+            fix.mock.drawingEnabled,
+        )
+    }
+
+    @Test
+    fun aResizeClearsAFingerTheRotationCancelled() {
+        val fix = buildOverlayWithInit()
+        val webView = fix.webView
+
+        webView.dispatchTouchEvent(buildFingerEvent(MotionEvent.ACTION_DOWN))
+        assertFalse(fix.mock.drawingEnabled)
+
+        // No finger-UP: the rotation swallowed it.
+        fix.overlay.onViewResized()
+        assertTrue("a resize cancels gestures, so nothing may be in flight", fix.mock.drawingEnabled)
+    }
+
+    @Test
+    fun aResumeClearsAFingerThePauseCancelled() {
+        val fix = buildOverlayWithInit()
+        val webView = fix.webView
+
+        webView.dispatchTouchEvent(buildFingerEvent(MotionEvent.ACTION_DOWN))
+        fix.overlay.onPaused()
+        fix.overlay.onResumed()
+        assertTrue("nothing can be in flight across a pause", fix.mock.drawingEnabled)
+    }
+
+    @Test
+    fun aFingerStillStopsDrawingWhileItIsDown() {
+        // The counterpart: the fix must not make the pen draw through a finger that is
+        // genuinely resting on the page.
+        val fix = buildOverlayWithInit()
+        fix.webView.dispatchTouchEvent(buildFingerEvent(MotionEvent.ACTION_DOWN))
+        assertFalse(fix.mock.drawingEnabled)
+        fix.overlay.setMode(ToolMode.DRAW) // a no-op mode change
+        fix.webView.dispatchTouchEvent(buildFingerEvent(MotionEvent.ACTION_DOWN))
+        assertFalse("a finger on the page still stops the pen", fix.mock.drawingEnabled)
+    }
+
     // ── MockPenController behaviour ────────────────────────────────────────────
 
     @Test
