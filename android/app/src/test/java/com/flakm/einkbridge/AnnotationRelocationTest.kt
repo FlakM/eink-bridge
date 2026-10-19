@@ -14,6 +14,27 @@ class AnnotationRelocationTest {
     private fun element(i: Int, top: Float, text: String, bottom: Float = top + 40f) =
         ElementEntry(i, "P", null, "section-1", top, bottom, 20f, 500f, text)
 
+    // ── Deciding whether to relocate at all ─────────────────────────────────────
+
+    @Test
+    fun anEmptySavedMapAdoptsTheCurrentOneInsteadOfArchivingEveryStroke() {
+        val strokes = listOf(Stroke(listOf(540f to 110f), 3f), Stroke(listOf(540f to 210f), 3f))
+        val current = listOf(element(1, 100f, "first"), element(2, 200f, "second"))
+        // Relocating against nothing finds no source for any stroke: the whole page is lost.
+        assertEquals(strokes.size, relocateInk(strokes, emptyList(), emptyList(), current, emptyList()).orphanCount)
+        assertEquals(ReconcilePlan.ADOPT_MAP, reconcilePlan(emptyList(), current, bufEmpty = false))
+    }
+
+    @Test
+    fun relocationRunsOnlyWhenThereIsInkAndTheMapChanged() {
+        val a = listOf(element(1, 100f, "a"))
+        val b = listOf(element(1, 300f, "a"))
+        assertEquals(ReconcilePlan.NOTHING, reconcilePlan(a, emptyList(), bufEmpty = false))
+        assertEquals(ReconcilePlan.ADOPT_MAP, reconcilePlan(a, b, bufEmpty = true))
+        assertEquals(ReconcilePlan.ADOPT_MAP, reconcilePlan(a, a, bufEmpty = false))
+        assertEquals(ReconcilePlan.RELOCATE, reconcilePlan(a, b, bufEmpty = false))
+    }
+
     @Test
     fun movesInkWithTextAndPreservesRelativeOffset() {
         val stroke = Stroke(listOf(540f to 110f, 550f to 120f), 3f)

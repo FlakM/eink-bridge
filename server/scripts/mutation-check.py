@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Prove the render invariants bite: reintroduce each bug and watch a test go red.
 
-The tests in `src/render.rs` exist because of specific regressions -- a clipped
+The tests in `src/render/tests.rs` exist because of specific regressions -- a clipped
 annotation outline, a canvas that went dark, a steps block that ate the pen's taps. A
 green suite only shows the tests pass; it does not show they would notice the bug
 coming back. This script applies each defect on its own, asserts the named test fails,
 reverts, and finally asserts the suite is green again.
 
     just test-mutations
+    just test-mutations render   # only the cases whose label or test mentions "render"
 """
 from __future__ import annotations
 
@@ -19,7 +20,10 @@ import sys
 
 SERVER = pathlib.Path(__file__).resolve().parent.parent
 RENDER = SERVER / "src/render.rs"
+EINK_CSS = SERVER / "assets/eink.css"
+ELEMENT_MAP_JS = SERVER / "assets/element-map.js"
 DIAGRAMS = SERVER / "src/render/diagrams.rs"
+MARKDOWN = SERVER / "src/render/markdown.rs"
 CHUNKS = SERVER / "src/render/chunks.rs"
 REANCHOR = SERVER / "src/reanchor.rs"
 CLII = SERVER / "src/cli.rs"
@@ -227,7 +231,7 @@ CASES = [
     (
         "the snippet wrapper clips its contents again",
         text_edit(
-            RENDER,
+            EINK_CSS,
             """.snippet-block {
   margin: 16px 0;
   border: 1px solid #d0d0d0;
@@ -243,7 +247,7 @@ CASES = [
     (
         "the diff block scrolls instead of wrapping",
         text_edit(
-            RENDER,
+            EINK_CSS,
             """.diff-block {
     font-family: 'Roboto Mono', 'Droid Sans Mono', monospace;""",
             """.diff-block {
@@ -255,7 +259,7 @@ CASES = [
     (
         "the diagram block clips the notes <pre> inside it",
         text_edit(
-            RENDER,
+            EINK_CSS,
             """.diagram-block {
     margin: 28px 0;
     border: 2px solid #888;
@@ -283,7 +287,7 @@ CASES = [
     (
         "a tap anywhere in a steps block advances it",
         text_edit(
-            RENDER,
+            ELEMENT_MAP_JS,
             """      setStep(block, 0);
       var next = block.querySelector('[data-role="step-next"]');""",
             """      setStep(block, 0);
@@ -295,7 +299,7 @@ CASES = [
     (
         "the steps dim by default rather than by state",
         text_edit(
-            RENDER,
+            EINK_CSS,
             """.steps-list li {
   counter-increment: step;
   padding: 8px 0 8px 34px;
@@ -323,7 +327,7 @@ CASES = [
     (
         "a block kind is left out of the element map",
         text_edit(
-            RENDER,
+            ELEMENT_MAP_JS,
             "var QUERY = 'h1, h2, h3, p, li, pre, blockquote, td, th, table, ul, ol, img, "
             ".diagram-block, .snippet-block, .steps-block, .diff-block';",
             "var QUERY = 'h1, h2, h3, p, li, pre, blockquote, td, th, table, ul, ol, img, "
@@ -397,6 +401,26 @@ CASES = [
             "    lines.push(line);",
         ),
         "a_marked_block_keeps_one_rendered_line_per_line_of_code",
+    ),
+    (
+        "raw HTML in a brief is written to the page unsanitised",
+        text_edit(
+            MARKDOWN,
+            "    if events.iter().any(is_untrusted) {",
+            "    if false {",
+        ),
+        "a_script_in_a_paragraph_is_dropped",
+    ),
+    (
+        "the payload only escapes a lowercase closing tag",
+        text_edit(
+            DIAGRAMS,
+            """    json.replace('&', "\\\\u0026")
+        .replace('<', "\\\\u003c")
+        .replace('>', "\\\\u003e")""",
+            """    json.replace("</script>", "<\\\\/script>")""",
+        ),
+        "a_diagram_source_cannot_close_the_payload_script",
     ),
     (
         "a guess may take a paragraph an exact match owns",
@@ -654,6 +678,15 @@ CASES = [
         "an_annotation_index_cannot_escape_the_session_directory",
     ),
     (
+        "a reconnecting client is not told how the review ended",
+        text_edit(
+            WSI,
+            "        SessionStatus::Active => None,",
+            "        SessionStatus::Active | SessionStatus::Submitted => None,",
+        ),
+        "a_finished_session_says_how_it_ended_instead_of_going_quiet",
+    ),
+    (
         "a finished session still replays its old update",
         text_edit(
             WSI,
@@ -784,10 +817,8 @@ CASES = [
         "the response stops waiting for the write",
         text_edit(
             APPI,
-            """    if mutating && response.status().is_success() {
-        state.flush_writes().await;
-    }""",
-            "",
+            "        && let Err(error) = state.flush_writes().await",
+            "        && let Err(error) = Ok::<(), String>(())",
         ),
         "a_response_means_the_change_is_on_disk",
     ),
@@ -930,8 +961,17 @@ CASES = [
 
 
 def main() -> int:
+    only = sys.argv[1:]
+    cases = [
+        case
+        for case in CASES
+        if not only or any(word in case[0] or word in case[2] for word in only)
+    ]
+    if only and not cases:
+        print(f"no mutation matches {only}")
+        return 1
     missed = []
-    for label, (apply, revert), test in CASES:
+    for label, (apply, revert), test in cases:
         apply()
         try:
             caught = not suite_is_green(test, target_for(test))
@@ -943,11 +983,13 @@ def main() -> int:
 
     print()
     if missed:
-        print(f"{len(missed)} of {len(CASES)} mutations slipped through:")
+        print(f"{len(missed)} of {len(cases)} mutations slipped through:")
         for label, test in missed:
             print(f"  - {label} (expected '{test}' to fail)")
         return 1
-    print(f"all {len(CASES)} mutations were caught")
+    print(f"all {len(cases)} mutations were caught")
+    if only:
+        return 0
 
     # No target filter: every test target, doc tests included. A gate that checks less
     # than the mutations touch is how a swapped pair of commands once got through.

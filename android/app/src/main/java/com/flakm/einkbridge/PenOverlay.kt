@@ -516,9 +516,7 @@ internal class PenOverlay(
                 (controller as? OnyxPenController)?.let { ctrl ->
                     val lastAtDown = ctrl.lastRawCallbackMs
                     webView.postDelayed({
-                        val stillInitialized = initialized
-                        val shouldDraw = !isBindMode && !isSelectMode && !fingerDown && !paused
-                        if (stillInitialized && shouldDraw && ctrl.lastRawCallbackMs <= lastAtDown) {
+                        if (initialized && shouldDraw() && ctrl.lastRawCallbackMs <= lastAtDown) {
                             val now = System.currentTimeMillis()
                             val softResetStillFailing =
                                 now - lastRawWatchdogResetMs < RAW_WATCHDOG_ESCALATE_MS
@@ -729,6 +727,8 @@ internal class PenOverlay(
         val limit = visibleRect() ?: return
         controller.open(webView, limit, buildExcludeRects(limit))
         initialized = true
+        // `open` enables raw drawing; the overlay may be paused or mid-load.
+        applyDrawingState()
     }
 
     private fun refreshExcludeRects() {
@@ -834,7 +834,7 @@ internal class PenOverlay(
             Log.d("EinkDraw", "applyDrawingState SKIP initialized=false")
             return
         }
-        val shouldDraw = contentReady && !isBindMode && !isSelectMode && !fingerDown && !paused
+        val shouldDraw = shouldDraw()
         Log.d(
             "EinkDraw",
             "applyDrawingState shouldDraw=$shouldDraw contentReady=$contentReady " +
@@ -849,6 +849,10 @@ internal class PenOverlay(
         }
         controller.setEnabled(shouldDraw)
     }
+
+    /** The one rule for the pen; the stylus watchdog and [applyDrawingState] both read it. */
+    internal fun shouldDraw(): Boolean =
+        contentReady && !isBindMode && !isSelectMode && !fingerDown && !paused
 
     fun setStrokeWidth(width: Float) { controller.setStrokeWidth(width) }
     fun setStrokeColor(color: Int) { buf.setColor(color) }
@@ -1305,9 +1309,14 @@ internal class PenOverlay(
 
     private var contentReady = true
 
-    /** A page load starts by taking the pen away; the page finishing loading gives it back. */
+    /**
+     * A page load starts by taking the pen away and hiding the ink; the page finishing
+     * loading gives both back. The ink view and the pen move together: a stroke the SDK
+     * records into an invisible view is "drawing that does not happen".
+     */
     fun setInputEnabled(enabled: Boolean) {
         contentReady = enabled
+        strokeView?.visibility = if (enabled) View.VISIBLE else View.INVISIBLE
         applyDrawingState()
     }
 
@@ -1323,8 +1332,7 @@ internal class PenOverlay(
         if (!contentReady) {
             Log.i("EinkDraw", "onPageReady: the page loaded, giving the pen back")
         }
-        contentReady = true
-        applyDrawingState()
+        setInputEnabled(true)
     }
 
     fun consumeStrokes(consumed: org.json.JSONArray?) {

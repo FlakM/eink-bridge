@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The gap between buttons in one toolbar group; a LinearLayout divider, so it is set once. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android">
+    <size android:width="@dimen/toolbar_gap" />
+    <solid android:color="@android:color/transparent" />
+</shape>

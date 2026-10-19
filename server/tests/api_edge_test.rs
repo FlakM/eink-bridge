@@ -13,7 +13,13 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 use common::test_app;
-use eink_bridge::app::{AppState, build_app};
+use eink_bridge::app::{AppState, Caller, build_app};
+
+/// The request came from this machine, as the server learns from the connection; the
+/// in-process app has no connection, so the test says so itself.
+fn from_this_machine() -> Caller {
+    Caller::local([127, 0, 0, 1].into())
+}
 
 async fn create(app: &axum::Router, body: &str) -> String {
     let resp = app
@@ -129,10 +135,23 @@ async fn remove_forgets_the_session_and_deletes_its_files() {
 
 #[tokio::test]
 async fn a_forced_removal_takes_a_live_review_away() {
-    // The reader may simply give up on a session; `--force` is the deliberate word.
+    // The reader may simply give up on a session; `--force` is the deliberate word. To
+    // everyone watching, it is a cancellation: the socket hears it, and the files do not
+    // come back when the write queue drains.
     let dir = tempfile::tempdir().unwrap();
-    let app = test_app(dir.path().to_path_buf());
+    let state = AppState::with_config(dir.path().to_path_buf(), 5);
+    let app = build_app(state.clone());
     let id = create(&app, "# Abandoned").await;
+    let mut watching = state.ws_subscribe(&id).await;
+    // A write queued just before the removal must not resurrect the directory.
+    send(
+        &app,
+        Request::put(format!("/api/sessions/{id}/star"))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"starred": true}"#))
+            .unwrap(),
+    )
+    .await;
 
     let (status, _) = send(
         &app,
@@ -142,7 +161,18 @@ async fn a_forced_removal_takes_a_live_review_away() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert!(!session_dir(dir.path(), &id).exists());
+    assert!(
+        matches!(
+            watching.recv().await,
+            Ok(eink_bridge::ws::ServerMessage::Error { message }) if message == "session cancelled"
+        ),
+        "the tablet is told the review is over"
+    );
+    state.flush_writes().await.unwrap();
+    assert!(
+        !session_dir(dir.path(), &id).exists(),
+        "the files stay gone once every queued write has landed"
+    );
     let (status, _) = get_json(&app, &format!("/api/sessions/{id}")).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
@@ -997,8 +1027,8 @@ async fn the_session_list_pages_without_repeating_or_dropping_a_session() {
             .get("x-next-cursor")
             .and_then(|v| v.to_str().ok())
             .map(str::to_string);
-        let mut body = resp.into_body().collect().await.unwrap().to_bytes();
-        let page: Vec<serde_json::Value> = serde_json::from_slice(&mut body).unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let page: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
         assert!(page.len() <= 3, "limit honoured: {}", page.len());
         for session in &page {
             seen.push(session["id"].as_str().unwrap().to_string());
@@ -1167,12 +1197,14 @@ async fn a_code_reference_can_be_read_on_the_reader() {
     let dir = tempfile::tempdir().unwrap();
     let app = test_app(dir.path().to_path_buf());
 
-    // The checkout is recorded on the session, which is what the CLI does on push.
+    // The checkout is recorded on the session, which is what the CLI does on push -- and
+    // the CLI runs on this machine, which is what makes the checkout readable.
     let resp = app
         .clone()
         .oneshot(
             Request::post("/api/sessions")
                 .header("content-type", "application/json")
+                .extension(from_this_machine())
                 .body(Body::from(
                     serde_json::json!({
                         "content": "# Review",
@@ -1200,7 +1232,10 @@ async fn a_code_reference_can_be_read_on_the_reader() {
     .await;
     assert_eq!(status, StatusCode::OK, "{snippet}");
     assert_eq!(snippet["path"], "server/src/app.rs");
-    assert_eq!(snippet["start"], 14, "six lines of context above the reference");
+    assert_eq!(
+        snippet["start"], 14,
+        "six lines of context above the reference"
+    );
     assert_eq!(snippet["end"], 26);
     let lines: Vec<&str> = snippet["lines"]
         .as_array()
@@ -1217,11 +1252,19 @@ async fn a_code_reference_can_be_read_on_the_reader() {
     // The expansion is rendered, not handed over as text: the same palette and the same
     // cited-line mark as every other code block, so the reader is not looking at two kinds
     // of code.
-    let html = snippet["html"].as_str().expect("the snippet is rendered server-side");
+    let html = snippet["html"]
+        .as_str()
+        .expect("the snippet is rendered server-side");
     assert!(html.contains("snippet-block"), "{html}");
     assert!(html.contains("color:#"), "it has to be coloured: {html}");
-    assert!(html.contains("snippet-hit"), "the cited line is marked: {html}");
-    assert!(html.contains("data-lang=\"rust\""), "rust, from the .rs extension: {html}");
+    assert!(
+        html.contains("snippet-hit"),
+        "the cited line is marked: {html}"
+    );
+    assert!(
+        html.contains("data-lang=\"rust\""),
+        "rust, from the .rs extension: {html}"
+    );
 
     // Nothing outside the checkout, however the reference is written.
     for escape in [
@@ -1251,9 +1294,11 @@ async fn a_code_reference_can_be_read_on_the_reader() {
     // A line the file does not have is a clear answer, not an empty page.
     let (status, body) = send(
         &app,
-        Request::get(format!("/api/sessions/{id}/source?ref=server/src/app.rs:9999"))
-            .body(Body::empty())
-            .unwrap(),
+        Request::get(format!(
+            "/api/sessions/{id}/source?ref=server/src/app.rs:9999"
+        ))
+        .body(Body::empty())
+        .unwrap(),
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
@@ -1263,11 +1308,352 @@ async fn a_code_reference_can_be_read_on_the_reader() {
     let bare = create(&app, "# No origin").await;
     let (status, body) = send(
         &app,
-        Request::get(format!("/api/sessions/{bare}/source?ref=server/src/app.rs:1"))
-            .body(Body::empty())
-            .unwrap(),
+        Request::get(format!(
+            "/api/sessions/{bare}/source?ref=server/src/app.rs:1"
+        ))
+        .body(Body::empty())
+        .unwrap(),
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(String::from_utf8_lossy(&body).contains("checkout"));
+}
+
+#[tokio::test]
+async fn a_checkout_is_only_readable_when_the_review_was_pushed_from_this_machine() {
+    // `origin.cwd` is whatever the client wrote. A client on the LAN naming `/home` and
+    // asking for `.ssh/id_ed25519:1` used to be given it. The server records a readable
+    // checkout only for a creator on this machine, and only inside `EINK_SOURCE_ROOTS`
+    // when that is set.
+    let checkout = tempfile::tempdir().unwrap();
+    std::fs::write(checkout.path().join("notes.rs"), "fn secret() {}\n").unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+
+    let create_from = |app: &axum::Router, caller: Option<Caller>| {
+        let app = app.clone();
+        let cwd = checkout.path().to_string_lossy().into_owned();
+        async move {
+            let mut request =
+                Request::post("/api/sessions").header("content-type", "application/json");
+            if let Some(caller) = caller {
+                request = request.extension(caller);
+            }
+            let resp = app
+                .oneshot(
+                    request
+                        .body(Body::from(
+                            serde_json::json!({"content": "# Review", "origin": {"cwd": cwd}})
+                                .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::CREATED);
+            serde_json::from_slice::<serde_json::Value>(
+                &resp.into_body().collect().await.unwrap().to_bytes(),
+            )
+            .unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        }
+    };
+    let read = |app: &axum::Router, id: String| {
+        let app = app.clone();
+        async move {
+            send(
+                &app,
+                Request::get(format!("/api/sessions/{id}/source?ref=notes.rs:1"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+        }
+    };
+
+    let app = test_app(dir.path().to_path_buf());
+    // No connection information at all is treated as remote: the path fails closed.
+    let remote = create_from(&app, None).await;
+    let (status, body) = read(&app, remote.clone()).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(!String::from_utf8_lossy(&body).contains("secret"), "leaked");
+    let lan = create_from(&app, Some(Caller(Some([192, 168, 1, 20].into())))).await;
+    let (status, body) = read(&app, lan).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a LAN client names no checkout"
+    );
+    assert!(!String::from_utf8_lossy(&body).contains("secret"), "leaked");
+    // The display metadata is untouched: the list still says where the review came from.
+    let (_, detail) = get_json(&app, &format!("/api/sessions/{remote}")).await;
+    assert_eq!(detail["origin"]["cwd"].as_str(), checkout.path().to_str());
+
+    let local = create_from(&app, Some(from_this_machine())).await;
+    let (status, body) = read(&app, local).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert!(String::from_utf8_lossy(&body).contains("fn secret"));
+
+    // With EINK_SOURCE_ROOTS set, even a local creator is held to it.
+    let mut state = AppState::with_config(dir.path().to_path_buf(), 5);
+    state.source_roots = Some(vec![elsewhere.path().to_path_buf()]);
+    let fenced = build_app(state);
+    let outside = create_from(&fenced, Some(from_this_machine())).await;
+    let (status, body) = read(&fenced, outside).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "outside the allowed roots");
+    assert!(!String::from_utf8_lossy(&body).contains("secret"), "leaked");
+
+    let mut state = AppState::with_config(dir.path().to_path_buf(), 5);
+    state.source_roots = Some(vec![
+        elsewhere.path().to_path_buf(),
+        checkout.path().parent().unwrap().to_path_buf(),
+    ]);
+    let allowed = build_app(state);
+    let inside = create_from(&allowed, Some(from_this_machine())).await;
+    let (status, _) = read(&allowed, inside).await;
+    assert_eq!(status, StatusCode::OK, "inside one of the allowed roots");
+}
+
+#[tokio::test]
+async fn too_much_ink_is_refused_before_anything_is_drawn() {
+    // The body limit bounds bytes, not work: a request of a few hundred kilobytes can ask
+    // for minutes of rasterisation. The refusal comes before the engine is consulted.
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = AppState::with_config(dir.path().to_path_buf(), 5);
+    state.ocr_engine = None;
+    let app = build_app(state);
+    let id = create(&app, "# Review").await;
+
+    let strokes: Vec<serde_json::Value> = (0..eink_bridge::app::MAX_OCR_STROKES + 1)
+        .map(|_| serde_json::json!([[1.0, 2.0]]))
+        .collect();
+    let (status, body) = send(
+        &app,
+        Request::post("/api/ocr")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({"strokes": strokes}).to_string(),
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(String::from_utf8_lossy(&body).contains("too much ink"));
+
+    let (status, _) = send(
+        &app,
+        Request::post(format!("/api/sessions/{id}/request_update"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({"annotations": [{"anchor": null, "strokes": strokes}]})
+                    .to_string(),
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "the same bound on a review's ink"
+    );
+}
+
+#[tokio::test]
+async fn a_relocation_that_takes_too_long_is_given_up_not_waited_on() {
+    // The comparison is quadratic and the page is waiting; past the budget it is told
+    // to keep its notes where they are.
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = AppState::with_config(dir.path().to_path_buf(), 5);
+    state.reanchor_budget = std::time::Duration::ZERO;
+    let app = build_app(state);
+    let id = create(&app, "# Review").await;
+
+    let elements = |fill: &str| -> Vec<serde_json::Value> {
+        (0..200)
+            .map(|i| serde_json::json!({"i": i, "tag": "P", "text": format!("paragraph {i} {}", fill.repeat(90))}))
+            .collect()
+    };
+    let (status, body) = send(
+        &app,
+        Request::post(format!("/api/sessions/{id}/reanchor"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({"previous": elements("x"), "current": elements("y")})
+                    .to_string(),
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        String::from_utf8_lossy(&body).contains("keep them where they are"),
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+}
+
+fn multipart_with_image(notes: &str, image: &[u8]) -> Vec<u8> {
+    let mut mp = Vec::new();
+    mp.extend_from_slice(
+        format!("--b\r\nContent-Disposition: form-data; name=\"typed_notes\"\r\n\r\n{notes}\r\n")
+            .as_bytes(),
+    );
+    mp.extend_from_slice(
+        b"--b\r\nContent-Disposition: form-data; name=\"annotation\"; filename=\"ink.png\"\r\nContent-Type: image/png\r\n\r\n",
+    );
+    mp.extend_from_slice(image);
+    mp.extend_from_slice(b"\r\n--b--\r\n");
+    mp
+}
+
+fn image_files(state_dir: &std::path::Path, id: &str) -> Vec<std::path::PathBuf> {
+    let dir = session_dir(state_dir, id).join("annotations");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut files = Vec::new();
+    for entry in entries.flatten() {
+        if entry.path().is_dir() {
+            files.extend(
+                std::fs::read_dir(entry.path())
+                    .unwrap()
+                    .flatten()
+                    .map(|e| e.path()),
+            );
+        } else {
+            files.push(entry.path());
+        }
+    }
+    files
+}
+
+#[tokio::test]
+async fn a_refused_submission_leaves_no_image_behind_and_an_image_must_be_a_png() {
+    // Images used to be written while the fields were still being read, so a submit
+    // refused afterwards -- a second submit, a stale version -- left orphan files; and
+    // anything at all was stored and served back as `image/png`.
+    let dir = tempfile::tempdir().unwrap();
+    let app = test_app(dir.path().to_path_buf());
+    let id = create(&app, "# Review").await;
+
+    let (status, body) = send(
+        &app,
+        Request::post(format!("/api/sessions/{id}/submit"))
+            .header("content-type", "multipart/form-data; boundary=b")
+            .body(Body::from(multipart_with_image(
+                "CHANGES",
+                b"<html>not ink</html>",
+            )))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        String::from_utf8_lossy(&body).contains("PNG"),
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    assert!(
+        image_files(dir.path(), &id).is_empty(),
+        "nothing was stored"
+    );
+
+    let png: &[u8] = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDRink";
+    let (status, _) = send(
+        &app,
+        Request::post(format!("/api/sessions/{id}/submit"))
+            .header("content-type", "multipart/form-data; boundary=b")
+            .body(Body::from(multipart_with_image("LGTM", png)))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        image_files(dir.path(), &id).len(),
+        1,
+        "the accepted image is kept"
+    );
+
+    let (status, _) = send(
+        &app,
+        Request::post(format!("/api/sessions/{id}/submit"))
+            .header("content-type", "multipart/form-data; boundary=b")
+            .body(Body::from(multipart_with_image("CHANGES", png)))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        image_files(dir.path(), &id).len(),
+        1,
+        "a refused submit stores nothing: {:?}",
+        image_files(dir.path(), &id)
+    );
+}
+
+#[tokio::test]
+async fn a_json_submit_against_a_stale_document_is_refused() {
+    // `request_update` already checked `document_version`; the submit that ends the
+    // review ignored it, so a verdict written against v1 landed on a v2 nobody had read.
+    let dir = tempfile::tempdir().unwrap();
+    let app = test_app(dir.path().to_path_buf());
+    let id = create(&app, "# Review\n\nv1").await;
+    send(
+        &app,
+        Request::put(format!("/api/sessions/{id}/content"))
+            .header("content-type", "text/plain")
+            .body(Body::from("# Review\n\nv2"))
+            .unwrap(),
+    )
+    .await;
+
+    let submit = |version: u32| {
+        let app = app.clone();
+        let id = id.clone();
+        async move {
+            send(
+                &app,
+                Request::post(format!("/api/sessions/{id}/submit"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"typed_notes": "LGTM", "document_version": version})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .0
+        }
+    };
+    assert_eq!(submit(1).await, StatusCode::CONFLICT, "the reader saw v1");
+    assert_eq!(submit(2).await, StatusCode::OK);
+    let (_, detail) = get_json(&app, &format!("/api/sessions/{id}")).await;
+    assert_eq!(detail["status"], "Submitted");
+}
+
+#[tokio::test]
+async fn a_mutation_whose_write_fails_is_not_reported_as_a_success() {
+    // The response used to wait for the write to *finish*, not to succeed: with the disk
+    // refusing, the client was told its review was created and the next restart had
+    // never heard of it.
+    let dir = tempfile::tempdir().unwrap();
+    let blocked = dir.path().join("blocked");
+    std::fs::write(&blocked, b"in the way").unwrap();
+    let app = build_app(AppState::with_config(blocked, 5));
+
+    let (status, body) = send(
+        &app,
+        Request::post("/api/sessions")
+            .body(Body::from("# Doomed"))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(
+        String::from_utf8_lossy(&body).contains("written to disk"),
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
 }

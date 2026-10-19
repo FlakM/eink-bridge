@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The colour and size popovers: a ruled paper card, drawn like the buttons it opens from. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+    <solid android:color="#FFFFFF" />
+    <stroke android:width="@dimen/toolbar_rule_width" android:color="#000000" />
+    <corners android:radius="10dp" />
+</shape>

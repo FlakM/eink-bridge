@@ -5,6 +5,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -57,12 +58,7 @@ internal class SessionViewModel(app: Application) : AndroidViewModel(app) {
 
     fun startPolling() {
         pollJob?.cancel()
-        pollJob = viewModelScope.launch {
-            while (isActive) {
-                fetchSessions()
-                delay(5000)
-            }
-        }
+        pollJob = viewModelScope.launch { pollWithBackoff(fetch = { fetchSessions() }) }
     }
 
     fun stopPolling() {
@@ -159,6 +155,8 @@ internal class SessionViewModel(app: Application) : AndroidViewModel(app) {
     internal companion object {
         const val SESSION_PAGE_SIZE = 50
         const val SESSION_PAGE_LIMIT = 20
+        const val POLL_INTERVAL_MS = 5_000L
+        const val POLL_MAX_INTERVAL_MS = 60_000L
     }
 
     private fun showCachedList() {
@@ -172,57 +170,81 @@ internal class SessionViewModel(app: Application) : AndroidViewModel(app) {
     private fun sortStarredFirst(sessions: List<SessionInfo>): List<SessionInfo> =
         sessions.sortedWith(compareByDescending<SessionInfo> { it.starred }.thenByDescending { it.updatedAt })
 
-    private suspend fun fetchSessions() {
-        withContext(Dispatchers.IO) {
-            try {
-                // Page rather than fetch everything: the list grows without bound, and
-                // this runs on every refresh.
-                val fetched = mutableListOf<SessionInfo>()
-                var cursor: String? = null
-                var pages = 0
-                var complete = false
-                while (pages < SESSION_PAGE_LIMIT) {
-                    pages++
-                    val page = client.newCall(
-                        Request.Builder().url(sessionsPageUrl(serverUrl, cursor)).build()
-                    ).execute().use { response ->
-                        if (!response.isSuccessful) return@use null
-                        val body = response.body?.string() ?: "[]"
-                        val arr = JSONArray(body)
-                        for (i in 0 until arr.length()) {
-                            fetched.add(parseSession(arr.getJSONObject(i)))
-                        }
-                        // One connection per page would leak on every refresh.
-                        response.header("x-next-cursor")
+    /** Refresh the list. True when the server answered, whatever the list held. */
+    private suspend fun fetchSessions(): Boolean = withContext(Dispatchers.IO) {
+        try {
+            var reached = false
+            // Page rather than fetch everything: the list grows without bound, and
+            // this runs on every refresh.
+            val fetched = mutableListOf<SessionInfo>()
+            var cursor: String? = null
+            var pages = 0
+            var complete = false
+            while (pages < SESSION_PAGE_LIMIT) {
+                pages++
+                val page = client.newCall(
+                    Request.Builder().url(sessionsPageUrl(serverUrl, cursor)).build()
+                ).execute().use { response ->
+                    if (!response.isSuccessful) return@use null
+                    reached = true
+                    val body = response.body?.string() ?: "[]"
+                    val arr = JSONArray(body)
+                    for (i in 0 until arr.length()) {
+                        fetched.add(parseSession(arr.getJSONObject(i)))
                     }
-                    if (page == null) break
-                    cursor = page
-                    if (cursor == null) {
-                        complete = true
-                        break
-                    }
+                    // One connection per page would leak on every refresh.
+                    response.header("x-next-cursor")
                 }
-
-                when (listOutcome(fetched.size, complete)) {
-                    // A transient failure on the first page must not blank the list: show
-                    // what we had, and say it is offline.
-                    ListOutcome.UseCached -> showCachedList()
-                    ListOutcome.UseFetchedOnly, ListOutcome.UseFetchedAndCache -> {
-                        val sessions = sortStarredFirst(fetched)
-                        if (listOutcome(fetched.size, complete) == ListOutcome.UseFetchedAndCache) {
-                            docCache.saveSessions(sessions)
-                        }
-                        val pending = sessions.filter { sessionRepo.hasStrokes(it.id) }.map { it.id }.toSet()
-                        val cached = sessions.filter { docCache.hasCached(it.id) }.map { it.id }.toSet()
-                        _state.value = SessionListState(sessions, pending, cached, ConnectionStatus.Online)
-                    }
+                if (page == null) break
+                cursor = page
+                if (cursor == null) {
+                    complete = true
+                    break
                 }
-            } catch (_: Exception) {
-                showCachedList()
             }
+
+            when (listOutcome(fetched.size, complete)) {
+                // A transient failure on the first page must not blank the list: show
+                // what we had, and say it is offline.
+                ListOutcome.UseCached -> showCachedList()
+                ListOutcome.UseFetchedOnly, ListOutcome.UseFetchedAndCache -> {
+                    val sessions = sortStarredFirst(fetched)
+                    if (listOutcome(fetched.size, complete) == ListOutcome.UseFetchedAndCache) {
+                        docCache.saveSessions(sessions)
+                    }
+                    val pending = sessions.filter { sessionRepo.hasStrokes(it.id) }.map { it.id }.toSet()
+                    val cached = sessions.filter { docCache.hasCached(it.id) }.map { it.id }.toSet()
+                    _state.value = SessionListState(sessions, pending, cached, ConnectionStatus.Online)
+                }
+            }
+            reached
+        } catch (_: Exception) {
+            showCachedList()
+            false
         }
     }
 }
+
+/**
+ * Call [fetch] forever, waiting [pollDelay] between calls: every 5 s while the server
+ * answers, doubling up to a minute while it does not. Before this the tablet asked an
+ * unreachable server every 5 s all night.
+ */
+internal suspend fun pollWithBackoff(
+    fetch: suspend () -> Boolean,
+    wait: suspend (Long) -> Unit = { delay(it) },
+) {
+    var failures = 0
+    while (currentCoroutineContext().isActive) {
+        failures = if (fetch()) 0 else failures + 1
+        wait(pollDelay(failures))
+    }
+}
+
+/** 5 s after a success or the first failure, then 10, 20, 40, 60 s. */
+internal fun pollDelay(failures: Int): Long =
+    (SessionViewModel.POLL_INTERVAL_MS shl (failures - 1).coerceIn(0, 4))
+        .coerceAtMost(SessionViewModel.POLL_MAX_INTERVAL_MS)
 
 /** The URL for one page of the session list. Kept pure so the paging policy is testable. */
 internal fun sessionsPageUrl(serverUrl: String, cursor: String?): String {

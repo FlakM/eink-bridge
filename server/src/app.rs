@@ -1,8 +1,8 @@
 use axum::{
     Router,
     body::Bytes,
-    extract::{MatchedPath, Path, Query, Request, State},
-    http::{HeaderMap, StatusCode, header},
+    extract::{ConnectInfo, FromRequestParts, MatchedPath, Path, Query, Request, State},
+    http::{HeaderMap, StatusCode, header, request::Parts},
     middleware::Next,
     response::{Html, IntoResponse, Json, Response},
     routing::{get, post, put},
@@ -10,7 +10,14 @@ use axum::{
 use futures_util::stream;
 use multer::{Multipart as MulterMultipart, parse_boundary};
 use serde::Deserialize;
-use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    convert::Infallible,
+    net::{IpAddr, SocketAddr},
+    path::PathBuf,
+    sync::Arc,
+    time::Duration,
+};
 use tokio::sync::{Notify, RwLock, broadcast};
 use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
@@ -22,8 +29,11 @@ use crate::api::{
 };
 use crate::ocr::OcrEngine;
 use crate::render;
-use crate::session::{Session, SessionManager, SessionStatus, SubmitResult};
+use crate::session::{NewSession, Session, SessionManager, SessionStatus, SubmitResult};
 use crate::verdict::{Verdict, parse_verdict};
+use crate::ws::ServerMessage;
+
+type WsSenders = HashMap<String, broadcast::Sender<ServerMessage>>;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -32,7 +42,7 @@ pub struct AppState {
     /// the disk is being written.
     write_tx: tokio::sync::mpsc::UnboundedSender<crate::session::WriteRequest>,
     pub notifiers: Arc<RwLock<HashMap<String, Arc<Notify>>>>,
-    pub ws_senders: Arc<RwLock<HashMap<String, broadcast::Sender<crate::ws::ServerMessage>>>>,
+    pub ws_senders: Arc<RwLock<WsSenders>>,
     pub long_poll_seconds: u64,
     pub assets_dir: PathBuf,
     pub ocr_engine: Option<Arc<OcrEngine>>,
@@ -40,6 +50,69 @@ pub struct AppState {
     /// nothing for three intervals is dropped, which is what makes a half-open socket
     /// visible instead of silently dead.
     pub ws_heartbeat_seconds: u64,
+    /// The one client every webhook goes out through, with a bound: a receiver that
+    /// never answers used to hold a task forever.
+    pub http: reqwest::Client,
+    /// Directories `/source` may read from, from `EINK_SOURCE_ROOTS`. `None` means any
+    /// directory a local creator names; a non-local creator never gets one.
+    pub source_roots: Option<Vec<PathBuf>>,
+    /// How long a reanchor may compute before the page is told to keep its notes put.
+    pub reanchor_budget: Duration,
+}
+
+/// How long a webhook receiver has to answer.
+const WEBHOOK_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The most strokes, and the most points over all of them, one request may ask to be
+/// rasterised. Beyond this the request is refused rather than rendered.
+pub const MAX_OCR_STROKES: usize = 5_000;
+pub const MAX_OCR_POINTS: usize = 500_000;
+
+/// Where a request came from, when the server knows: the connection's peer address, or
+/// nothing when the app is driven without one (in-process tests). Unknown is treated as
+/// remote, so a path that is only for this machine fails closed.
+#[derive(Clone, Copy, Debug)]
+pub struct Caller(pub Option<IpAddr>);
+
+impl Caller {
+    pub fn local(ip: IpAddr) -> Self {
+        Self(Some(ip))
+    }
+
+    pub fn is_local(&self) -> bool {
+        self.0.is_some_and(|ip| ip.is_loopback())
+    }
+}
+
+impl<S: Send + Sync> FromRequestParts<S> for Caller {
+    type Rejection = Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Infallible> {
+        // An injected `Caller` wins, which is how a test speaks for a local client; the
+        // server itself only ever sets `ConnectInfo`.
+        let ip = parts
+            .extensions
+            .get::<Caller>()
+            .map(|c| c.0)
+            .unwrap_or_else(|| {
+                parts
+                    .extensions
+                    .get::<ConnectInfo<SocketAddr>>()
+                    .map(|c| c.0.ip())
+            });
+        Ok(Caller(ip))
+    }
+}
+
+/// The directories `/source` may read from, colon-separated, or nothing when unset.
+fn source_roots_from_env() -> Option<Vec<PathBuf>> {
+    let value = std::env::var("EINK_SOURCE_ROOTS").ok()?;
+    let roots: Vec<PathBuf> = value
+        .split(':')
+        .filter(|root| !root.trim().is_empty())
+        .map(PathBuf::from)
+        .collect();
+    Some(roots)
 }
 
 impl AppState {
@@ -64,6 +137,10 @@ impl AppState {
                 None
             }
         };
+        let http = reqwest::Client::builder()
+            .timeout(WEBHOOK_TIMEOUT)
+            .build()
+            .expect("a default HTTP client can be built");
         let mgr = SessionManager::with_writer(state_dir, write_tx.clone());
         let active = mgr
             .list()
@@ -82,22 +159,86 @@ impl AppState {
             assets_dir: default_assets_dir(),
             ocr_engine,
             ws_heartbeat_seconds,
+            http,
+            source_roots: source_roots_from_env(),
+            reanchor_budget: Duration::from_secs(10),
         }
     }
 
-    /// Wait until every queued write has landed.
+    /// Wait until every queued write has landed, and learn whether one of them failed.
     ///
     /// Used on the paths where a response promises durability: the review that was just
     /// submitted, the cancellation, the content update a client will rely on.
-    pub async fn flush_writes(&self) {
+    pub async fn flush_writes(&self) -> Result<(), String> {
         let (ack, waited) = tokio::sync::oneshot::channel();
         if self
             .write_tx
             .send(crate::session::WriteRequest::Barrier { ack })
-            .is_ok()
+            .is_err()
         {
-            let _ = waited.await;
+            return Err("the write queue is gone".into());
         }
+        waited
+            .await
+            .unwrap_or_else(|_| Err("the write queue stopped".into()))
+    }
+
+    /// The checkout `/source` may read for a session, if this creator may name one.
+    ///
+    /// Only a client on this machine may: the CLI runs beside the server, the tablet never
+    /// does, and a LAN client naming `/home` would otherwise be reading it. With
+    /// `EINK_SOURCE_ROOTS` set, the directory must also be inside one of those.
+    pub fn source_root_for(&self, caller: Caller, cwd: Option<&str>) -> Option<PathBuf> {
+        let cwd = cwd?;
+        if !caller.is_local() {
+            tracing::info!(
+                cwd,
+                "checkout not recorded: the session was not created from this machine"
+            );
+            return None;
+        }
+        let Ok(root) = std::path::Path::new(cwd).canonicalize() else {
+            tracing::info!(cwd, "checkout not recorded: no such directory here");
+            return None;
+        };
+        if let Some(allowed) = &self.source_roots
+            && !allowed
+                .iter()
+                .filter_map(|a| a.canonicalize().ok())
+                .any(|a| root.starts_with(&a))
+        {
+            tracing::info!(cwd, "checkout not recorded: outside EINK_SOURCE_ROOTS");
+            return None;
+        }
+        Some(root)
+    }
+
+    /// Deliver one webhook in the background, counting and logging how it went. Every
+    /// callback the server sends goes through here, so none can be fire-and-forget in
+    /// the sense of "nobody will ever know".
+    pub fn send_webhook(&self, url: String, body: impl serde::Serialize + Send + 'static) {
+        let client = self.http.clone();
+        tokio::spawn(async move {
+            match client.post(&url).json(&body).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    crate::metrics::WEBHOOK_TOTAL
+                        .with_label_values(&["ok"])
+                        .inc();
+                }
+                Ok(resp) => {
+                    tracing::warn!("webhook POST to {url} returned {}", resp.status());
+                    crate::metrics::WEBHOOK_TOTAL
+                        .with_label_values(&["error"])
+                        .inc();
+                }
+                Err(error) => {
+                    tracing::warn!("webhook POST to {url} failed: {error}");
+                    crate::metrics::WEBHOOK_TOTAL
+                        .with_label_values(&["error"])
+                        .inc();
+                }
+            }
+        });
     }
 
     async fn get_or_create_notify(&self, id: &str) -> Arc<Notify> {
@@ -114,44 +255,56 @@ impl AppState {
         }
     }
 
-    pub async fn ws_subscribe(&self, id: &str) -> broadcast::Receiver<crate::ws::ServerMessage> {
-        type Map = std::collections::HashMap<String, broadcast::Sender<crate::ws::ServerMessage>>;
-        let mut map: tokio::sync::RwLockWriteGuard<'_, Map> = self.ws_senders.write().await;
-        map.entry(id.to_string())
-            .or_insert_with(|| broadcast::channel::<crate::ws::ServerMessage>(16).0)
+    pub async fn ws_subscribe(&self, id: &str) -> broadcast::Receiver<ServerMessage> {
+        self.ws_senders
+            .write()
+            .await
+            .entry(id.to_string())
+            .or_insert_with(|| broadcast::channel(16).0)
             .subscribe()
     }
 
-    pub async fn ws_send(&self, id: &str, msg: crate::ws::ServerMessage) {
-        type Map = std::collections::HashMap<String, broadcast::Sender<crate::ws::ServerMessage>>;
-        let map: tokio::sync::RwLockReadGuard<'_, Map> = self.ws_senders.read().await;
-        if let Some(sender) = map.get(id) {
-            let _ = sender.send(msg as crate::ws::ServerMessage);
+    pub async fn ws_send(&self, id: &str, msg: ServerMessage) {
+        if let Some(sender) = self.ws_senders.read().await.get(id) {
+            let _ = sender.send(msg);
         }
     }
 
     pub async fn ws_cleanup(&self, id: &str) {
-        type Map = std::collections::HashMap<String, broadcast::Sender<crate::ws::ServerMessage>>;
-        let mut map: tokio::sync::RwLockWriteGuard<'_, Map> = self.ws_senders.write().await;
-        map.remove(id);
+        self.ws_senders.write().await.remove(id);
     }
 
     pub async fn expire_stale(&self, timeout: Duration) -> usize {
         let expired = self.sessions.write().await.expire_stale_ids(timeout);
-        if !expired.is_empty() {
-            // Expiry is persisted state: what is on disk is what a restart reloads.
-            self.flush_writes().await;
+        if expired.is_empty() {
+            return 0;
         }
+        // Expiry is persisted state: what is on disk is what a restart reloads.
+        if let Err(error) = self.flush_writes().await {
+            tracing::error!(error, "expired sessions were not persisted");
+        }
+        let webhooks: Vec<_> = {
+            let mgr = self.sessions.read().await;
+            expired
+                .iter()
+                .filter_map(|id| mgr.get(id).and_then(webhook_payload))
+                .collect()
+        };
         for id in &expired {
             self.notify_and_cleanup(id).await;
             self.ws_send(
                 id,
-                crate::ws::ServerMessage::Error {
+                ServerMessage::Error {
                     message: "session expired".into(),
                 },
             )
             .await;
             self.ws_cleanup(id).await;
+        }
+        // Expiry is a terminal transition like the other two, and the agent waiting on
+        // the callback deserves to hear about it the same way.
+        for (url, body) in webhooks {
+            self.send_webhook(url, body);
         }
         expired.len()
     }
@@ -174,13 +327,6 @@ const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
 
 use crate::api::AnnotationGroup;
 
-type SubmitPayload = (
-    String,
-    Vec<String>,
-    Option<Verdict>,
-    Option<serde_json::Value>,
-    Vec<AnnotationGroup>,
-);
 type SubmitError = (StatusCode, String);
 
 pub fn build_app(state: AppState) -> Router {
@@ -255,8 +401,18 @@ async fn durable_writes(State(state): State<AppState>, req: Request, next: Next)
         axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS
     );
     let response = next.run(req).await;
-    if mutating && response.status().is_success() {
-        state.flush_writes().await;
+    if mutating
+        && response.status().is_success()
+        && let Err(error) = state.flush_writes().await
+    {
+        // The handler has already changed what is in memory; what it cannot do is tell
+        // the client the change is safe, so it does not.
+        tracing::error!(error, "a mutation was not written to disk");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "the change could not be written to disk",
+        )
+            .into_response();
     }
     response
 }
@@ -297,7 +453,7 @@ fn state_dir_is_writable(state_dir: &std::path::Path) -> bool {
     }
 }
 
-async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
+async fn health(State(state): State<AppState>) -> Response {
     let exe = std::env::current_exe()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| "unknown".to_string());
@@ -315,21 +471,35 @@ async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
             .count();
         (stored, active, mgr.state_dir().to_path_buf())
     };
-    let writable = state_dir_is_writable(&state_dir);
+    let probed = state_dir.clone();
+    let writable = tokio::task::spawn_blocking(move || state_dir_is_writable(&probed))
+        .await
+        .unwrap_or(false);
 
-    Json(serde_json::json!({
-        "status": "ok",
+    // A disk that cannot be written will lose the next review, so that is not "ok". OCR
+    // is optional -- the tablet reads its own handwriting when the server cannot -- so
+    // its absence is reported but is not a failure.
+    let status = if writable {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    let body = Json(serde_json::json!({
+        "status": if writable { "ok" } else { "degraded" },
         "exe": exe,
+        "problems": if writable { vec![] } else { vec!["the state directory is not writable"] },
         "ready": {
             "version": env!("CARGO_PKG_VERSION"),
             "ocr": if state.ocr_engine.is_some() { "available" } else { "unavailable" },
+            "ocr_optional": true,
             "state_dir": state_dir.to_string_lossy(),
             "state_dir_writable": writable,
             "sessions": stored,
             "active": active,
             "ws_heartbeat_seconds": state.ws_heartbeat_seconds,
         },
-    }))
+    }));
+    (status, body).into_response()
 }
 
 async fn openapi_json() -> Json<serde_json::Value> {
@@ -343,7 +513,27 @@ struct OcrRequest {
     pressures: Vec<Vec<f64>>,
 }
 
+/// Refuse ink the rasteriser should not be asked to draw. The body limit bounds bytes,
+/// not work: half a million points is a 10 MB body and minutes of drawing.
+fn strokes_within_limits<'a>(
+    strokes: impl Iterator<Item = &'a Vec<[f64; 2]>>,
+) -> Result<(), (StatusCode, String)> {
+    let (count, points) = strokes.fold((0usize, 0usize), |(c, p), s| (c + 1, p + s.len()));
+    if count > MAX_OCR_STROKES || points > MAX_OCR_POINTS {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!(
+                "too much ink: at most {MAX_OCR_STROKES} strokes and {MAX_OCR_POINTS} points per request"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 async fn ocr_strokes(State(state): State<AppState>, Json(body): Json<OcrRequest>) -> Response {
+    if let Err(refused) = strokes_within_limits(body.strokes.iter()) {
+        return refused.into_response();
+    }
     let Some(engine) = &state.ocr_engine else {
         return (StatusCode::SERVICE_UNAVAILABLE, "OCR engine not available").into_response();
     };
@@ -371,9 +561,32 @@ struct CreateParams {
     callback_url: Option<String>,
 }
 
+/// A callback must be somewhere the server should be posting to: http(s), with a host,
+/// and not the link-local range where cloud metadata services listen. Loopback stays
+/// allowed on purpose -- the local relay listens on 127.0.0.1.
+pub fn validate_callback_url(url: &str) -> Result<(), String> {
+    let parsed = reqwest::Url::parse(url).map_err(|e| format!("callback_url is not a URL: {e}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("callback_url must be http or https".into());
+    }
+    let Some(host) = parsed.host_str() else {
+        return Err("callback_url has no host".into());
+    };
+    let link_local = match host.trim_matches(['[', ']']).parse::<IpAddr>() {
+        Ok(IpAddr::V4(ip)) => ip.is_link_local(),
+        Ok(IpAddr::V6(ip)) => ip.is_unicast_link_local(),
+        Err(_) => false,
+    };
+    if link_local {
+        return Err("callback_url must not point at a link-local address".into());
+    }
+    Ok(())
+}
+
 async fn create_session(
     State(state): State<AppState>,
     Query(params): Query<CreateParams>,
+    caller: Caller,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
@@ -410,16 +623,30 @@ async fn create_session(
         }
     };
 
+    if let Some(url) = &request.callback_url
+        && let Err(reason) = validate_callback_url(url)
+    {
+        return bad_request(reason);
+    }
+    let source_root = state.source_root_for(
+        caller,
+        request
+            .origin
+            .as_ref()
+            .and_then(|origin| origin.cwd.as_deref()),
+    );
+
     let content_len = request.content.len();
     let mut mgr = state.sessions.write().await;
-    let session = mgr.create(
-        request.content,
-        request.title,
-        request.callback_url,
-        request.tags,
-        request.starred,
-        request.origin,
-    );
+    let session = mgr.create_session(NewSession {
+        content: request.content,
+        title: request.title,
+        callback_url: request.callback_url,
+        tags: request.tags,
+        starred: request.starred,
+        origin: request.origin,
+        source_root,
+    });
     tracing::info!(
         id = %session.id,
         title = ?session.title,
@@ -598,19 +825,43 @@ async fn delete_session(
                     .into_response();
             }
         }
-        // Let any queued write for this session land first: the drain creates the
-        // directory it writes into, so a straggler would resurrect what we just deleted.
-        state.flush_writes().await;
-        let removed = state.sessions.write().await.delete(&id);
-        if !removed {
+        let (removed, stored, starred) = {
+            let mut mgr = state.sessions.write().await;
+            // Let any queued write for this session land first: the drain creates the
+            // directory it writes into, so a straggler would resurrect what we just
+            // deleted. Under the lock, because every write is queued under it, so none
+            // can slip in between the barrier and the removal.
+            let _ = state.flush_writes().await;
+            let removed = mgr.remove(&id);
+            (removed, mgr.count(), mgr.starred_count())
+        };
+        let Some(mut removed) = removed else {
             return StatusCode::NOT_FOUND.into_response();
-        }
+        };
+        crate::metrics::SESSIONS_STORED.set(stored as i64);
+        crate::metrics::SESSIONS_STARRED.set(starred as i64);
         // A tablet or observer still holding the id must stop waiting on it.
         state.notify_and_cleanup(&id).await;
+        if removed.status == SessionStatus::Active {
+            // Taking a live review away is a cancellation to everyone watching it: the
+            // gauge, the socket and the callback hear what a plain cancel would have told
+            // them.
+            crate::metrics::SESSIONS_CANCELLED.inc();
+            crate::metrics::SESSIONS_ACTIVE.dec();
+            removed.status = SessionStatus::Cancelled;
+            state
+                .ws_send(
+                    &id,
+                    ServerMessage::Error {
+                        message: "session cancelled".into(),
+                    },
+                )
+                .await;
+            if let Some((url, body)) = webhook_payload(&removed) {
+                state.send_webhook(url, body);
+            }
+        }
         state.ws_cleanup(&id).await;
-        let mgr = state.sessions.read().await;
-        crate::metrics::SESSIONS_STORED.set(mgr.count() as i64);
-        crate::metrics::SESSIONS_STARRED.set(mgr.starred_count() as i64);
         tracing::info!(id = %id, "session removed");
         return StatusCode::OK.into_response();
     }
@@ -635,13 +886,13 @@ async fn delete_session(
         state
             .ws_send(
                 &id,
-                crate::ws::ServerMessage::Error {
+                ServerMessage::Error {
                     message: "session cancelled".into(),
                 },
             )
             .await;
         if let Some((url, body)) = webhook {
-            fire_webhook(url, body);
+            state.send_webhook(url, body);
         }
     }
     state.ws_cleanup(&id).await;
@@ -663,9 +914,11 @@ async fn purge_sessions(State(state): State<AppState>) -> Json<serde_json::Value
 /// The lines around a `path:line` reference in a review, so the reader can look at the code
 /// on the tablet instead of opening an editor.
 ///
-/// The file is read from the directory the review came from -- the worktree the CLI pushed
-/// from -- and only from there: the path is joined to it, canonicalised, and required to
-/// stay inside, so a session document cannot turn into a way to read the machine.
+/// The file is read from the checkout the server recorded for the session -- the worktree
+/// a CLI on this machine pushed from -- and only from there: the path is joined to it,
+/// canonicalised, and required to stay inside, so a session document cannot turn into a
+/// way to read the machine. `origin.cwd` is never the root: any client on the LAN can
+/// write that field.
 #[derive(Deserialize)]
 struct SourceParams {
     #[serde(rename = "ref")]
@@ -675,7 +928,6 @@ struct SourceParams {
 }
 
 const SOURCE_CONTEXT_MAX: usize = 20;
-const SOURCE_LINES_MAX: usize = 60;
 
 async fn source_snippet(
     State(state): State<AppState>,
@@ -686,20 +938,27 @@ async fn source_snippet(
         let mgr = state.sessions.read().await;
         match mgr.get(&id) {
             None => return StatusCode::NOT_FOUND.into_response(),
-            Some(session) => match session.origin.as_ref().and_then(|origin| origin.cwd.clone()) {
-                Some(cwd) => std::path::PathBuf::from(cwd),
+            Some(session) => match &session.source_root {
+                Some(root) => root.clone(),
                 // Without a recorded checkout there is nothing to read from, and guessing
                 // would be worse than saying so.
                 None => {
-                    return (StatusCode::NOT_FOUND, "this review did not record its checkout")
-                        .into_response()
+                    return (
+                        StatusCode::NOT_FOUND,
+                        "this review did not record a checkout the server may read",
+                    )
+                        .into_response();
                 }
             },
         }
     };
 
     let Some((relative, wanted)) = split_source_reference(&params.reference) else {
-        return (StatusCode::BAD_REQUEST, "expected a reference like path/file.rs:120").into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            "expected a reference like path/file.rs:120",
+        )
+            .into_response();
     };
     let context = params.context.unwrap_or(6).min(SOURCE_CONTEXT_MAX);
     let Ok(root) = root.canonicalize() else {
@@ -722,13 +981,13 @@ async fn source_snippet(
     }
     let start = wanted.saturating_sub(context + 1);
     let end = (wanted + context).min(total);
-    let window: Vec<&str> = lines[start..end].iter().take(SOURCE_LINES_MAX).copied().collect();
+    let window = &lines[start..end];
     // Rendered here rather than in the browser: the page has one highlighter, and it is
     // this one. The cited line is marked the same way a snippet marks it.
     let html = crate::render::source_block(
         language_for(&relative),
         &format!("{relative}:{}", start + 1),
-        &window,
+        window,
         Some(wanted - start),
     );
     Json(serde_json::json!({
@@ -736,7 +995,6 @@ async fn source_snippet(
         "start": start + 1,
         "end": end,
         "total": total,
-        "truncated": window.len() > SOURCE_LINES_MAX,
         "lines": window,
         "html": html,
     }))
@@ -746,7 +1004,13 @@ async fn source_snippet(
 /// The highlighter's name for a file, or nothing when it does not know the language (the
 /// page falls back to plain text, exactly as it does for a snippet it cannot highlight).
 fn language_for(path: &str) -> &'static str {
-    match path.rsplit('.').next().unwrap_or("").to_ascii_lowercase().as_str() {
+    match path
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "rs" => "rust",
         "kt" | "kts" => "kotlin",
         "ts" => "typescript",
@@ -800,7 +1064,6 @@ fn split_source_reference(reference: &str) -> Option<(String, usize)> {
 
 #[derive(Deserialize)]
 struct UpdateContentBody {
-
     content: String,
     #[serde(default)]
     consumed_annotations: Vec<i32>,
@@ -894,13 +1157,23 @@ async fn reanchor(
     {
         return bad_request("element map exceeds reanchor limits".into());
     }
-    let targets = tokio::task::spawn_blocking(move || {
-        crate::reanchor::targets(&body.previous, &body.current)
-    })
+    let targets = tokio::time::timeout(
+        state.reanchor_budget,
+        tokio::task::spawn_blocking(move || {
+            crate::reanchor::targets(&body.previous, &body.current)
+        }),
+    )
     .await;
     match targets {
-        Ok(targets) => Json(serde_json::json!({"targets":targets})).into_response(),
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Ok(Ok(targets)) => Json(serde_json::json!({"targets":targets})).into_response(),
+        Ok(Err(_)) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        // Better to leave the notes where they are than to hold the page while the
+        // comparison runs on: the client keeps its current placement.
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "relocating the notes took too long; keep them where they are",
+        )
+            .into_response(),
     }
 }
 
@@ -1016,31 +1289,6 @@ fn webhook_payload(session: &Session) -> Option<(String, SessionResultResponse)>
         .map(|url| (url, SessionResultResponse::from_session(session)))
 }
 
-fn fire_webhook(callback_url: String, body: SessionResultResponse) {
-    tokio::spawn(async move {
-        let client = reqwest::Client::new();
-        match client.post(&callback_url).json(&body).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                crate::metrics::WEBHOOK_TOTAL
-                    .with_label_values(&["ok"])
-                    .inc();
-            }
-            Ok(resp) => {
-                tracing::warn!("webhook POST to {callback_url} returned {}", resp.status());
-                crate::metrics::WEBHOOK_TOTAL
-                    .with_label_values(&["error"])
-                    .inc();
-            }
-            Err(error) => {
-                tracing::warn!("webhook POST to {callback_url} failed: {error}");
-                crate::metrics::WEBHOOK_TOTAL
-                    .with_label_values(&["error"])
-                    .inc();
-            }
-        }
-    });
-}
-
 async fn get_result(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -1097,41 +1345,95 @@ async fn submit_review(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let Some(session) = ({
+    // Say no before anything is parsed or written when the review is already over.
+    let annotations_dir = {
         let mgr = state.sessions.read().await;
-        mgr.get(&id).cloned()
-    }) else {
-        tracing::debug!(id = %id, "submit: session not found");
-        return StatusCode::NOT_FOUND.into_response();
+        match mgr.get(&id) {
+            None => {
+                tracing::debug!(id = %id, "submit: session not found");
+                return StatusCode::NOT_FOUND.into_response();
+            }
+            Some(s) if s.status != SessionStatus::Active => {
+                tracing::debug!(id = %id, "submit: session not active");
+                return StatusCode::CONFLICT.into_response();
+            }
+            Some(s) => s.annotations_dir(),
+        }
     };
 
     let content_type = content_type(&headers);
     let parsed = if content_type.starts_with("application/json") {
         parse_json_submit(&body)
     } else if content_type.starts_with("multipart/form-data") {
-        parse_multipart_submit(&session, &headers, body).await
+        parse_multipart_submit(&headers, body).await
     } else {
         Err((
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             format!("unsupported content-type: {content_type}"),
         ))
     };
-
-    let (typed_notes, images, verdict_override, stroke_data, annotations) = match parsed {
-        Ok(parsed) => parsed,
+    let submission = match parsed {
+        Ok(submission) => submission,
         Err((status, message)) => return (status, message).into_response(),
     };
 
+    // Stage the images beside the session before taking the lock: a reader's bitmap can
+    // be megabytes, and the lock must not wait on the disk. They move in only once the
+    // session accepts, so a refusal leaves no orphan behind.
+    let staging = annotations_dir.join(format!(".staging-{}", uuid::Uuid::new_v4().as_simple()));
+    let staged = if submission.images.is_empty() {
+        Vec::new()
+    } else {
+        let into = staging.clone();
+        let images = submission.images;
+        let written = tokio::task::spawn_blocking(move || {
+            images
+                .iter()
+                .map(|image| crate::session::write_annotation(&into, image))
+                .collect::<std::io::Result<Vec<String>>>()
+        })
+        .await;
+        match written {
+            Ok(Ok(paths)) => paths,
+            Ok(Err(error)) => {
+                tracing::error!(id = %id, %error, "annotation images could not be stored");
+                let _ = tokio::fs::remove_dir_all(&staging).await;
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "the annotation images could not be stored",
+                )
+                    .into_response();
+            }
+            Err(_) => {
+                let _ = tokio::fs::remove_dir_all(&staging).await;
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        }
+    };
+
     let mut mgr = state.sessions.write().await;
-    match mgr.submit(
-        &id,
-        typed_notes,
-        images,
-        verdict_override,
-        stroke_data,
-        annotations,
-    ) {
-        SubmitResult::Ok => {
+    let current = mgr.get(&id).map(|s| s.version);
+    let outcome = match current {
+        Some(version) if submission.document_version.is_some_and(|v| v != version) => {
+            Err(SubmitResult::NotActive)
+        }
+        _ => {
+            let images = move_in(&staging, &annotations_dir, staged);
+            match mgr.submit(
+                &id,
+                submission.typed_notes,
+                images,
+                submission.verdict,
+                submission.stroke_data,
+                submission.annotations,
+            ) {
+                SubmitResult::Ok => Ok(()),
+                refused => Err(refused),
+            }
+        }
+    };
+    match outcome {
+        Ok(()) => {
             let webhook = mgr.get(&id).and_then(webhook_payload);
             let verdict = mgr
                 .get(&id)
@@ -1148,7 +1450,7 @@ async fn submit_review(
                 state
                     .ws_send(
                         &id,
-                        crate::ws::ServerMessage::SessionSubmitted {
+                        ServerMessage::SessionSubmitted {
                             result: Box::new(result),
                         },
                     )
@@ -1156,19 +1458,45 @@ async fn submit_review(
                 state.ws_cleanup(&id).await;
             }
             if let Some((url, body)) = webhook {
-                fire_webhook(url, body);
+                state.send_webhook(url, body);
             }
             StatusCode::OK.into_response()
         }
-        SubmitResult::NotFound => {
-            tracing::debug!(id = %id, "submit: session not found");
-            StatusCode::NOT_FOUND.into_response()
-        }
-        SubmitResult::NotActive => {
-            tracing::debug!(id = %id, "submit: session not active");
-            StatusCode::CONFLICT.into_response()
+        Err(refused) => {
+            drop(mgr);
+            let _ = tokio::fs::remove_dir_all(&staging).await;
+            match refused {
+                SubmitResult::NotFound => {
+                    tracing::debug!(id = %id, "submit: session not found");
+                    StatusCode::NOT_FOUND.into_response()
+                }
+                _ => {
+                    tracing::debug!(id = %id, "submit: session not active or document changed");
+                    StatusCode::CONFLICT.into_response()
+                }
+            }
         }
     }
+}
+
+/// Move staged images into the session's annotations directory, recording only the ones
+/// that actually arrived. A rename is a metadata change, cheap enough to do while the
+/// session is held.
+fn move_in(staging: &std::path::Path, dir: &std::path::Path, staged: Vec<String>) -> Vec<String> {
+    let mut images = Vec::with_capacity(staged.len());
+    for path in staged {
+        let from = std::path::Path::new(&path);
+        let Some(name) = from.file_name() else {
+            continue;
+        };
+        let to = dir.join(name);
+        match std::fs::rename(from, &to) {
+            Ok(()) => images.push(to.to_string_lossy().into_owned()),
+            Err(error) => tracing::error!(path, %error, "an annotation image was not kept"),
+        }
+    }
+    let _ = std::fs::remove_dir(staging);
+    images
 }
 
 async fn request_update(
@@ -1176,6 +1504,9 @@ async fn request_update(
     Path(id): Path<String>,
     Json(body): Json<SubmitReviewRequest>,
 ) -> Response {
+    if let Err(refused) = strokes_within_limits(body.annotations.iter().flat_map(|g| &g.strokes)) {
+        return refused.into_response();
+    }
     let version = {
         let mgr = state.sessions.read().await;
         match mgr.get(&id) {
@@ -1235,10 +1566,11 @@ async fn request_update(
     }
 
     tracing::info!(id = %id, version, count = annotations.len(), "annotation_result broadcast");
-    let msg = crate::ws::ServerMessage::AnnotationResult {
-        feedback_id: uuid::Uuid::new_v4().to_string(),
+    let feedback_id = uuid::Uuid::new_v4().to_string();
+    let msg = ServerMessage::AnnotationResult {
+        feedback_id: feedback_id.clone(),
         version,
-        annotations,
+        annotations: annotations.clone(),
     };
     // Persist before acknowledging or broadcasting, including when no agent is
     // connected. Reject OCR that finished after the document changed.
@@ -1253,65 +1585,69 @@ async fn request_update(
         let mgr = state.sessions.read().await;
         mgr.get(&id).and_then(|s| s.callback_url.clone())
     };
-    state.ws_send(&id, msg.clone()).await;
+    state.ws_send(&id, msg).await;
     if let Some(url) = callback_url {
-        let (feedback_id, version, annotations) = match msg {
-            crate::ws::ServerMessage::AnnotationResult {
-                feedback_id,
+        state.send_webhook(
+            url,
+            AnnotationWebhook {
+                r#type: "annotation_result",
+                id,
                 version,
+                feedback_id,
                 annotations,
-            } => (feedback_id, version, annotations),
-            _ => unreachable!(),
-        };
-        tokio::spawn(async move {
-            #[derive(serde::Serialize)]
-            struct AnnotationWebhook {
-                #[serde(rename = "type")]
-                r#type: &'static str,
-                id: String,
-                version: u32,
-                feedback_id: String,
-                annotations: Vec<crate::api::AnnotationGroup>,
-            }
-            let client = reqwest::Client::new();
-            let _ = client
-                .post(&url)
-                .json(&AnnotationWebhook {
-                    r#type: "annotation_result",
-                    id,
-                    version,
-                    feedback_id,
-                    annotations,
-                })
-                .send()
-                .await;
-        });
+            },
+        );
     }
     StatusCode::OK.into_response()
 }
 
-fn parse_json_submit(body: &[u8]) -> Result<SubmitPayload, SubmitError> {
+/// The body of the callback that carries handwritten feedback mid-review.
+#[derive(serde::Serialize)]
+struct AnnotationWebhook {
+    #[serde(rename = "type")]
+    r#type: &'static str,
+    id: String,
+    version: u32,
+    feedback_id: String,
+    annotations: Vec<AnnotationGroup>,
+}
+
+/// What a submit carries once it is parsed, before anything has touched the disk.
+struct Submission {
+    typed_notes: String,
+    images: Vec<Bytes>,
+    verdict: Option<Verdict>,
+    stroke_data: Option<serde_json::Value>,
+    annotations: Vec<AnnotationGroup>,
+    document_version: Option<u32>,
+}
+
+/// The eight bytes every PNG starts with. The images are served back as `image/png`, so
+/// what is accepted has to be one.
+const PNG_MAGIC: &[u8] = b"\x89PNG\r\n\x1a\n";
+
+fn parse_json_submit(body: &[u8]) -> Result<Submission, SubmitError> {
     let request: SubmitReviewRequest = serde_json::from_slice(body).map_err(|error| {
         (
             StatusCode::BAD_REQUEST,
             format!("invalid submit-review JSON: {error}"),
         )
     })?;
-    let verdict_override = parse_verdict_override(request.verdict)?;
-    Ok((
-        request.typed_notes,
-        Vec::new(),
-        verdict_override,
-        None,
-        request.annotations,
-    ))
+    let verdict = parse_verdict_override(request.verdict)?;
+    Ok(Submission {
+        typed_notes: request.typed_notes,
+        images: Vec::new(),
+        verdict,
+        stroke_data: None,
+        annotations: request.annotations,
+        document_version: request.document_version,
+    })
 }
 
 async fn parse_multipart_submit(
-    session: &Session,
     headers: &HeaderMap,
     body: Bytes,
-) -> Result<SubmitPayload, SubmitError> {
+) -> Result<Submission, SubmitError> {
     let content_type = content_type(headers);
     let boundary = parse_boundary(content_type).map_err(|error| {
         (
@@ -1326,7 +1662,14 @@ async fn parse_multipart_submit(
     let mut stroke_data: Option<serde_json::Value> = None;
     let mut annotations: Vec<AnnotationGroup> = Vec::new();
     let mut verdict_text: Option<String> = None;
+    let mut document_version: Option<u32> = None;
 
+    let field_error = |field: &str, error: multer::Error| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("failed to read {field}: {error}"),
+        )
+    };
     while let Some(field) = multipart.next_field().await.map_err(|error| {
         (
             StatusCode::BAD_REQUEST,
@@ -1336,47 +1679,38 @@ async fn parse_multipart_submit(
         let name = field.name().unwrap_or("").to_string();
         match name.as_str() {
             "typed_notes" => {
-                typed_notes = field.text().await.map_err(|error| {
-                    (
-                        StatusCode::BAD_REQUEST,
-                        format!("failed to read typed_notes: {error}"),
-                    )
-                })?;
+                typed_notes = field
+                    .text()
+                    .await
+                    .map_err(|e| field_error("typed_notes", e))?;
             }
             "annotation" => {
-                let data = field.bytes().await.map_err(|error| {
-                    (
+                let data = field
+                    .bytes()
+                    .await
+                    .map_err(|e| field_error("annotation", e))?;
+                if !data.starts_with(PNG_MAGIC) {
+                    return Err((
                         StatusCode::BAD_REQUEST,
-                        format!("failed to read annotation: {error}"),
-                    )
-                })?;
-                // A reader's bitmap can be a few megabytes: write it off the async worker.
-                let state_dir = session.state_dir.clone();
-                let path = tokio::task::spawn_blocking(move || {
-                    crate::session::write_annotation(&state_dir, &data)
-                })
-                .await
-                .unwrap_or_default();
-                images.push(path);
+                        "annotation is not a PNG image".into(),
+                    ));
+                }
+                images.push(data);
             }
             "stroke_data" => {
-                let text = field.text().await.map_err(|error| {
-                    (
-                        StatusCode::BAD_REQUEST,
-                        format!("failed to read stroke_data: {error}"),
-                    )
-                })?;
+                let text = field
+                    .text()
+                    .await
+                    .map_err(|e| field_error("stroke_data", e))?;
                 if !text.is_empty() {
                     stroke_data = serde_json::from_str(&text).ok();
                 }
             }
             "annotations" => {
-                let text = field.text().await.map_err(|error| {
-                    (
-                        StatusCode::BAD_REQUEST,
-                        format!("failed to read annotations: {error}"),
-                    )
-                })?;
+                let text = field
+                    .text()
+                    .await
+                    .map_err(|e| field_error("annotations", e))?;
                 if !text.is_empty() {
                     annotations = serde_json::from_str(&text).map_err(|error| {
                         (
@@ -1390,20 +1724,33 @@ async fn parse_multipart_submit(
             // carries one must not have it silently dropped, and an unusable tag must be
             // reported rather than ignored.
             "verdict" => {
-                let text = field.text().await.map_err(|error| {
+                verdict_text = Some(field.text().await.map_err(|e| field_error("verdict", e))?);
+            }
+            "document_version" => {
+                let text = field
+                    .text()
+                    .await
+                    .map_err(|e| field_error("document_version", e))?;
+                document_version = Some(text.trim().parse().map_err(|_| {
                     (
                         StatusCode::BAD_REQUEST,
-                        format!("failed to read verdict: {error}"),
+                        format!("invalid document_version: {text}"),
                     )
-                })?;
-                verdict_text = Some(text);
+                })?);
             }
             _ => {}
         }
     }
 
     let verdict = parse_verdict_override(verdict_text)?;
-    Ok((typed_notes, images, verdict, stroke_data, annotations))
+    Ok(Submission {
+        typed_notes,
+        images,
+        verdict,
+        stroke_data,
+        annotations,
+        document_version,
+    })
 }
 
 fn parse_verdict_override(verdict: Option<String>) -> Result<Option<Verdict>, SubmitError> {
@@ -1432,40 +1779,41 @@ fn bad_request(message: String) -> Response {
     (StatusCode::BAD_REQUEST, message).into_response()
 }
 
-async fn render_session(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+/// Render a session's document with `render`, off the async workers: syntect over a
+/// 10 MB review is CPU time, and every other request would wait behind it.
+async fn rendered_page(state: &AppState, id: &str, render: fn(&str, &str) -> String) -> Response {
     // Take what rendering needs and drop the lock: rendering a large document used to hold
     // the read lock, so every mutation waited behind it.
     let snapshot = {
         let mgr = state.sessions.read().await;
-        mgr.get(&id)
+        mgr.get(id)
             .map(|s| (s.content.clone(), s.id.clone(), s.version))
     };
     let Some((content, session_id, version)) = snapshot else {
         tracing::debug!(id = %id, "render: session not found");
         return StatusCode::NOT_FOUND.into_response();
     };
-    tracing::debug!(id = %id, "rendering session HTML");
-    Html(render::to_eink_html(&content, &session_id).replace(
-        "</head>",
-        &format!("<meta name=\"eink-version\" content=\"{version}\"></head>"),
-    ))
-    .into_response()
+    tracing::debug!(id = %id, "rendering HTML");
+    let rendered = tokio::task::spawn_blocking(move || {
+        // The first `</head>` is the page's; a document that mentions the tag in a code
+        // block must not grow a second version marker.
+        render(&content, &session_id).replacen(
+            "</head>",
+            &format!("<meta name=\"eink-version\" content=\"{version}\"></head>"),
+            1,
+        )
+    })
+    .await;
+    match rendered {
+        Ok(html) => Html(html).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn render_session(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    rendered_page(&state, &id, render::to_eink_html).await
 }
 
 async fn render_review(State(state): State<AppState>, Path(id): Path<String>) -> Response {
-    let snapshot = {
-        let mgr = state.sessions.read().await;
-        mgr.get(&id)
-            .map(|s| (s.content.clone(), s.id.clone(), s.version))
-    };
-    let Some((content, session_id, version)) = snapshot else {
-        tracing::debug!(id = %id, "review: session not found");
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    tracing::debug!(id = %id, "rendering browser review HTML");
-    Html(render::to_browser_html(&content, &session_id).replace(
-        "</head>",
-        &format!("<meta name=\"eink-version\" content=\"{version}\"></head>"),
-    ))
-    .into_response()
+    rendered_page(&state, &id, render::to_browser_html).await
 }

@@ -2,6 +2,7 @@ package com.flakm.einkbridge
 
 import android.graphics.Color
 import android.view.MotionEvent
+import android.view.View
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -242,6 +243,73 @@ class PenOverlayTest {
         fix.overlay.setInputEnabled(false)
         fix.overlay.onPageReady()
         fix.overlay.setMode(ToolMode.DRAW)
+        assertTrue(fix.mock.drawingEnabled)
+    }
+
+    // ── The ink view travels with the pen ───────────────────────────────────────
+    //
+    // The SDK does not paint; StrokeView does. A load hid the view and only the element-map
+    // callback showed it again -- so a bridge that never answered, or a stroke drawn while
+    // the relocation was in flight, left the pen recording into an invisible view.
+
+    @Test
+    fun aPageLoadGivesBackThePenAndTheInkViewWithoutAnElementMap() {
+        val fix = buildOverlayWithInit(withStrokeView = true)
+        val strokeView = fix.strokeView!!
+
+        fix.overlay.setInputEnabled(false)
+        assertEquals("loading hides the ink", View.INVISIBLE, strokeView.visibility)
+        assertFalse(fix.mock.drawingEnabled)
+
+        fix.overlay.onPageReady() // and no queryElementMap callback ever arrives
+        assertEquals(View.VISIBLE, strokeView.visibility)
+        assertTrue(fix.mock.drawingEnabled)
+    }
+
+    @Test
+    fun aStrokeDrawnWhileRelocationIsInFlightStaysVisible() {
+        val fix = buildOverlayWithInit(withStrokeView = true)
+        fix.overlay.setInputEnabled(false)
+        fix.overlay.onPageReady()
+
+        // The reader sketches while the reanchor round-trip is still out.
+        fix.mock.simulateStroke(listOf(10f to 20f, 30f to 40f))
+        assertEquals(1, fix.buf.size)
+        assertEquals(View.VISIBLE, fix.strokeView!!.visibility)
+        assertTrue(fix.mock.drawingEnabled)
+    }
+
+    @Test
+    fun theWatchdogAndApplyDrawingStateReadTheSameRule() {
+        // The watchdog used to recompute the rule without `contentReady`, so it could
+        // "revive" a pen the page load had deliberately taken away.
+        val fix = buildOverlayWithInit()
+        fun agree(msg: String) = assertEquals(msg, fix.overlay.shouldDraw(), fix.mock.drawingEnabled)
+
+        agree("after init")
+        fix.overlay.setInputEnabled(false)
+        assertFalse(fix.overlay.shouldDraw())
+        agree("while the page loads")
+        fix.overlay.onPaused()
+        agree("paused mid-load")
+        fix.overlay.onResumed()
+        assertFalse("a layout pause survives a resume", fix.overlay.shouldDraw())
+        agree("resumed mid-load")
+        fix.overlay.onPageReady()
+        assertTrue(fix.overlay.shouldDraw())
+        agree("page ready")
+    }
+
+    @Test
+    fun openingTheControllerRespectsAPauseAlreadyInEffect() {
+        // `open` enables raw drawing on its own; the overlay must bring the SDK back in line
+        // with its own state straight away rather than on the next unrelated event.
+        val fix = buildOverlay(limitRect = android.graphics.Rect(0, 0, 400, 600))
+        fix.overlay.onPaused()
+        fix.overlay.init()
+        assertTrue(fix.mock.isOpen)
+        assertFalse("paused before the controller opened, so the pen is off", fix.mock.drawingEnabled)
+        fix.overlay.onResumed()
         assertTrue(fix.mock.drawingEnabled)
     }
 
@@ -948,7 +1016,10 @@ class PenOverlayTest {
 
     // ── helpers ────────────────────────────────────────────────────────────────
 
-    private data class OverlayFixture(val overlay: PenOverlay, val buf: StrokeBuffer, val mock: MockPenController) {
+    private data class OverlayFixture(
+        val overlay: PenOverlay, val buf: StrokeBuffer, val mock: MockPenController,
+        val strokeView: StrokeView? = null,
+    ) {
         val webView get() = overlay.webView
     }
 
@@ -957,22 +1028,27 @@ class PenOverlayTest {
         width: Int = 400,
         height: Int = 600,
         limitRect: android.graphics.Rect? = null,
+        withStrokeView: Boolean = false,
     ): OverlayFixture {
         val buf = StrokeBuffer()
         val mock = MockPenController(buf)
+        val strokeView = if (withStrokeView) StrokeView(
+            androidx.test.core.app.ApplicationProvider.getApplicationContext<android.app.Application>()
+        ) else null
         val overlay = PenOverlay(
             webView = buildFakeWebView(width, height),
             buf = buf,
+            strokeView = strokeView,
             controllerOverride = mock,
             limitRectOverride = limitRect,
             transformOverride = { ViewTransform() },
         )
-        return OverlayFixture(overlay, buf, mock)
+        return OverlayFixture(overlay, buf, mock, strokeView)
     }
 
     /** Overlay that is already init'd (open + drawing enabled). */
-    private fun buildOverlayWithInit(): OverlayFixture {
-        val fix = buildOverlay(limitRect = android.graphics.Rect(0, 0, 400, 600))
+    private fun buildOverlayWithInit(withStrokeView: Boolean = false): OverlayFixture {
+        val fix = buildOverlay(limitRect = android.graphics.Rect(0, 0, 400, 600), withStrokeView = withStrokeView)
         fix.overlay.init()
         return fix
     }

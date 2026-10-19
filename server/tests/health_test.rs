@@ -20,6 +20,36 @@ async fn health_returns_ok() {
         serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(body["status"], "ok");
     assert!(body["exe"].is_string());
+    assert_eq!(body["problems"], serde_json::json!([]));
+    // OCR may be missing on a healthy server; the body says it is optional so a reader
+    // does not take "unavailable" for the reason something else is wrong.
+    assert_eq!(body["ready"]["ocr_optional"], true);
+}
+
+#[tokio::test]
+async fn health_is_degraded_when_the_state_dir_cannot_be_written() {
+    // A probe that always answered 200 "ok" sent the operator to the logs to learn the
+    // disk was refusing writes. The status code is what a monitor acts on.
+    let dir = tempfile::tempdir().unwrap();
+    let blocked = dir.path().join("blocked");
+    std::fs::write(&blocked, b"in the way").unwrap();
+    let app = eink_bridge::app::build_app(eink_bridge::app::AppState::with_config(blocked, 5));
+
+    let resp = app
+        .oneshot(Request::get("/api/health").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: serde_json::Value =
+        serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["status"], "degraded");
+    assert_eq!(body["ready"]["state_dir_writable"], false);
+    assert!(
+        body["problems"].as_array().is_some_and(|p| p
+            .iter()
+            .any(|p| p.as_str().unwrap_or("").contains("not writable"))),
+        "{body}"
+    );
 }
 
 #[tokio::test]

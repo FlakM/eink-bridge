@@ -143,7 +143,8 @@ class MainActivityTest {
     fun penToolbarButtonsExist() {
         scenario.onActivity { activity ->
             assertNotNull(activity.penToolbar)
-            assertNotNull(activity.strokeSlider)
+            assertNotNull(activity.btnSize)
+            assertEquals(View.GONE, activity.sizeDrawer.visibility)
         }
     }
 

@@ -62,7 +62,7 @@ Handwriting recognition uses **Ollama** with `qwen2.5vl:7b` (vision model). Tess
 | Env var | Default | Description |
 |---|---|---|
 | `EINK_OLLAMA_URL` | `http://localhost:11434` | Ollama base URL |
-| `EINK_OLLAMA_MODEL` | `glm-ocr` | Model name |
+| `EINK_OLLAMA_MODEL` | `qwen2.5vl:7b` | Model name |
 | `EINK_OCR_DEBUG` | unset | If set, saves PNG to `/tmp/eink-ocr-*.png` |
 | `EINK_OCR_TIMEOUT_SECONDS` | `120` (max 300) | Bound on one local OCR attempt |
 | `EINK_OCR_INTERACTIVE_TIMEOUT_SECONDS` | `20` (max 120) | The shorter bound for a call a reader is waiting on |
@@ -72,9 +72,10 @@ attempt before it was sent, which reads as "the model never answers".
 
 ### Timing
 
-Each OCR call logs wall time, prompt-eval time, and token-eval time at `INFO` level:
+Each OCR call logs the provider that won, whether the cache answered, and wall time at
+`INFO`; prompt-eval and token-eval timings are at `DEBUG`:
 ```
-INFO OCR complete text="WRITE A TLDR" wall_ms=1823 prompt_eval_ms=312 token_eval_ms=271
+INFO OCR complete provider="ollama" cache_hit=false wall_ms=1823
 ```
 
 Typical latency on CPU with `qwen2.5vl:7b`: 1–4 s per annotation group.
@@ -101,7 +102,16 @@ empty output for brightly coloured (e.g. pink) handwriting.
 The server binds to `0.0.0.0:3333` by default with no authentication.
 Anyone on the LAN can read sessions, submit reviews, or cancel them.
 This is acceptable for personal/home-lab use but must not be exposed to untrusted networks.
-Request body size is limited to 10 MB.
+Request body size is limited to 10 MB; one OCR or update request may carry at most 5000
+strokes and 500 000 points.
+
+What a LAN caller cannot do: read files. `/source` only serves from a checkout the server
+recorded itself, and it records one only when the session was created from a loopback
+address (the CLI on the same host). `EINK_SOURCE_ROOTS` (colon-separated directories)
+narrows that further. `callback_url` must be http or https and may not point at a
+link-local address. Raw HTML in a brief is sanitised before it reaches the page, and
+diagram payloads cannot close their own `<script>`, so a brief cannot run code in the
+page's origin.
 
 ## Task runner
 
@@ -153,13 +163,24 @@ Each API scenario produces a JSON response that is normalized (random IDs/timest
 
 ## Test layers
 
-### 1. Render unit tests -- `src/render.rs` (fastest)
+### 1. Render unit tests -- `src/render/tests.rs` (fastest)
 
-Live in `#[cfg(test)] mod tests` inside `render.rs`. Call `to_eink_html()` directly -- no HTTP, no disk, no async. Each runs in < 1ms.
+Call `to_eink_html()` directly -- no HTTP, no disk, no async. Each runs in < 1ms.
 
 ```bash
 cargo test render::tests
 ```
+
+The page's CSS and scripts are files in `server/assets/` (`eink.css`, `toc.js`,
+`bootstrap.js`, `coderef.js`, `element-map.js`) pulled in with `include_str!`, so an edit
+needs a rebuild and `just deploy` to reach the tablet. `just lint-assets` runs
+`node --check` over the scripts.
+
+Raw HTML in a brief is sanitised: `span`, `mark`, `kbd`, `sup`, `sub`, `details`,
+`summary`, `br` and inline `color`/`background-color` survive; scripts, event handlers and
+`javascript:` links do not. A brief without raw HTML renders byte-identically. Diagram
+payloads are JSON with `<`, `>` and `&` written as `<`-style escapes, which is why a
+golden shows `-->` where the source says `-->`.
 
 ### 2. HTTP integration tests -- `tests/` (fast)
 
@@ -194,7 +215,7 @@ just test-android        # Android unit tests only (no coverage)
 Use `/coverage` skill for automated analysis of gaps.
 
 Last measured: **90.8% of Rust lines** — and **~95%** of everything that is not an
-entrypoint or a benchmark. Together with 234 Android unit tests and 53 mutations all caught
+entrypoint or a benchmark. Together with 280 Android unit tests and every mutation caught
 by `just test-mutations`.
 
 Fully covered: `api.rs`, `metrics.rs`, `render/chunks.rs`, `render/browser.rs`,
@@ -211,7 +232,7 @@ be exercised in a unit test without racing every other test in the binary.
 
 | Change area | Run |
 |---|---|
-| `render.rs` CSS or HTML output | `just test-render` then `just eval` |
+| `assets/*.css`, `assets/*.js` or render HTML output | `just test-render`, `just lint-assets`, then `just eval` |
 | Annotation / highlighting / tap behaviour | `just test-render` then `just test-mutations` |
 | Snippet, diff, steps or fence handling | `cargo test render::tests::parse_chunks` / `a_snippet` / `a_line_mark` |
 | Relocating notes after an edit | `cargo test reanchor::tests` |
@@ -319,7 +340,7 @@ label values are escaped: one malformed line and the whole batch is rejected, si
 ### The tablet (`android/`)
 
 ```bash
-just test-android        # all JVM unit tests (228 of them)
+just test-android        # all JVM unit tests (280 of them)
 just coverage-android    # JaCoCo report
 ```
 
@@ -345,7 +366,8 @@ Three rules keep it honest, each learned the hard way:
 - **The final gate runs every target**, not just the library. The corruption above reached
   a commit because only `--lib` was checked at the end of the run.
 
-Add a case whenever you add an invariant.
+Add a case whenever you add an invariant. `python3 server/scripts/mutation-check.py <word>` runs only
+the cases whose label or test name contains the word, and skips the final whole-suite gate.
 
 ### Deployment gap
 
@@ -427,15 +449,17 @@ When adding a new feature to `render.rs`:
 
 The server binds `0.0.0.0:3333` with no auth (see Security notes). That was acceptable
 while the API was effectively read-only; it now includes a destructive `remove` and
-`/metrics`. A token for non-local callers is the obvious next step, and it has a cost: the
-tablet would have to carry it.
+`/metrics`. File reads and callbacks are fenced (loopback-only checkouts, validated
+`callback_url`), but anyone on the LAN can still read, edit, submit or remove a review. A
+token for non-local callers is the obvious next step, and it has a cost: the tablet would
+have to carry it.
 
-### A crash between the write and the response still loses that one write
+### A SIGKILL between the write and the response still loses that one write
 
-Writes are queued so the session lock is never held during disk I/O, and a successful
-*mutation* response waits for the write to land before it is sent. A SIGKILL inside that
-window loses the last change — the one the client was about to be told had landed. The
-window is one handler rather than the whole queue, but it is not zero.
+Writes are queued, land atomically (temp file, fsync, rename), a failed write turns the
+mutation into a 500, and SIGTERM drains the queue before exit. What is left is a SIGKILL
+or power loss inside one handler's window: the change the client was about to be told had
+landed. The window is one handler rather than the whole queue, but it is not zero.
 
 ### `annotation_images` are machine paths
 
@@ -457,31 +481,14 @@ Every waiting request parks a task and a `Notify` for up to `long_poll_seconds` 
 default), and the notifier is cleaned up on submit, cancel and expiry. Fine for a handful
 of observers; it would need a rethink for hundreds.
 
-### No server-side WebSocket heartbeat
+### Directory removal still runs under the lock
 
-The CLI sends pings every 30 s, but the server's `handle_ws` has no periodic
-ping. Intermediate proxies or NAT can silently drop idle connections without
-either side noticing until the next message fails.
+Session writes are queued and land in `spawn_blocking`, but `remove_dir_all` in `delete`
+and `purge_finished` still runs inside the write guard. A purge of hundreds of sessions
+stalls every other mutation for its duration.
 
-### Disk I/O under write lock
+### OCR timeouts are per process, not per session
 
-`SessionManager::persist()` does synchronous `fs::write` inside the `RwLock`
-write guard. Under high concurrency, every mutation (create, update, star,
-submit) serialises on disk I/O. Acceptable at current scale (single user);
-would need async write or write-behind buffer if concurrency grows.
-
-### No pagination on list sessions
-
-`GET /api/sessions` returns every session in one JSON array. Fine for dozens
-of sessions; will blow up response size if sessions accumulate over months
-without purging.
-
-### Startup panics
-
-`main.rs` uses `.unwrap()` on `TcpListener::bind` and `axum::serve`. A port
-conflict gives a raw panic trace instead of a human-readable error.
-
-### OCR timeout not tunable per session
-
-The Ollama HTTP client has a global 120 s timeout. There's no way to set a
-shorter timeout for fast-fail or a longer one for complex images.
+`EINK_OCR_TIMEOUT_SECONDS` and `EINK_OCR_INTERACTIVE_TIMEOUT_SECONDS` bound every call the
+same way. A session cannot ask for a longer budget for a dense page or a shorter one for a
+quick margin note.

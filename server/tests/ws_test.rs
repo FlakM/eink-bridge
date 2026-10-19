@@ -336,9 +336,10 @@ async fn an_unreadable_message_does_not_break_the_connection() {
 }
 
 #[tokio::test]
-async fn a_submitted_session_replays_nothing_to_a_late_watcher() {
-    // Replaying an update to a session that is already finished would look like the
-    // review was reopened.
+async fn a_late_watcher_of_a_finished_review_is_told_how_it_ended() {
+    // `eink-review push` reconnects whenever its socket drops. Reconnecting after the
+    // review was submitted used to get silence -- no stale update, which is right, but
+    // no result either -- so the CLI sat there until its own thirty-minute deadline.
     let (url, _handle) = start_server().await;
     let id = create_session(&url).await;
 
@@ -351,7 +352,7 @@ async fn a_submitted_session_replays_nothing_to_a_late_watcher() {
         .unwrap();
     reqwest::Client::new()
         .post(format!("{url}/api/sessions/{id}/submit"))
-        .json(&json!({"typed_notes": "done"}))
+        .json(&json!({"typed_notes": "LGTM done"}))
         .send()
         .await
         .unwrap();
@@ -359,9 +360,39 @@ async fn a_submitted_session_replays_nothing_to_a_late_watcher() {
     let (mut ws, _) = connect_async(ws_url(&url, &format!("/ws/{id}")))
         .await
         .unwrap();
-    let quiet = tokio::time::timeout(Duration::from_millis(400), ws.next()).await;
-    assert!(
-        quiet.is_err() || quiet.unwrap().is_none(),
-        "a finished session should not replay a stale update"
+    let msg = next_text(&mut ws).await;
+    assert_eq!(
+        msg["type"], "session_submitted",
+        "the result, not the stale update: {msg}"
     );
+    assert_eq!(msg["result"]["status"], "Submitted");
+    assert_eq!(msg["result"]["verdict"], "lgtm");
+    let closed = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            match ws.next().await {
+                Some(Ok(Message::Text(text))) => panic!("nothing more should follow: {text}"),
+                Some(Ok(Message::Close(_))) | None => break,
+                _ => {}
+            }
+        }
+    })
+    .await;
+    assert!(
+        closed.is_ok(),
+        "the server closes the socket once the review is over"
+    );
+
+    // A cancelled review says so, in the words the live path uses.
+    let cancelled = create_session(&url).await;
+    reqwest::Client::new()
+        .delete(format!("{url}/api/sessions/{cancelled}"))
+        .send()
+        .await
+        .unwrap();
+    let (mut ws, _) = connect_async(ws_url(&url, &format!("/ws/{cancelled}")))
+        .await
+        .unwrap();
+    let msg = next_text(&mut ws).await;
+    assert_eq!(msg["type"], "error");
+    assert_eq!(msg["message"], "session cancelled");
 }

@@ -1,0 +1,648 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html {
+    background: #ededed;
+    margin: 0;
+    padding: 0;
+}
+body {
+    font-family: Georgia, 'Times New Roman', serif;
+    font-size: 18px;
+    line-height: 1.6;
+    color: #000;
+    background: #ededed;
+    width: 2400px;
+    min-height: 100vh;
+    padding: 0;
+    margin: 0;
+}
+#content {
+    background: #fff;
+    width: 992px;
+    max-width: 992px;
+    margin: 0 auto 800px auto;
+    padding: 24px 56px;
+    min-height: 100vh;
+}
+#toc {
+    border: 2px solid #111;
+    background: #fafafa;
+    padding: 16px 12px;
+    margin: 0 0 24px;
+    font-size: 15px;
+    line-height: 1.5;
+}
+#toc.collapsed { display: none; }
+#toc-toggle {
+    border: 2px solid #111;
+    background: #fff;
+    color: #111;
+    padding: 8px 16px;
+    font-size: 16px;
+    font-weight: bold;
+    cursor: pointer;
+    margin: 0 0 16px;
+}
+#toc h3 {
+    font-size: 16px;
+    margin: 0 0 8px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid #ccc;
+}
+#toc a {
+    display: block;
+    padding: 4px 0 4px 0;
+    color: #111;
+    text-decoration: none;
+    border-bottom: 1px solid #eee;
+}
+#toc a.toc-h1 { padding-left: 0; font-weight: 700; font-size: 16px; }
+#toc a.toc-h2 { padding-left: 12px; font-weight: 600; }
+#toc a.toc-h3 { padding-left: 28px; font-weight: normal; color: #444; }
+#toc a:active { background: #e0e0e0; }
+h1 { font-size: 28px; margin: 24px 0 12px; border-bottom: 2px solid #000; padding-bottom: 6px; }
+h2 { font-size: 24px; margin: 20px 0 10px; }
+h3 { font-size: 20px; font-weight: bold; margin: 16px 0 6px; }
+p { margin: 10px 0; }
+code {
+    /* Boox renders through an Android WebView: Courier New is not installed there and
+       falls back to a thin substitute. Name real Android mono faces, then 'monospace'. */
+    font-family: 'Roboto Mono', 'Droid Sans Mono', 'DejaVu Sans Mono', monospace;
+    font-size: 16px;
+    /* E-ink washes out thin strokes, so code carries real weight. */
+    font-weight: 700;
+    background: #ffffff;
+    padding: 2px 5px;
+    border: 1px solid #999;
+    border-radius: 3px;
+}
+pre {
+    /* A grey fill reads as dirt on e-ink and costs a refresh; paper white with a rule
+       delimits the block just as clearly. Long lines wrap: a horizontal scrollbar is
+       unreachable with a pen. */
+    background: #ffffff;
+    border: 1px solid #b8b8b8;
+    border-left: 3px solid #6b6b6b;
+    padding: 12px 14px;
+    margin: 16px 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    tab-size: 4;
+}
+pre code {
+    border: none;
+    padding: 0;
+    background: none;
+    font-family: 'Roboto Mono', 'Droid Sans Mono', 'DejaVu Sans Mono', monospace;
+    /* One point above body text: monospace has no ascender slack, so equal px reads
+       smaller than the prose around it. */
+    font-size: 19px;
+    font-weight: 700;
+    line-height: 1.55;
+    letter-spacing: 0.2px;
+    tab-size: 4;
+}
+blockquote {
+    border-left: 3px solid #333;
+    padding-left: 16px;
+    margin: 16px 0;
+    color: #333;
+}
+ul, ol { margin: 12px 0; padding-left: 24px; }
+li { margin: 4px 0; }
+table { border-collapse: collapse; width: 100%; margin: 16px 0; }
+th, td { border: 1px solid #333; padding: 8px 12px; text-align: left; }
+th { font-weight: bold; background: #f0f0f0; }
+img { max-width: 100%; height: auto; }
+a { color: #000; text-decoration: underline; }
+hr { border: none; border-top: 1px solid #333; margin: 24px 0; }
+.diagram-block {
+    margin: 28px 0;
+    border: 2px solid #888;
+    border-radius: 10px;
+    background: #fff;
+    /* No overflow:hidden. It clipped the annotation outline of any element inside the
+       block (the notes panel holds a <pre>), and the header rounds its own corners. */
+}
+.diagram-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px;
+    padding: 11px 16px;
+    border-bottom: 1px solid #c0c0c0;
+    background: #f0f0f0;
+    border-radius: 8px 8px 0 0;
+    font-size: 17px;
+    font-weight: 700;
+    line-height: 1.4;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: #222;
+}
+.diagram-body {
+    min-height: 200px;
+    padding: 16px;
+}
+.diagram-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+.diagram-toolbar,
+.diagram-legend,
+.diagram-details {
+    border: 1px solid #b0b0b0;
+    background: #f6f6f6;
+    border-radius: 6px;
+    padding: 14px;
+}
+.diagram-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+}
+.diagram-toolbar button {
+    border: 2px solid #444;
+    border-radius: 6px;
+    background: #fff;
+    color: #111;
+    padding: 8px 14px;
+    font-size: 18px;
+    cursor: pointer;
+}
+.diagram-toolbar-label {
+    font-size: 18px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: #111;
+}
+.diagram-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 16px;
+    align-items: center;
+}
+.diagram-legend-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 18px;
+    color: #111;
+}
+.diagram-legend-swatch {
+    width: 38px;
+    height: 20px;
+    border: 2px solid #333;
+    border-radius: 4px;
+    background: #fff;
+}
+.diagram-details-title {
+    font-size: 22px;
+    font-weight: 700;
+    margin-bottom: 10px;
+    color: #111;
+}
+.diagram-details-grid {
+    display: grid;
+    grid-template-columns: 130px 1fr;
+    gap: 8px 14px;
+    font-size: 18px;
+    color: #111;
+}
+.diagram-details-grid dt {
+    font-weight: 700;
+}
+.diagram-details-grid dd {
+    margin: 0;
+    word-break: break-word;
+}
+.diagram-details-notes {
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px solid #b0b0b0;
+    font-size: 20px;
+    line-height: 1.5;
+    color: #111;
+}
+.diagram-details-notes > *:first-child {
+    margin-top: 0;
+}
+.diagram-details-notes > *:last-child {
+    margin-bottom: 0;
+}
+.diagram-details-notes code {
+    font-family: 'Courier New', monospace;
+    font-size: 18px;
+    background: #ececec;
+    border: 1px solid #888;
+    padding: 1px 6px;
+    border-radius: 3px;
+    color: #111;
+}
+.diagram-details-notes pre {
+    background: #ececec;
+    border: 1px solid #888;
+    padding: 10px;
+    margin: 10px 0;
+    border-radius: 4px;
+    /* Wraps instead of scrolling: a pen cannot drag a scrollbar, and overflow-x
+       also clips the annotation outline of this <pre>. */
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+.diagram-details-notes pre code {
+    font-size: 18px;
+    background: none;
+    border: none;
+    padding: 0;
+}
+.diagram-details-notes p {
+    margin: 6px 0;
+}
+.diagram-details-notes ul,
+.diagram-details-notes ol {
+    padding-left: 22px;
+}
+.diagram-source,
+.diagram-error {
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 18px;
+    line-height: 1.5;
+}
+.diagram-error {
+    border: 2px solid #111;
+    background: #f6f6f6;
+}
+.diagram-placeholder {
+    font-size: 20px;
+    color: #333;
+}
+.mindmap-shell {
+    display: flex;
+    gap: 16px;
+    align-items: stretch;
+}
+.mindmap-main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+.mindmap-index {
+    width: 300px;
+    max-width: 300px;
+    border-right: 1px solid #888;
+    padding-right: 12px;
+}
+.mindmap-index[hidden] {
+    display: none;
+}
+.mindmap-index-item {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    border: 2px solid transparent;
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin: 4px 0;
+    color: #111;
+    font-size: 19px;
+    cursor: pointer;
+}
+.mindmap-index-item.is-active {
+    border-color: #222;
+    background: #e8e8e8;
+    font-weight: 700;
+}
+.mindmap-viewport {
+    flex: 1;
+    min-height: 520px;
+    overflow: auto;
+    border: 1px solid #888;
+    border-radius: 6px;
+    background: #fdfdfd;
+}
+.mindmap-canvas {
+    display: block;
+    width: 100%;
+    height: auto;
+    max-height: 1400px;
+}
+.graph-canvas {
+    display: block;
+    width: 100%;
+    height: auto;
+    max-height: 1400px;
+}
+.mindmap-node {
+    cursor: pointer;
+}
+.mindmap-node rect {
+    fill: #fff;
+    stroke: #111;
+    stroke-width: 3;
+}
+.mindmap-node text, .mindmap-node-text {
+    fill: #111;
+    font-family: Georgia, 'Times New Roman', serif;
+    font-size: 20px;
+    font-weight: 600;
+    text-anchor: middle;
+}
+.mindmap-node-badge rect,
+.graph-node-badge rect {
+    fill: #222;
+    stroke: #222;
+    stroke-width: 1;
+}
+.mindmap-node-badge text,
+.graph-node-badge text {
+    fill: #fff;
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-anchor: middle;
+    text-transform: uppercase;
+}
+.graph-node-kind,
+.mindmap-node-kind {
+    fill: #444;
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-anchor: middle;
+    font-style: italic;
+}
+.mindmap-node.is-active rect {
+    stroke-width: 5;
+}
+.mindmap-node-toggle {
+    cursor: pointer;
+}
+.mindmap-node-toggle rect {
+    fill: #222;
+    stroke: #222;
+    stroke-width: 1;
+}
+.mindmap-node-toggle text {
+    fill: #fff;
+    font-size: 22px;
+    font-weight: bold;
+    text-anchor: middle;
+}
+.mindmap-node-info circle {
+    fill: #1a4d8f;
+    stroke: #fff;
+    stroke-width: 2;
+}
+.mindmap-node-info text {
+    fill: #fff;
+    font-family: Georgia, 'Times New Roman', serif;
+    font-size: 20px;
+    font-weight: 700;
+    font-style: italic;
+    text-anchor: middle;
+}
+.mindmap-edge {
+    fill: none;
+    stroke: #333;
+    stroke-width: 3;
+}
+.graph-viewport {
+    min-height: 540px;
+    overflow: auto;
+    border: 1px solid #888;
+    border-radius: 6px;
+    background: #fdfdfd;
+}
+.graph-shell {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+.graph-node rect {
+    fill: #fff;
+    stroke: #111;
+    stroke-width: 3;
+    rx: 12;
+    ry: 12;
+}
+.graph-node text {
+    fill: #111;
+    font-family: Georgia, 'Times New Roman', serif;
+    font-size: 20px;
+    font-weight: 600;
+    text-anchor: middle;
+}
+.graph-node.is-active rect {
+    stroke-width: 5;
+}
+.graph-edge {
+    fill: none;
+    stroke: #222;
+    stroke-width: 3;
+}
+.graph-edge-label {
+    font-size: 22px;
+    fill: #111;
+    font-style: italic;
+    font-weight: 700;
+    text-anchor: middle;
+    paint-order: stroke;
+    stroke: #fff;
+    stroke-width: 7px;
+    stroke-linejoin: round;
+}
+.eink-muted {
+    color: #333;
+}
+.diagram-unsupported {
+    font-size: 20px;
+    color: #222;
+}
+/* A reference the reader can tap: `path:line` in prose. It is a pill rather than a link,
+   because a URL on the tablet is neither short nor useful. */
+.coderef {
+  font-family: 'Roboto Mono', 'Droid Sans Mono', 'DejaVu Sans Mono', monospace;
+  font-size: 0.92em;
+  color: #000;
+  background: #fff;
+  border: 1.5px solid #000;
+  border-radius: 5px;
+  padding: 1px 7px;
+  cursor: pointer;
+}
+.coderef[data-open="1"] { background: #000; color: #fff; }
+.coderef-wrap { margin: 10px 0 18px; }
+.coderef-caption {
+  font-family: 'Roboto Mono', 'Droid Sans Mono', 'DejaVu Sans Mono', monospace;
+  font-size: 14px;
+  font-weight: 700;
+  color: #333;
+  margin-bottom: 4px;
+}
+.coderef-note { font-size: 15px; color: #555; margin: 4px 0 0; }
+
+.snippet-block {
+  margin: 16px 0;
+  border: 1px solid #d0d0d0;
+  border-radius: 4px;
+  /* No overflow:hidden: the annotation highlight is an outline drawn outside the
+     element box, and clipping the wrapper hides it, so annotating code looked broken. */
+}
+.snippet-block figcaption {
+  font-family: 'Roboto Mono', 'Droid Sans Mono', 'DejaVu Sans Mono', monospace;
+  font-size: 14px;
+  font-weight: 700;
+  color: #333;
+  background: #f4f4f4;
+  border-bottom: 1px solid #e0e0e0;
+  padding: 6px 10px;
+}
+.snippet-block pre { margin: 0; }
+.snippet-block mark.snippet-hit {
+  background: #efe6b8;
+  box-shadow: inset 4px 0 0 #7a6410;
+  font-weight: 700;
+  display: block;
+}
+.steps-block {
+  margin: 16px 0;
+  border: 1px solid #d0d0d0;
+  border-radius: 4px;
+}
+.steps-list {
+  list-style: none;
+  margin: 0;
+  padding: 12px 14px;
+  /* Taps belong to the pen: they select and bind elements. Only the controls below
+     advance the sequence, so stepping never competes with annotating. */
+  pointer-events: none;
+  counter-reset: step;
+}
+.steps-list li {
+  counter-increment: step;
+  padding: 8px 0 8px 34px;
+  position: relative;
+  opacity: 1;
+}
+/* Only the not-yet-reached steps recede, and only once the page has marked them, so a
+   reader without script sees every step at full strength rather than a faint list. */
+.steps-list li[data-state="todo"] { opacity: 0.35; }
+.steps-list li[data-state="current"]::before { background: #1a1a1a; color: #fff; }
+.steps-list li::before {
+  content: counter(step);
+  position: absolute;
+  left: 0;
+  top: 8px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #eee;
+  color: #444;
+  font-size: 13px;
+  text-align: center;
+  line-height: 22px;
+}
+.step-title { display: block; font-weight: 600; }
+.step-detail { display: block; font-size: 15px; color: #444; }
+.steps-controls { padding: 0 14px 12px; display: flex; gap: 8px; }
+.steps-controls button { pointer-events: auto; }
+.steps-controls button {
+  font-size: 15px;
+  padding: 6px 12px;
+  border: 1px solid #bbb;
+  border-radius: 3px;
+  background: #fff;
+}
+.diff-block {
+    font-family: 'Roboto Mono', 'Droid Sans Mono', monospace;
+    font-size: 17px;
+    line-height: 1.5;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    margin: 16px 0;
+    /* Wrap rather than scroll or clip: a diff cannot be scrolled with a pen, and an
+       outline highlight must be able to escape the block. */
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+.diff-add {
+    border-left: 6px solid #2a2;
+    padding-left: 8px;
+    background: #f6fff6;
+}
+.diff-del {
+    border-left: 6px solid #c33;
+    padding-left: 8px;
+    background: #fff6f6;
+}
+.diff-hunk {
+    color: #333;
+    font-style: italic;
+    padding-left: 8px;
+    border-left: 6px solid #777;
+}
+.diff-ctx {
+    padding-left: 14px;
+}
+@media (max-width: 1200px) {
+    .mindmap-shell {
+        flex-direction: column;
+    }
+    .mindmap-index {
+        width: auto;
+        max-width: none;
+        border-right: none;
+        border-bottom: 1px solid #bbb;
+        padding-right: 0;
+        padding-bottom: 12px;
+    }
+    .diagram-details-grid {
+        grid-template-columns: 1fr;
+    }
+}
+.eink-anchored {
+    border-left: 4px dashed #1a4d8f;
+    background: #ebf0f6;
+    padding-left: 12px;
+}
+.eink-link-badge {
+    position: absolute;
+    top: -14px;
+    right: -14px;
+    min-width: 30px;
+    height: 30px;
+    border-radius: 15px;
+    border: 2px solid #fff;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 16px;
+    font-weight: 700;
+    font-family: 'Courier New', monospace;
+    color: #fff;
+    z-index: 100;
+    padding: 0 7px;
+    pointer-events: none;
+}
+.eink-link-pulse {
+    outline: 4px solid #1a4d8f;
+    outline-offset: 2px;
+}
+.eink-link-popup {
+    position: absolute;
+    z-index: 9999;
+    background: #fff;
+    border: 2px solid #111;
+    padding: 10px 14px;
+    font-family: Georgia, 'Times New Roman', serif;
+    font-size: 20px;
+    line-height: 1.5;
+    max-width: 600px;
+    pointer-events: none;
+}

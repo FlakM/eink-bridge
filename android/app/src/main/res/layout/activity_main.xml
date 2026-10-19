@@ -155,37 +155,29 @@
         android:accessibilityLiveRegion="polite"
         android:visibility="gone" />
 
-    <!-- Color drawer: sits above toolbar, hidden by default -->
+    <!-- Popovers: each opens above its own button, which positions it when it is shown -->
+    <LinearLayout
+        android:id="@+id/sizeDrawer"
+        style="@style/Widget.Popover" />
+
     <LinearLayout
         android:id="@+id/colorDrawer"
-        android:layout_width="wrap_content"
-        android:layout_height="48dp"
-        android:layout_gravity="bottom|start"
-        android:layout_marginBottom="72dp"
-        android:layout_marginStart="8dp"
-        android:orientation="horizontal"
-        android:gravity="center_vertical"
-        android:background="#FFFFFF"
-        android:elevation="6dp"
-        android:paddingStart="8dp"
-        android:paddingEnd="8dp"
-        android:visibility="gone" />
+        style="@style/Widget.Popover" />
 
-    <!-- Toolbar -->
+    <!-- Toolbar: tools | modes | (context) | view | spacer | edit | commit -->
     <LinearLayout
         android:id="@+id/penToolbar"
         android:layout_width="match_parent"
-        android:layout_height="72dp"
+        android:layout_height="@dimen/toolbar_height"
         android:layout_gravity="bottom"
         android:orientation="horizontal"
-        android:background="#FFFFFF"
-        android:elevation="4dp"
+        android:background="@drawable/toolbar_background"
         android:gravity="center_vertical"
-        android:paddingStart="8dp"
-        android:paddingEnd="8dp"
+        android:paddingStart="@dimen/toolbar_padding"
+        android:paddingEnd="@dimen/toolbar_padding"
         android:visibility="gone">
 
-        <!-- DRAW CONTROLS: hidden in Tag and Move modes -->
+        <!-- TOOLS: hidden in Tag and Move modes -->
         <LinearLayout
             android:id="@+id/drawControls"
             android:layout_width="wrap_content"
@@ -193,172 +185,131 @@
             android:orientation="horizontal"
             android:gravity="center_vertical">
 
-            <SeekBar
-                android:id="@+id/strokeSlider"
-                android:layout_width="160dp"
-                android:layout_height="48dp"
-                android:layout_gravity="center_vertical"
-                android:min="1"
-                android:max="20"
-                android:progress="5"
-                android:thumbTint="#000000"
-                android:progressTint="#000000"
-                android:progressBackgroundTint="#CCCCCC" />
+            <LinearLayout style="@style/Widget.ToolGroup">
 
-            <View
-                android:layout_width="2dp"
-                android:layout_height="48dp"
-                android:layout_marginStart="8dp"
-                android:layout_marginEnd="4dp"
-                android:background="#999999" />
-
-            <FrameLayout
-                android:layout_width="60dp"
-                android:layout_height="64dp">
                 <ImageButton
-                android:id="@+id/btnPencil"
-                style="@style/Widget.ToolButton"
-                android:contentDescription="@string/btnPencil_desc"
-                android:src="@drawable/ic_pencil" />
-            </FrameLayout>
+                    android:id="@+id/btnPencil"
+                    style="@style/Widget.ToolButton"
+                    android:contentDescription="@string/btnPencil_desc"
+                    android:src="@drawable/ic_pencil" />
 
-            <FrameLayout
-                android:layout_width="60dp"
-                android:layout_height="64dp">
                 <ImageButton
-                android:id="@+id/btnBrush"
-                style="@style/Widget.ToolButton"
-                android:contentDescription="@string/btnBrush_desc"
-                android:src="@drawable/ic_brush" />
-            </FrameLayout>
+                    android:id="@+id/btnBrush"
+                    style="@style/Widget.ToolButton"
+                    android:contentDescription="@string/btnBrush_desc"
+                    android:src="@drawable/ic_brush" />
 
-            <FrameLayout
-                android:layout_width="60dp"
-                android:layout_height="64dp">
                 <ImageButton
-                android:id="@+id/btnEraser"
-                style="@style/Widget.ToolButton"
-                android:contentDescription="@string/btnEraser_desc"
-                android:src="@drawable/ic_eraser" />
-            </FrameLayout>
+                    android:id="@+id/btnEraser"
+                    style="@style/Widget.ToolButton"
+                    android:contentDescription="@string/btnEraser_desc"
+                    android:src="@drawable/ic_eraser" />
 
-            <ImageButton
-                android:id="@+id/btnColor"
-                style="@style/Widget.ToolButton"
-                android:contentDescription="@string/btnColor_desc"
-                android:src="@drawable/ic_color" />
+                <ImageButton
+                    android:id="@+id/btnSize"
+                    style="@style/Widget.ToolButton"
+                    android:contentDescription="@string/btnSize_desc"
+                    android:src="@drawable/ic_stroke_width" />
 
+                <ImageButton
+                    android:id="@+id/btnColor"
+                    style="@style/Widget.ToolButton"
+                    android:contentDescription="@string/btnColor_desc"
+                    android:src="@drawable/ic_color" />
+            </LinearLayout>
+
+            <View style="@style/Widget.ToolbarRule" />
         </LinearLayout>
 
-        <!-- DIVIDER: between draw controls and mode buttons -->
-        <View
-            android:layout_width="2dp"
-            android:layout_height="48dp"
-            android:layout_marginStart="8dp"
-            android:layout_marginEnd="4dp"
-            android:background="#CCCCCC" />
+        <!-- MODES: lasso a group of strokes to text, or move a group -->
+        <LinearLayout style="@style/Widget.ToolGroup">
 
-        <!-- TAG MODE: draw a lasso gesture to create an annotation group -->
-        <FrameLayout
-            android:layout_width="60dp"
-            android:layout_height="64dp">
             <ImageButton
                 android:id="@+id/btnLink"
                 style="@style/Widget.ToolButton"
                 android:contentDescription="@string/btnLink_desc"
                 android:src="@drawable/ic_lasso" />
-        </FrameLayout>
 
-        <!-- MOVE MODE: tap and drag annotation groups or labels to reposition -->
-        <FrameLayout
-            android:layout_width="60dp"
-            android:layout_height="64dp">
             <ImageButton
                 android:id="@+id/btnSelect"
                 style="@style/Widget.ToolButton"
                 android:contentDescription="@string/btnSelect_desc"
                 android:src="@drawable/ic_move" />
-        </FrameLayout>
+        </LinearLayout>
 
-        <!-- CONTEXT BAR: shown when a group is selected in Move mode -->
+        <!-- CONTEXT: shown when a group is selected in Move mode -->
         <LinearLayout
             android:id="@+id/contextBar"
             android:layout_width="wrap_content"
             android:layout_height="match_parent"
             android:orientation="horizontal"
             android:gravity="center_vertical"
-            android:layout_marginStart="4dp"
             android:visibility="gone">
 
-            <Button
-                android:id="@+id/btnReOcr"
-                style="?android:attr/buttonBarButtonStyle"
-                android:layout_width="wrap_content"
-                android:layout_height="48dp"
-                android:text="↺ Re-OCR"
-                android:textSize="15sp"
-                android:textColor="#000000"
-                android:paddingStart="12dp"
-                android:paddingEnd="12dp" />
+            <View style="@style/Widget.ToolbarRule" />
 
-            <Button
-                android:id="@+id/btnRemoveGroup"
-                style="?android:attr/buttonBarButtonStyle"
-                android:layout_width="wrap_content"
-                android:layout_height="48dp"
-                android:text="✕ Remove"
-                android:textSize="15sp"
-                android:textColor="#CC0000"
-                android:paddingStart="12dp"
-                android:paddingEnd="12dp" />
+            <LinearLayout style="@style/Widget.ToolGroup">
 
+                <ImageButton
+                    android:id="@+id/btnReOcr"
+                    style="@style/Widget.ToolButton"
+                    android:contentDescription="@string/btnReOcr_desc"
+                    android:src="@drawable/ic_refresh" />
+
+                <ImageButton
+                    android:id="@+id/btnRemoveGroup"
+                    style="@style/Widget.ToolButton"
+                    android:contentDescription="@string/btnRemoveGroup_desc"
+                    android:src="@drawable/ic_delete" />
+            </LinearLayout>
         </LinearLayout>
 
-        <!-- FLEX SPACER -->
+        <View style="@style/Widget.ToolbarRule" />
+
+        <!-- VIEW -->
+        <ImageButton
+            android:id="@+id/btnAnnotations"
+            style="@style/Widget.ToolButton"
+            android:contentDescription="@string/btnAnnotations_desc"
+            android:src="@drawable/ic_visibility" />
+
         <View
+            android:id="@+id/toolbarSpacer"
             android:layout_width="0dp"
             android:layout_height="1dp"
             android:layout_weight="1" />
 
-        <!-- ANNOTATIONS TOGGLE: view toggle, right-aligned away from mode buttons -->
-        <FrameLayout
-            android:layout_width="52dp"
-            android:layout_height="64dp">
+        <!-- EDIT -->
+        <LinearLayout style="@style/Widget.ToolGroup">
+
             <ImageButton
-                android:id="@+id/btnAnnotations"
-                style="@style/Widget.ToolButton"
-                android:contentDescription="@string/btnAnnotations_desc"
-                android:src="@drawable/ic_visibility" />
-        </FrameLayout>
-
-        <View
-            android:layout_width="2dp"
-            android:layout_height="48dp"
-            android:layout_marginStart="4dp"
-            android:layout_marginEnd="4dp"
-            android:background="#999999" />
-
-        <ImageButton
                 android:id="@+id/btnUndo"
                 style="@style/Widget.ToolButton"
                 android:contentDescription="@string/btnUndo_desc"
                 android:src="@drawable/ic_undo" />
 
-        <ImageButton
+            <ImageButton
                 android:id="@+id/btnClear"
                 style="@style/Widget.ToolButton"
                 android:contentDescription="@string/btnClear_desc"
                 android:src="@drawable/ic_clear" />
+        </LinearLayout>
 
-        <androidx.appcompat.widget.AppCompatButton
-            android:id="@+id/btnRequestUpdate"
-            style="@style/Widget.ActionButton"
-            android:text="@string/action_update" />
+        <View style="@style/Widget.ToolbarRule" />
 
-        <androidx.appcompat.widget.AppCompatButton
-            android:id="@+id/btnSubmit"
-            style="@style/Widget.ActionButton.Primary"
-            android:text="@string/action_done" />
+        <!-- COMMIT -->
+        <LinearLayout style="@style/Widget.ToolGroup">
+
+            <androidx.appcompat.widget.AppCompatButton
+                android:id="@+id/btnRequestUpdate"
+                style="@style/Widget.ActionButton"
+                android:text="@string/action_update" />
+
+            <androidx.appcompat.widget.AppCompatButton
+                android:id="@+id/btnSubmit"
+                style="@style/Widget.ActionButton.Primary"
+                android:text="@string/action_done" />
+        </LinearLayout>
     </LinearLayout>
 
     <!-- Processing overlay: shown while OCR / agent update is in flight -->

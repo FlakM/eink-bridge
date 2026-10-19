@@ -96,7 +96,7 @@ async fn e2e_with_image() {
 
     // Create a tiny PNG-like test file
     let img_tmp = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(img_tmp.path(), b"FAKE_PNG_DATA").unwrap();
+    std::fs::write(img_tmp.path(), b"\x89PNG\r\n\x1a\nFAKE_PNG_DATA").unwrap();
 
     let doc_tmp = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(doc_tmp.path(), "# Image E2E\n\nWith attachment").unwrap();

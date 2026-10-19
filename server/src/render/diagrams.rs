@@ -82,9 +82,10 @@ pub(crate) fn render_diagram(kind: &str, source: &str) -> String {
     };
 
     let payload = DiagramPayload { kind, source, data };
-    let payload_json = serde_json::to_string(&payload)
-        .unwrap_or_else(|_| json!({ "kind": kind, "source": source }).to_string())
-        .replace("</script>", "<\\/script>");
+    let payload_json = json_for_script(
+        &serde_json::to_string(&payload)
+            .unwrap_or_else(|_| json!({ "kind": kind, "source": source }).to_string()),
+    );
 
     format!(
         r#"<section class="diagram-block" data-kind="{kind}">
@@ -96,6 +97,15 @@ pub(crate) fn render_diagram(kind: &str, source: &str) -> String {
         label = diagram_label(kind),
         payload_json = payload_json,
     )
+}
+
+/// JSON that can sit inside a `<script>` whatever the source says. The HTML parser ends a
+/// script at any case or spacing of `</script`, so the three characters that could spell
+/// a tag are written as JSON escapes, which `JSON.parse` reads back unchanged.
+fn json_for_script(json: &str) -> String {
+    json.replace('&', "\\u0026")
+        .replace('<', "\\u003c")
+        .replace('>', "\\u003e")
 }
 
 pub(crate) fn diagram_label(kind: &str) -> &str {
@@ -358,7 +368,7 @@ pub(crate) fn render_steps(source: &str) -> String {
             }
         })
         .collect();
-    let payload = serde_json::json!({ "kind": "steps", "count": items.len() }).to_string();
+    let payload = json_for_script(&json!({ "kind": "steps", "count": items.len() }).to_string());
     let noun = if steps.len() == 1 { "step" } else { "steps" };
     format!(
         r#"<section class="steps-block" data-kind="steps">

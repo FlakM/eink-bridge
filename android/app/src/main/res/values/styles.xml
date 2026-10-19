@@ -6,22 +6,52 @@
       a shadow is a grey smudge and an animation is a repaint.
 -->
     <style name="Widget.ToolButton" parent="Widget.AppCompat.ImageButton">
-        <item name="android:layout_width">64dp</item>
-        <item name="android:layout_height">64dp</item>
+        <item name="android:layout_width">@dimen/tool_button_size</item>
+        <item name="android:layout_height">@dimen/tool_button_size</item>
         <item name="android:background">@drawable/tool_button_background</item>
         <item name="android:tint">@color/tool_icon_tint</item>
-        <item name="android:padding">18dp</item>
+        <item name="android:padding">@dimen/tool_icon_padding</item>
         <item name="android:scaleType">fitCenter</item>
         <item name="android:stateListAnimator">@null</item>
         <item name="android:backgroundTint">@null</item>
     </style>
 
+    <!-- A group of tools: the gap between them is the divider, set once for every group. -->
+    <style name="Widget.ToolGroup" parent="">
+        <item name="android:layout_width">wrap_content</item>
+        <item name="android:layout_height">match_parent</item>
+        <item name="android:orientation">horizontal</item>
+        <item name="android:gravity">center_vertical</item>
+        <item name="android:divider">@drawable/toolbar_gap</item>
+        <item name="android:showDividers">middle</item>
+    </style>
+
+    <!-- The rule between two groups. -->
+    <style name="Widget.ToolbarRule" parent="">
+        <item name="android:layout_width">@dimen/toolbar_rule_width</item>
+        <item name="android:layout_height">@dimen/toolbar_rule_height</item>
+        <item name="android:layout_marginStart">@dimen/toolbar_group_gap</item>
+        <item name="android:layout_marginEnd">@dimen/toolbar_group_gap</item>
+        <item name="android:background">#000000</item>
+    </style>
+
+    <!-- A card that opens above its button; positioned over the button at runtime. -->
+    <style name="Widget.Popover" parent="Widget.ToolGroup">
+        <item name="android:layout_height">@dimen/popover_height</item>
+        <item name="android:layout_gravity">bottom|start</item>
+        <item name="android:layout_marginBottom">@dimen/toolbar_height</item>
+        <item name="android:background">@drawable/popover_background</item>
+        <item name="android:paddingStart">@dimen/popover_margin</item>
+        <item name="android:paddingEnd">@dimen/popover_margin</item>
+        <item name="android:visibility">gone</item>
+    </style>
+
     <style name="Widget.ActionButton" parent="Widget.AppCompat.Button.Borderless">
         <item name="android:layout_width">wrap_content</item>
-        <item name="android:layout_height">56dp</item>
-        <item name="android:minWidth">132dp</item>
-        <item name="android:paddingStart">18dp</item>
-        <item name="android:paddingEnd">18dp</item>
+        <item name="android:layout_height">@dimen/tool_button_size</item>
+        <item name="android:minWidth">@dimen/action_button_min_width</item>
+        <item name="android:paddingStart">16dp</item>
+        <item name="android:paddingEnd">16dp</item>
         <item name="android:textSize">16sp</item>
         <item name="android:textStyle">bold</item>
         <item name="android:letterSpacing">0.05</item>
@@ -29,7 +59,6 @@
         <item name="android:background">@drawable/action_button_background</item>
         <item name="android:backgroundTint">@null</item>
         <item name="android:stateListAnimator">@null</item>
-        <item name="android:layout_marginStart">6dp</item>
     </style>
 
     <style name="Widget.ActionButton.Primary">

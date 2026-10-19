@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The pen toolbar: one button size, one gap inside a group, one gap around a rule. -->
+    <dimen name="toolbar_height">72dp</dimen>
+    <dimen name="toolbar_padding">8dp</dimen>
+    <dimen name="tool_button_size">56dp</dimen>
+    <dimen name="tool_icon_padding">18dp</dimen>
+    <dimen name="toolbar_gap">4dp</dimen>
+    <dimen name="toolbar_group_gap">6dp</dimen>
+    <dimen name="toolbar_rule_width">2dp</dimen>
+    <dimen name="toolbar_rule_height">40dp</dimen>
+    <dimen name="action_button_min_width">108dp</dimen>
+    <dimen name="popover_height">48dp</dimen>
+    <dimen name="popover_margin">8dp</dimen>
+</resources>

@@ -55,6 +55,31 @@ pub async fn ws_handler(
     ws.on_upgrade(move |socket| handle_ws(socket, id, state))
 }
 
+/// How a review ended, as the message the live path would have sent at the time.
+///
+/// A client that reconnects after the submit, cancellation or expiry must be told, or it
+/// sits on a silent socket until its own deadline: `eink-review push` used to wait its
+/// full thirty minutes for a result that had already been written.
+pub fn farewell(session: &crate::session::Session) -> Option<ServerMessage> {
+    use crate::session::SessionStatus;
+    match session.status {
+        SessionStatus::Active => None,
+        SessionStatus::Submitted => Some(ServerMessage::SessionSubmitted {
+            result: Box::new(SessionResultResponse::from_session(session)),
+        }),
+        SessionStatus::Cancelled => Some(ServerMessage::Error {
+            message: "session cancelled".into(),
+        }),
+        SessionStatus::Expired => Some(ServerMessage::Error {
+            message: "session expired".into(),
+        }),
+    }
+}
+
+async fn farewell_for(state: &AppState, id: &str) -> Option<ServerMessage> {
+    state.sessions.read().await.get(id).and_then(farewell)
+}
+
 /// What a client needs in order to be in sync: the last content update and any feedback
 /// it has not acknowledged, for a session that is still being read.
 async fn durable_snapshot(state: &AppState, id: &str) -> Vec<serde_json::Value> {
@@ -88,6 +113,18 @@ async fn handle_ws(mut socket: WebSocket, id: String, state: AppState) {
     // snapshot and subscription. Duplicates are possible; losing feedback is not.
     let mut rx = state.ws_subscribe(&id).await;
     if send_snapshot(&mut socket, &state, &id).await.is_err() {
+        crate::metrics::WS_CONNECTIONS_ACTIVE.dec();
+        return;
+    }
+    // Checked after subscribing, so a review that ends between the handshake and here is
+    // heard either on the broadcast or from the snapshot, never missed by both.
+    if let Some(message) = farewell_for(&state, &id).await {
+        info!(session_id = %id, "ws connected to a finished session; saying how it ended");
+        let json = serde_json::to_string(&message).unwrap_or_default();
+        let _ = socket.send(Message::Text(json.into())).await;
+        let _ = socket.send(Message::Close(None)).await;
+        state.ws_cleanup(&id).await;
+        info!(session_id = %id, "ws disconnected");
         crate::metrics::WS_CONNECTIONS_ACTIVE.dec();
         return;
     }
@@ -295,6 +332,50 @@ mod tests {
         assert_eq!(snapshot.len(), 2, "the update and the unacknowledged note");
         assert!(snapshot.iter().any(|m| m["type"] == "version_updated"));
         assert!(snapshot.iter().any(|m| m["type"] == "annotation_result"));
+    }
+
+    #[tokio::test]
+    async fn a_finished_session_says_how_it_ended_instead_of_going_quiet() {
+        // The live path tells a connected client about a submit, a cancel or an expiry.
+        // A client connecting afterwards hears the same message, in the same shape.
+        use crate::app::AppState;
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::with_config(dir.path().to_path_buf(), 5);
+        let mut mgr = state.sessions.write().await;
+        let make = |mgr: &mut crate::session::SessionManager| {
+            mgr.create(
+                "# Review".into(),
+                None,
+                None,
+                Default::default(),
+                false,
+                None,
+            )
+            .id
+        };
+        let live = make(&mut mgr);
+        assert!(farewell(mgr.get(&live).unwrap()).is_none());
+
+        let submitted = make(&mut mgr);
+        mgr.submit(&submitted, "LGTM".into(), vec![], None, None, vec![]);
+        let message =
+            serde_json::to_value(farewell(mgr.get(&submitted).unwrap()).unwrap()).unwrap();
+        assert_eq!(message["type"], "session_submitted");
+        assert_eq!(message["result"]["status"], "Submitted");
+        assert_eq!(message["result"]["verdict"], "lgtm");
+
+        let cancelled = make(&mut mgr);
+        mgr.cancel(&cancelled);
+        let message =
+            serde_json::to_value(farewell(mgr.get(&cancelled).unwrap()).unwrap()).unwrap();
+        assert_eq!(message["type"], "error");
+        assert_eq!(message["message"], "session cancelled");
+
+        let expired = make(&mut mgr);
+        mgr.expire_stale(std::time::Duration::ZERO);
+        let message = serde_json::to_value(farewell(mgr.get(&expired).unwrap()).unwrap()).unwrap();
+        assert_eq!(message["type"], "error");
+        assert_eq!(message["message"], "session expired");
     }
 
     #[tokio::test]

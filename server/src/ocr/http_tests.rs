@@ -457,3 +457,43 @@ async fn the_interactive_bound_is_shorter_than_the_general_one() {
     );
     assert!(engine.interactive_timeout() < engine.local_timeout);
 }
+
+#[tokio::test]
+async fn an_interactive_caller_is_not_held_by_a_batch_call_in_flight() {
+    // Identical images coalesce onto one request, which is right; but the waiter used to
+    // inherit the first caller's bound. A reader waiting on the pen was held for the
+    // batch call's two minutes.
+    let stalled = mock(
+        vec![(StatusCode::OK, json!({"response": "too late"}))],
+        Duration::from_secs(5),
+    )
+    .await;
+    let engine = Arc::new(engine(&stalled, None));
+
+    let batch = {
+        let engine = engine.clone();
+        tokio::spawn(async move {
+            engine
+                .recognize_image_within(b"ink", Duration::from_secs(2))
+                .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let started = std::time::Instant::now();
+    let error = engine
+        .recognize_image_within(b"ink", Duration::from_millis(150))
+        .await
+        .unwrap_err();
+    assert!(error.contains("timed out"), "{error}");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "the interactive caller kept its own bound"
+    );
+    assert_eq!(
+        stalled.calls.load(Ordering::SeqCst),
+        1,
+        "it coalesced onto the request in flight rather than sending a second"
+    );
+    batch.abort();
+}

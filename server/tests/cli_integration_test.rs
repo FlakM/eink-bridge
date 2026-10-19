@@ -715,7 +715,7 @@ async fn cli_blocking_push_waits_and_prints_result() {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(tmp.path(), "# Blocking Push\n\nbody").unwrap();
 
-    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_eink-review"))
+    let child = tokio::process::Command::new(env!("CARGO_BIN_EXE_eink-review"))
         .args([
             "--server",
             &server_url,
@@ -751,7 +751,7 @@ async fn cli_blocking_push_json_output() {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(tmp.path(), "# JSON Blocking Push").unwrap();
 
-    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_eink-review"))
+    let child = tokio::process::Command::new(env!("CARGO_BIN_EXE_eink-review"))
         .args([
             "--server",
             &server_url,
@@ -785,7 +785,7 @@ async fn cli_blocking_push_cancelled_during_wait_exits_error() {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(tmp.path(), "# Cancel While Blocking").unwrap();
 
-    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_eink-review"))
+    let child = tokio::process::Command::new(env!("CARGO_BIN_EXE_eink-review"))
         .args([
             "--server",
             &server_url,
@@ -818,7 +818,7 @@ async fn cli_verdict_lgtm_exits_zero() {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(tmp.path(), "# LGTM Test").unwrap();
 
-    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_eink-review"))
+    let child = tokio::process::Command::new(env!("CARGO_BIN_EXE_eink-review"))
         .args([
             "--server",
             &server_url,
@@ -847,7 +847,7 @@ async fn cli_verdict_changes_exits_two() {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(tmp.path(), "# Changes Test").unwrap();
 
-    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_eink-review"))
+    let child = tokio::process::Command::new(env!("CARGO_BIN_EXE_eink-review"))
         .args([
             "--server",
             &server_url,
@@ -876,7 +876,7 @@ async fn cli_verdict_reject_exits_three() {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(tmp.path(), "# Reject Test").unwrap();
 
-    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_eink-review"))
+    let child = tokio::process::Command::new(env!("CARGO_BIN_EXE_eink-review"))
         .args([
             "--server",
             &server_url,
@@ -905,7 +905,7 @@ async fn cli_verdict_question_exits_four() {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(tmp.path(), "# Question Test").unwrap();
 
-    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_eink-review"))
+    let child = tokio::process::Command::new(env!("CARGO_BIN_EXE_eink-review"))
         .args([
             "--server",
             &server_url,
@@ -1006,7 +1006,7 @@ async fn cli_update_http_put_increments_version() {
     let ws_url = server_url.replacen("http://", "ws://", 1) + "/ws/" + &session_id;
     let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
     ws.send(WsMessage::Text(
-        serde_json::json!({"type": "subscribe"}).to_string().into(),
+        serde_json::json!({"type": "subscribe"}).to_string(),
     ))
     .await
     .unwrap();
@@ -1018,8 +1018,7 @@ async fn cli_update_http_put_increments_version() {
             "annotations": [],
             "typed_notes": ""
         })
-        .to_string()
-        .into(),
+        .to_string(),
     ))
     .await
     .unwrap();
@@ -1298,19 +1297,15 @@ async fn the_cli_pushes_its_own_command_metrics() {
         .unwrap();
     assert!(output.status.success());
 
-    let posted = {
-        let mut guard = received.lock().unwrap();
-        // The push happens after the command, so give it a moment.
-        for _ in 0..40 {
-            if !guard.is_empty() {
-                break;
-            }
-            drop(guard);
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            guard = received.lock().unwrap();
+    // The push happens after the command, so give it a moment.
+    let mut posted = received.lock().unwrap().clone();
+    for _ in 0..40 {
+        if !posted.is_empty() {
+            break;
         }
-        guard.clone()
-    };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        posted = received.lock().unwrap().clone();
+    }
     let (path, body) = posted.first().expect("the CLI should push its metrics");
     assert_eq!(path, "/metrics/job/eink-review/instance/cli");
     assert!(

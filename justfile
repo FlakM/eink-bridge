@@ -76,6 +76,10 @@ coverage-uncovered:
 lint:
     cd {{server_dir}} && cargo fmt && cargo clippy
 
+# syntax-check the page scripts the renderer embeds
+lint-assets:
+    node --check {{server_dir}}/assets/*.js
+
 # check formatting without modifying
 check-fmt:
     cd {{server_dir}} && cargo fmt -- --check
@@ -301,7 +305,7 @@ manual-e2e file='README.md':
 # ─── CI / pre-commit checks ───────────────────────────────────────────
 
 # full check: fmt + clippy + test + eval + nix build
-ci: check-fmt clippy test eval nix-build
+ci: check-fmt clippy lint-assets test eval nix-build
     @echo "all checks passed"
 
 # quick pre-commit: fmt check + clippy + fast tests

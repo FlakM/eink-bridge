@@ -19,7 +19,7 @@
 <section class="diagram-block" data-kind="mermaid">
 <div class="diagram-header"><span>Diagram</span><span>mermaid</span></div>
 <div class="diagram-body"><div class="diagram-placeholder">Rendering Diagram...</div></div>
-<script type="application/json" class="diagram-payload">{"kind":"mermaid","source":"sequenceDiagram\n  participant C as CLI\n  participant S as Server\n  participant A as App\n  C->>S: POST /api/sessions\n  A->>S: GET /session/{id}\n  A->>S: POST /submit\n  S-->>C: 200 result"}</script>
+<script type="application/json" class="diagram-payload">{"kind":"mermaid","source":"sequenceDiagram\n  participant C as CLI\n  participant S as Server\n  participant A as App\n  C-\u003e\u003eS: POST /api/sessions\n  A-\u003e\u003eS: GET /session/{id}\n  A-\u003e\u003eS: POST /submit\n  S--\u003e\u003eC: 200 result"}</script>
 </section><h2>Key Code</h2>
 <pre style="background-color:#ffffff;">
 <span style="font-weight:bold;color:#0a6b38;">pub </span><span style="font-weight:bold;color:#0f3d8a;">fn </span><span style="font-weight:bold;color:#0b5c70;">render</span><span style="color:#555555;">(</span><span style="font-style:italic;color:#9c2a00;">markdown</span><span style="color:#555555;">: </span><span style="font-weight:bold;color:#333333;">&amp;</span><span style="font-weight:bold;color:#0f3d8a;">str</span><span style="color:#555555;">) -&gt;</span><span style="color:#1a1a1a;"> String </span><span style="color:#555555;">{

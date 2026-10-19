@@ -12,6 +12,20 @@ internal fun elementMapJson(elements: List<ElementEntry>): String = JSONArray().
     }) }
 }.toString()
 
+/** What a page load does with the ink it finds, given the saved element map and the one the page reports. */
+internal enum class ReconcilePlan { NOTHING, ADOPT_MAP, RELOCATE }
+
+/**
+ * An empty saved map means there is nothing to reconcile against, not that every paragraph
+ * moved: relocating against it would find no source for any stroke and archive them all.
+ */
+internal fun reconcilePlan(previous: List<ElementEntry>, current: List<ElementEntry>, bufEmpty: Boolean): ReconcilePlan =
+    when {
+        current.isEmpty() -> ReconcilePlan.NOTHING
+        bufEmpty || previous.isEmpty() || previous == current -> ReconcilePlan.ADOPT_MAP
+        else -> ReconcilePlan.RELOCATE
+    }
+
 internal data class RelocatedInk(val strokes: List<Stroke>, val groups: List<BindGroup>, val orphanCount: Int)
 
 /** Preserve each annotation's offset from its text, not its absolute page position.

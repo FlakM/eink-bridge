@@ -86,7 +86,6 @@ async fn a_client_that_stops_answering_is_dropped() {
         match tokio::time::timeout(Duration::from_millis(200), live.next()).await {
             Ok(Some(Ok(_))) => beat = tokio::time::Instant::now(),
             Ok(Some(Err(_))) | Ok(None) => break,
-            Ok(_) => {}
             Err(_) => {}
         }
     }

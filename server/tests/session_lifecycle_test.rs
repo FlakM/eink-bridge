@@ -496,18 +496,19 @@ async fn submit_with_image() {
         serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
     let id = body["id"].as_str().unwrap().to_string();
 
-    // Submit with multipart containing typed_notes and a fake image
+    // Submit with multipart containing typed_notes and a PNG-headed image
     let boundary = "----boundary123";
-    let multipart_body = format!(
+    let mut multipart_body = format!(
         "--{boundary}\r\n\
          Content-Disposition: form-data; name=\"typed_notes\"\r\n\r\n\
          Great work!\r\n\
          --{boundary}\r\n\
          Content-Disposition: form-data; name=\"annotation\"; filename=\"test.png\"\r\n\
-         Content-Type: image/png\r\n\r\n\
-         FAKEPNG\r\n\
-         --{boundary}--\r\n"
-    );
+         Content-Type: image/png\r\n\r\n"
+    )
+    .into_bytes();
+    multipart_body.extend_from_slice(b"\x89PNG\r\n\x1a\nFAKEPNG");
+    multipart_body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
 
     let resp = app
         .clone()

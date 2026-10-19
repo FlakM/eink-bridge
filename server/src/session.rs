@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tracing::{error, warn};
 use uuid::Uuid;
@@ -97,9 +97,26 @@ pub struct Session {
     pub starred: bool,
     #[serde(default)]
     pub origin: Option<SessionOrigin>,
+    /// The checkout `/source` may read from. Recorded by the server, and only for a
+    /// session created from this machine: `origin.cwd` is what the client *said*, and a
+    /// client on the LAN must not be able to name a directory to read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_root: Option<PathBuf>,
     pub state_dir: PathBuf,
     #[serde(skip, default)]
     writer: Option<tokio::sync::mpsc::UnboundedSender<WriteRequest>>,
+}
+
+/// What a new session is made from.
+#[derive(Default)]
+pub struct NewSession {
+    pub content: String,
+    pub title: Option<String>,
+    pub callback_url: Option<String>,
+    pub tags: HashMap<String, String>,
+    pub starred: bool,
+    pub origin: Option<SessionOrigin>,
+    pub source_root: Option<PathBuf>,
 }
 
 /// A disk write that has been moved off the session lock.
@@ -108,10 +125,10 @@ pub enum WriteRequest {
         path: PathBuf,
         json: String,
     },
-    /// Asks the drain task to confirm everything before it has landed. Ordering in the
-    /// channel is what makes this a barrier.
+    /// Asks the drain task to confirm everything before it has landed, and to say whether
+    /// any of it failed. Ordering in the channel is what makes this a barrier.
     Barrier {
-        ack: tokio::sync::oneshot::Sender<()>,
+        ack: tokio::sync::oneshot::Sender<Result<(), String>>,
     },
 }
 
@@ -119,54 +136,65 @@ pub enum WriteRequest {
 ///
 /// The write runs on a blocking thread: moving it off the session lock is only half the
 /// job, because `fs::write` inside the async task would still pin a runtime worker and
-/// stall every other request while the disk works.
+/// stall every other request while the disk works. A failure is kept until the next
+/// barrier asks, so the response that promised durability can say it was not delivered.
 pub async fn drain_writes(mut rx: tokio::sync::mpsc::UnboundedReceiver<WriteRequest>) {
+    let mut failed: Option<String> = None;
     while let Some(request) = rx.recv().await {
         match request {
             WriteRequest::Snapshot { path, json } => {
-                if tokio::task::spawn_blocking(move || write_snapshot(&path, &json))
-                    .await
-                    .is_err()
-                {
-                    error!("the writer thread panicked; a session snapshot was lost");
+                let shown = path.display().to_string();
+                match tokio::task::spawn_blocking(move || write_snapshot(&path, &json)).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        error!(path = %shown, error = %e, "failed to persist session");
+                        failed = Some(format!("{shown}: {e}"));
+                    }
+                    Err(_) => {
+                        error!(path = %shown, "the writer thread panicked; a session snapshot was lost");
+                        failed = Some(format!("{shown}: writer panicked"));
+                    }
                 }
             }
             WriteRequest::Barrier { ack } => {
-                let _ = ack.send(());
+                let _ = ack.send(failed.take().map_or(Ok(()), Err));
             }
         }
     }
 }
 
-fn write_snapshot(path: &std::path::Path, json: &str) {
-    if let Some(dir) = path.parent()
-        && let Err(e) = fs::create_dir_all(dir)
+/// Write the snapshot so that `session.json` is always a whole document: into a sibling
+/// file, synced, then renamed over the old one. Writing in place left a torn file behind
+/// a crash, and a torn file was silently a lost session.
+fn write_snapshot(path: &Path, json: &str) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    let staged = path.with_extension("json.tmp");
     {
-        error!(path = %dir.display(), error = %e, "failed to create session dir");
-        return;
+        let mut file = fs::File::create(&staged)?;
+        std::io::Write::write_all(&mut file, json.as_bytes())?;
+        file.sync_all()?;
     }
-    if let Err(e) = fs::write(path, json) {
-        error!(path = %path.display(), error = %e, "failed to persist session");
-    }
+    fs::rename(&staged, path)
 }
 
-/// Write one uploaded annotation image and return the path recorded for it.
-pub fn write_annotation(state_dir: &std::path::Path, data: &[u8]) -> String {
-    let dir = state_dir.join("annotations");
-    if let Err(e) = fs::create_dir_all(&dir) {
-        error!(path = %dir.display(), error = %e, "failed to create annotations dir");
-    }
-    let filename = format!("img_{}.png", Uuid::new_v4().as_simple());
-    let path = dir.join(&filename);
-    if let Err(e) = fs::write(&path, data) {
-        error!(path = %path.display(), error = %e, "failed to write annotation");
-    }
-    path.to_string_lossy().to_string()
+/// Write one uploaded annotation image into `dir` and return the path recorded for it.
+pub fn write_annotation(dir: &Path, data: &[u8]) -> std::io::Result<String> {
+    fs::create_dir_all(dir)?;
+    let path = dir.join(format!("img_{}.png", Uuid::new_v4().as_simple()));
+    fs::write(&path, data)?;
+    Ok(path.to_string_lossy().to_string())
 }
 
 impl Session {
-    pub fn save_annotation(&self, data: &[u8]) -> String {
-        write_annotation(&self.state_dir, data)
+    /// Where this session's annotation images live.
+    pub fn annotations_dir(&self) -> PathBuf {
+        self.state_dir.join("annotations")
+    }
+
+    pub fn save_annotation(&self, data: &[u8]) -> std::io::Result<String> {
+        write_annotation(&self.annotations_dir(), data)
     }
 
     /// Serialize now (cheap, and done while the caller holds the session), write later.
@@ -188,13 +216,29 @@ impl Session {
                         .is_err()
                     {
                         // The drain task is gone; do not drop the write on the floor.
-                        write_snapshot(&path, &json);
+                        write_inline(&path, &json);
                     }
                 }
-                None => write_snapshot(&path, &json),
+                None => write_inline(&path, &json),
             },
             Err(e) => error!(session = %self.id, error = %e, "failed to serialize session"),
         }
+    }
+}
+
+/// A session file that cannot be read is moved next to itself rather than skipped or
+/// deleted: the operator is told, and the bytes are kept for a look.
+fn set_aside(json_path: &Path, error: &str) {
+    let aside = json_path.with_extension("json.corrupt");
+    warn!(path = %json_path.display(), error, aside = %aside.display(), "unreadable session file set aside");
+    if let Err(e) = fs::rename(json_path, &aside) {
+        error!(path = %json_path.display(), error = %e, "failed to set the session file aside");
+    }
+}
+
+fn write_inline(path: &Path, json: &str) {
+    if let Err(e) = write_snapshot(path, json) {
+        error!(path = %path.display(), error = %e, "failed to persist session");
     }
 }
 
@@ -246,22 +290,30 @@ impl SessionManager {
         let mut loaded_starred = 0usize;
         for entry in entries.flatten() {
             let json_path = entry.path().join("session.json");
-            if json_path.exists()
-                && let Ok(content) = fs::read_to_string(&json_path)
-                && let Ok(session) = serde_json::from_str::<Session>(&content)
-            {
-                let is_live = matches!(
-                    session.status,
-                    SessionStatus::Active | SessionStatus::Submitted
-                );
-                if is_live || session.starred {
-                    if session.starred {
-                        loaded_starred += 1;
+            if !json_path.exists() {
+                continue;
+            }
+            let parsed = fs::read_to_string(&json_path)
+                .map_err(|e| e.to_string())
+                .and_then(|content| {
+                    serde_json::from_str::<Session>(&content).map_err(|e| e.to_string())
+                });
+            match parsed {
+                Err(error) => set_aside(&json_path, &error),
+                Ok(session) => {
+                    let is_live = matches!(
+                        session.status,
+                        SessionStatus::Active | SessionStatus::Submitted
+                    );
+                    if is_live || session.starred {
+                        if session.starred {
+                            loaded_starred += 1;
+                        }
+                        let mut session = session;
+                        session.writer = self.writer.clone();
+                        self.sessions.insert(session.id.clone(), session);
+                        loaded += 1;
                     }
-                    let mut session = session;
-                    session.writer = self.writer.clone();
-                    self.sessions.insert(session.id.clone(), session);
-                    loaded += 1;
                 }
             }
         }
@@ -283,6 +335,18 @@ impl SessionManager {
         starred: bool,
         origin: Option<SessionOrigin>,
     ) -> Session {
+        self.create_session(NewSession {
+            content,
+            title,
+            callback_url,
+            tags,
+            starred,
+            origin,
+            source_root: None,
+        })
+    }
+
+    pub fn create_session(&mut self, new: NewSession) -> Session {
         let id = loop {
             let candidate = Uuid::new_v4().as_simple().to_string()[..12].to_string();
             if !self.sessions.contains_key(&candidate) {
@@ -292,15 +356,16 @@ impl SessionManager {
         };
         let session_dir = self.state_dir.join("sessions").join(&id);
 
+        let now = Utc::now();
         let session = Session {
             schema_version: SCHEMA_VERSION,
             id: id.clone(),
-            title,
+            title: new.title,
             status: SessionStatus::Active,
             version: 1,
-            content,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            content: new.content,
+            created_at: now,
+            updated_at: now,
             typed_notes: None,
             verdict: None,
             annotation_images: Vec::new(),
@@ -308,10 +373,11 @@ impl SessionManager {
             annotations: Vec::new(),
             pending_feedback: None,
             last_content_update: None,
-            callback_url,
-            tags,
-            starred,
-            origin,
+            callback_url: new.callback_url,
+            tags: new.tags,
+            starred: new.starred,
+            origin: new.origin,
+            source_root: new.source_root,
             state_dir: session_dir,
             writer: self.writer.clone(),
         };
@@ -431,12 +497,15 @@ impl SessionManager {
     }
 
     pub fn delete(&mut self, id: &str) -> bool {
-        if let Some(s) = self.sessions.remove(id) {
-            let _ = fs::remove_dir_all(&s.state_dir);
-            true
-        } else {
-            false
-        }
+        self.remove(id).is_some()
+    }
+
+    /// Forget a session and delete its files, handing back what it was so the caller can
+    /// tell a live review from a finished one.
+    pub fn remove(&mut self, id: &str) -> Option<Session> {
+        let session = self.sessions.remove(id)?;
+        let _ = fs::remove_dir_all(&session.state_dir);
+        Some(session)
     }
 
     /// Remove all terminal-state sessions (Submitted, Cancelled, Expired) from memory and disk.
@@ -471,12 +540,15 @@ impl SessionManager {
         self.expire_stale_ids(timeout).len()
     }
 
+    /// Expire the Active sessions nobody has touched for `timeout`. Idle is measured from
+    /// the last change, not from creation: a review that is being edited and annotated
+    /// is in use however long ago it was opened.
     pub(crate) fn expire_stale_ids(&mut self, timeout: Duration) -> Vec<String> {
         let now = Utc::now();
         let mut expired = Vec::new();
         for session in self.sessions.values_mut() {
             if session.status == SessionStatus::Active && !session.starred {
-                let age = now.signed_duration_since(session.created_at);
+                let age = now.signed_duration_since(session.updated_at);
                 if age.to_std().unwrap_or(Duration::ZERO) > timeout {
                     session.status = SessionStatus::Expired;
                     session.updated_at = now;
@@ -594,6 +666,28 @@ mod tests {
             m.get(&will_cancel.id).unwrap().status,
             SessionStatus::Cancelled
         );
+    }
+
+    #[test]
+    fn a_session_in_use_does_not_expire_however_old_it_is() {
+        // Expiry used to count from creation, so a review being annotated for forty
+        // minutes vanished under the reader's pen.
+        let (mut m, _d) = mgr();
+        let id = m
+            .create("x".into(), None, None, HashMap::new(), false, None)
+            .id;
+        let hour = chrono::Duration::hours(1);
+        {
+            let s = m.sessions.get_mut(&id).unwrap();
+            s.created_at = Utc::now() - hour;
+            s.updated_at = Utc::now();
+        }
+        assert_eq!(m.expire_stale(Duration::from_secs(30 * 60)), 0);
+        assert_eq!(m.get(&id).unwrap().status, SessionStatus::Active);
+
+        m.sessions.get_mut(&id).unwrap().updated_at = Utc::now() - hour;
+        assert_eq!(m.expire_stale(Duration::from_secs(30 * 60)), 1);
+        assert_eq!(m.get(&id).unwrap().status, SessionStatus::Expired);
     }
 
     #[test]
@@ -788,14 +882,42 @@ mod disk_trouble {
     }
 
     #[test]
-    fn an_annotation_that_cannot_be_written_still_reports_a_path() {
+    fn an_annotation_that_cannot_be_written_is_an_error_not_a_path() {
+        // Recording a path for bytes that never landed made the submit say OK and the
+        // result list an image nobody could open.
         let (_dir, blocked) = blocked_state_dir();
         let mut manager = SessionManager::new(blocked);
         let session = manager.create("# Review".into(), None, None, HashMap::new(), false, None);
-        let path = session.save_annotation(b"\x89PNG");
+        assert!(session.save_annotation(b"\x89PNG").is_err());
+    }
+
+    #[test]
+    fn an_unreadable_session_file_is_set_aside_and_reported() {
+        // A torn or hand-edited session.json used to be skipped in silence: the review
+        // was simply gone after a restart, with nothing in the log to say why.
+        let dir = tempfile::tempdir().unwrap();
+        let healthy = {
+            let mut manager = SessionManager::new(dir.path().to_path_buf());
+            manager
+                .create("# Fine".into(), None, None, HashMap::new(), false, None)
+                .id
+        };
+        let torn_dir = dir.path().join("sessions").join("torn00000000");
+        fs::create_dir_all(&torn_dir).unwrap();
+        let torn = torn_dir.join("session.json");
+        fs::write(&torn, b"{\"id\": \"torn00000000\", \"status\": \"Act").unwrap();
+
+        let manager = SessionManager::new(dir.path().to_path_buf());
+        assert!(manager.get(&healthy).is_some(), "the good file still loads");
+        assert!(manager.get("torn00000000").is_none());
         assert!(
-            path.contains("annotations/img_"),
-            "the caller is given a name to record, whatever the disk did: {path}"
+            !torn.exists(),
+            "the bad file is no longer where the loader looks"
+        );
+        assert_eq!(
+            fs::read(torn_dir.join("session.json.corrupt")).unwrap(),
+            b"{\"id\": \"torn00000000\", \"status\": \"Act",
+            "and it is kept, byte for byte, for a look"
         );
     }
 
@@ -891,6 +1013,56 @@ mod write_queue {
         let mut manager = SessionManager::new(dir.path().to_path_buf());
         let session = manager.create("# Inline".into(), None, None, HashMap::new(), false, None);
         assert!(session_json(dir.path(), &session.id).exists());
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_is_whole_or_absent_and_leaves_no_staging_file() {
+        // The write goes to a sibling and is renamed over the old file, so a crash in the
+        // middle leaves the previous whole snapshot rather than half of the new one.
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = SessionManager::new(dir.path().to_path_buf());
+        let id = manager
+            .create("# v1".into(), None, None, HashMap::new(), false, None)
+            .id;
+        manager.update_content(&id, "# v2".into());
+        let path = session_json(dir.path(), &id);
+        let on_disk: Session = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(on_disk.content, "# v2");
+        assert!(
+            !path.with_extension("json.tmp").exists(),
+            "the staging file is renamed away, not left behind"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_barrier_reports_a_write_that_did_not_land() {
+        // The response that waits on the barrier is a promise the change is on disk; a
+        // barrier that only said "done" let it promise a write that had failed.
+        let dir = tempfile::tempdir().unwrap();
+        let blocked = dir.path().join("not-a-directory");
+        fs::write(&blocked, b"in the way").unwrap();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let drain = tokio::spawn(crate::session::drain_writes(rx));
+        tx.send(WriteRequest::Snapshot {
+            path: blocked.join("sessions").join("x").join("session.json"),
+            json: "{}".into(),
+        })
+        .unwrap();
+        let (ack, waited) = tokio::sync::oneshot::channel();
+        tx.send(WriteRequest::Barrier { ack }).unwrap();
+        let outcome = waited.await.unwrap();
+        assert!(
+            outcome.is_err(),
+            "the failure reaches the barrier: {outcome:?}"
+        );
+
+        // Once reported, the failure is spent: the next barrier speaks for the writes
+        // after it.
+        let (ack, waited) = tokio::sync::oneshot::channel();
+        tx.send(WriteRequest::Barrier { ack }).unwrap();
+        assert!(waited.await.unwrap().is_ok());
+        drop(tx);
+        drain.await.unwrap();
     }
 
     #[tokio::test]

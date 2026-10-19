@@ -98,16 +98,30 @@ impl OcrEngine {
         let cell = self.cache.lock().await.entry(png, Instant::now());
         let hit = cell.get().is_some_and(Result::is_ok);
         let mut initialized = false;
-        let result = cell
-            .get_or_init(|| {
+        // The wait is bounded by this caller's deadline, not by whoever got there first:
+        // coalescing onto a batch call in flight used to hold an interactive caller for
+        // the batch call's two minutes.
+        let waited = tokio::time::timeout(
+            timeout,
+            cell.get_or_init(|| {
                 initialized = true;
                 self.recognize_uncached(png, timeout)
-            })
-            .await;
-        if result.is_err() {
-            // Existing waiters share this failure, but a later request may retry.
-            self.cache.lock().await.discard(png, &cell);
-        }
+            }),
+        )
+        .await;
+        let abandoned = Err("local OCR timed out".to_string());
+        let result = match &waited {
+            Ok(result) => {
+                if result.is_err() {
+                    // Existing waiters share this failure, but a later request may retry.
+                    self.cache.lock().await.discard(png, &cell);
+                }
+                *result
+            }
+            // Someone else's attempt is still running and may yet fill the cell; only
+            // this caller gives up on it.
+            Err(_) => &abandoned,
+        };
         crate::metrics::OCR_CACHE
             .with_label_values(&[if hit {
                 "hit"
@@ -220,7 +234,12 @@ impl OcrEngine {
             points = total_points,
             "OCR: rendering strokes"
         );
-        let png = render_strokes_to_png(strokes, pressures)?;
+        // Drawing is CPU work: off the async workers, so a large group does not stall
+        // every other request while it is rasterised.
+        let (strokes, pressures) = (strokes.to_vec(), pressures.to_vec());
+        let png = tokio::task::spawn_blocking(move || render_strokes_to_png(&strokes, &pressures))
+            .await
+            .map_err(|_| "the stroke renderer panicked".to_string())??;
         self.recognize_image_within(&png, timeout).await
     }
 }

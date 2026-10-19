@@ -39,6 +39,8 @@ private const val INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000L
 private const val NOTIFICATION_ID_UPDATE = 1001
 // Channel importance is immutable on Android; use a new ID to quiet existing installs too.
 internal const val NOTIFICATION_CHANNEL_ID = "eink_updates_quiet"
+/** The stroke sizes the toolbar offers, in the pen's units. */
+internal val STROKE_SIZES = floatArrayOf(2f, 4f, 8f, 14f)
 
 class MainActivity : AppCompatActivity() {
     internal lateinit var webView: WebView
@@ -241,16 +243,17 @@ class MainActivity : AppCompatActivity() {
         webView.settings.loadWithOverviewMode = false
         webView.webViewClient = object : android.webkit.WebViewClient() {
             override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
-                strokeView.visibility = View.INVISIBLE
                 penOverlay?.setInputEnabled(false)
                 findViewById<Button>(R.id.btnRequestUpdate).isEnabled = false
             }
             override fun onPageFinished(view: WebView, url: String) {
                 val sid = currentSessionId ?: return
                 Log.d(TAG, "webview onPageFinished url=$url session=$sid")
-                // The page is here, so the pen works -- before any of the polish below,
-                // which can and does bail out on an empty map.
+                // The page is here, so the pen, the ink and the UPDATE button come back now,
+                // before any of the polish below: the element map and the relocation only
+                // adjust ink, and every one of their exits must leave the page drawable.
                 penOverlay?.onPageReady()
+                findViewById<Button>(R.id.btnRequestUpdate).isEnabled = true
                 // The ink mapping comes from the page, so it has to be read as soon as the
                 // page can answer -- otherwise the first strokes are drawn through the
                 // fallback until something happens to scroll or resize.
@@ -295,11 +298,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private val styleButtons = mutableListOf<ImageButton>()
-    internal lateinit var strokeSlider: SeekBar
+    internal lateinit var btnSize: ImageButton
+    internal lateinit var sizeDrawer: LinearLayout
     private lateinit var btnLink: ImageButton
     private lateinit var btnColor: ImageButton
-    private lateinit var colorDrawer: LinearLayout
+    internal lateinit var colorDrawer: LinearLayout
     private val colorDots = mutableListOf<View>()
+    private val sizeDots = mutableListOf<View>()
     private lateinit var btnAnnotations: ImageButton
     private lateinit var btnSelect: ImageButton
     private var selectedStyleIndex = 0
@@ -309,6 +314,8 @@ class MainActivity : AppCompatActivity() {
     internal val selectModeActive: Boolean get() = toolMode == ToolMode.MOVE
     private var annotationModeActive = false
     private var currentStrokeColor = Color.BLACK
+    internal var currentStrokeWidth = STROKE_SIZES[1]
+        private set
     private val epdHandler = Handler(Looper.getMainLooper())
     private var epdRestoreRunnable: Runnable? = null
     private var processingJob: Job? = null
@@ -329,7 +336,10 @@ class MainActivity : AppCompatActivity() {
     private fun setupPenToolbar() {
         drawControls = findViewById(R.id.drawControls)
         contextBar = findViewById(R.id.contextBar)
-        strokeSlider = findViewById(R.id.strokeSlider)
+        btnSize = findViewById(R.id.btnSize)
+        sizeDrawer = findViewById(R.id.sizeDrawer)
+        buildSizeDrawer()
+        btnSize.setOnClickListener { togglePopover(sizeDrawer, btnSize) }
         val btnPencil = findViewById<ImageButton>(R.id.btnPencil)
         val btnBrush = findViewById<ImageButton>(R.id.btnBrush)
         val btnUndo = findViewById<ImageButton>(R.id.btnUndo)
@@ -339,20 +349,12 @@ class MainActivity : AppCompatActivity() {
         colorDrawer = findViewById(R.id.colorDrawer)
         buildColorDrawer()
         btnColor.imageTintList = android.content.res.ColorStateList.valueOf(currentStrokeColor)
-        btnColor.setOnClickListener { toggleColorDrawer() }
+        btnColor.setOnClickListener { togglePopover(colorDrawer, btnColor) }
         btnAnnotations = findViewById(R.id.btnAnnotations)
         btnSelect = findViewById(R.id.btnSelect)
 
         val btnEraser = findViewById<ImageButton>(R.id.btnEraser)
         styleButtons.addAll(listOf(btnPencil, btnBrush, btnEraser))
-
-        strokeSlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
-                penOverlay?.setStrokeWidth(progress.toFloat())
-            }
-            override fun onStartTrackingTouch(seekBar: SeekBar) {}
-            override fun onStopTrackingTouch(seekBar: SeekBar) {}
-        })
 
         btnPencil.setOnClickListener {
             setToolMode(ToolMode.DRAW)
@@ -392,11 +394,11 @@ class MainActivity : AppCompatActivity() {
             btnAnnotations.isSelected = annotationModeActive
             penOverlay?.annotationMode = annotationModeActive
         }
-        findViewById<Button>(R.id.btnReOcr).setOnClickListener {
+        findViewById<ImageButton>(R.id.btnReOcr).setOnClickListener {
             val groupId = currentContextGroupId ?: return@setOnClickListener
             penOverlay?.scheduleReOcr(groupId)
         }
-        findViewById<Button>(R.id.btnRemoveGroup).setOnClickListener {
+        findViewById<ImageButton>(R.id.btnRemoveGroup).setOnClickListener {
             val groupId = currentContextGroupId ?: return@setOnClickListener
             val group = penOverlay?.bindGroups?.find { it.id == groupId } ?: return@setOnClickListener
             penOverlay?.onDeleteBindGroup?.invoke(group)
@@ -440,7 +442,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
         toolMode = mode
-        colorDrawer.visibility = View.GONE
+        hidePopovers()
         setModeButtonActive(btnLink, mode == ToolMode.TAG)
         setModeButtonActive(btnSelect, mode == ToolMode.MOVE)
         val drawMode = mode == ToolMode.DRAW
@@ -491,7 +493,7 @@ class MainActivity : AppCompatActivity() {
                     penOverlay?.setStrokeColor(color)
                     btnColor.imageTintList = android.content.res.ColorStateList.valueOf(color)
                     updateColorDotSelection()
-                    colorDrawer.visibility = View.GONE
+                    hidePopovers()
                 }
             }
             colorDrawer.addView(dot)
@@ -499,9 +501,88 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun toggleColorDrawer() {
-        colorDrawer.visibility =
-            if (colorDrawer.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+    /**
+     * The size popover: one dot per size, drawn at that size, the chosen one ringed. It
+     * replaced a 160dp slider that cost a fifth of the row for a value nobody set finely.
+     */
+    private fun buildSizeDrawer() {
+        sizeDrawer.removeAllViews()
+        sizeDots.clear()
+        val dm = resources.displayMetrics
+        val cellPx = (36 * dm.density).toInt()
+        for (size in STROKE_SIZES) {
+            val dot = View(this).apply {
+                layoutParams = LinearLayout.LayoutParams(cellPx, cellPx)
+                contentDescription = getString(R.string.btnSize_desc) + " ${size.toInt()}"
+                setOnClickListener {
+                    currentStrokeWidth = size
+                    penOverlay?.setStrokeWidth(size)
+                    updateSizeDotSelection()
+                    hidePopovers()
+                }
+            }
+            sizeDrawer.addView(dot)
+            sizeDots.add(dot)
+        }
+        updateSizeDotSelection()
+    }
+
+    private fun updateSizeDotSelection() {
+        val dm = resources.displayMetrics
+        for ((i, dot) in sizeDots.withIndex()) {
+            val size = STROKE_SIZES[i]
+            val isSelected = size == currentStrokeWidth
+            val inner = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(Color.BLACK)
+            }
+            val ring = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(Color.WHITE)
+                setStroke((2 * dm.density).toInt(), if (isSelected) Color.BLACK else Color.TRANSPARENT)
+            }
+            // The dot's diameter follows the stroke: 2..14 units shown as 8..32dp.
+            val inset = ((36 - (4 + size * 2)) / 2 * dm.density).toInt()
+            dot.background = android.graphics.drawable.LayerDrawable(arrayOf(ring, inner)).apply {
+                setLayerInset(1, inset, inset, inset, inset)
+            }
+        }
+    }
+
+    /** Show [popover] above [anchor], or hide it if it is the one already open. */
+    private fun togglePopover(popover: View, anchor: View) {
+        val wasOpen = popover.visibility == View.VISIBLE
+        hidePopovers()
+        if (wasOpen) return
+        popover.visibility = View.VISIBLE
+        anchorAbove(popover, anchor)
+    }
+
+    private fun hidePopovers() {
+        colorDrawer.visibility = View.GONE
+        sizeDrawer.visibility = View.GONE
+    }
+
+    /**
+     * Centre [popover] over [anchor], clamped to the screen. It is a child of the root
+     * frame at the bottom-left, so its horizontal position is set from the anchor.
+     */
+    private fun anchorAbove(popover: View, anchor: View) {
+        val root = popover.parent as View
+        var anchorLeft = 0
+        var v: View? = anchor
+        while (v != null && v !== root) {
+            anchorLeft += v.left
+            v = v.parent as? View
+        }
+        popover.measure(
+            View.MeasureSpec.makeMeasureSpec(root.width, View.MeasureSpec.AT_MOST),
+            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
+        )
+        val margin = resources.getDimensionPixelSize(R.dimen.popover_margin)
+        val left = anchorLeft + anchor.width / 2 - popover.measuredWidth / 2
+        val maxLeft = (root.width - popover.measuredWidth - margin).coerceAtLeast(margin)
+        popover.translationX = left.coerceIn(margin, maxLeft).toFloat()
     }
 
     private fun updateColorDotSelection() {
@@ -588,6 +669,7 @@ class MainActivity : AppCompatActivity() {
         overlay.ocrManager = ocrManager
         overlay.init()
         overlay.setStrokeColor(currentStrokeColor)
+        overlay.setStrokeWidth(currentStrokeWidth)
         overlay.onBindGroupsChanged = { sessionRepo.saveBindGroups(sessionId, overlay.bindGroups) }
         overlay.onOcrResultsChanged = { results -> sessionRepo.saveOcrResults(sessionId, results) }
         overlay.onDeleteBindGroup = { group ->
@@ -666,7 +748,7 @@ class MainActivity : AppCompatActivity() {
         metricsJob = null
         wsInSleep = false
         currentContextGroupId = null
-        colorDrawer.visibility = View.GONE
+        hidePopovers()
         toolMode = ToolMode.DRAW
         setModeButtonActive(btnLink, false)
         setModeButtonActive(btnSelect, false)
@@ -846,42 +928,45 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Moves the ink to follow text that moved. This only adjusts ink: the pen, the ink view
+     * and the UPDATE button were given back by `onPageFinished`, and nothing here may take
+     * them away or be relied on to give them back -- this runs after a JS round-trip that may
+     * never answer, and bails on any sign the page changed under it.
+     */
     private fun reconcileAnnotations(sid: String) {
         val overlay = penOverlay ?: return
         val version = loadedVersion
         overlay.queryElementMap { current ->
             if (currentSessionId != sid) return@queryElementMap
-            if (current.isEmpty()) {
-                // No map to reconcile against, but the page is loaded and drawable.
-                overlay.setInputEnabled(true)
-                strokeView.visibility = View.VISIBLE
-                return@queryElementMap
-            }
             val previous = sessionRepo.loadElementMap(sid)
-            if (overlay.buf.isEmpty || previous == current) {
-                sessionRepo.saveElementMap(sid, current)
-                strokeView.visibility = View.VISIBLE
-                overlay.setInputEnabled(true)
-                findViewById<Button>(R.id.btnRequestUpdate).isEnabled = true
-                return@queryElementMap
+            when (reconcilePlan(previous, current, overlay.buf.isEmpty)) {
+                ReconcilePlan.NOTHING -> return@queryElementMap
+                ReconcilePlan.ADOPT_MAP -> {
+                    sessionRepo.saveElementMap(sid, current)
+                    return@queryElementMap
+                }
+                ReconcilePlan.RELOCATE -> {}
             }
             val original = overlay.buf.strokes
             val groups = overlay.bindGroups.toList()
             scope.launch {
                 try {
-                    val targets = if (previous.isEmpty()) emptyList() else withContext(Dispatchers.IO) {
+                    val targets = withContext(Dispatchers.IO) {
                         submissionManager.reanchor(serverUrl, sid, previous, current)
                     }
-                    if (currentSessionId != sid || loadedVersion != version || overlay.buf.strokes != original) return@launch
+                    if (currentSessionId != sid || loadedVersion != version) return@launch
+                    if (overlay.buf.strokes != original) {
+                        // The reader drew while the server was answering; the ink stays as drawn.
+                        Log.i(TAG, "Annotation relocation skipped: ink changed during the round-trip session=$sid")
+                        return@launch
+                    }
                     val ink = relocateInk(original, groups, previous, current, targets)
                     Log.i(TAG, "Annotation relocation session=$sid version=$version retained=${ink.strokes.size} archived=${ink.orphanCount}")
                     sessionRepo.archiveInk(sid, overlay.buf, groups)
                     overlay.applyRelocation(ink)
                     sessionRepo.saveStrokes(sid, overlay.buf)
                     sessionRepo.saveElementMap(sid, current)
-                    strokeView.visibility = View.VISIBLE
-                    overlay.setInputEnabled(true)
-                    findViewById<Button>(R.id.btnRequestUpdate).isEnabled = true
                     if (ink.orphanCount > 0) Toast.makeText(this@MainActivity,
                         "${ink.orphanCount} strokes archived: their text could not be located safely", Toast.LENGTH_LONG).show()
                 } catch (e: Exception) {

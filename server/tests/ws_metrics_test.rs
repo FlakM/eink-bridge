@@ -7,7 +7,6 @@
 //! The runbook tells the reader to check this gauge when feedback stops arriving. A gauge
 //! that never returns to zero would send them looking for connections that are not there.
 use eink_bridge::app::{AppState, build_app};
-use futures_util::StreamExt;
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio_tungstenite::connect_async;
