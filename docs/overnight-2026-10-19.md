@@ -181,7 +181,8 @@ mutation-harness gradle retry.
 | 4 | landed | item 4 commit |
 | 5 | landed | item 5 commit |
 | 6 | landed | item 6 commit |
-| 7–11, s | queued | |
+| 7 | landed | item 7 commit |
+| 8–11, s | queued | |
 
 ## Log
 
@@ -255,3 +256,9 @@ mutation-harness gradle retry.
   `eink_session_dirs_on_disk` counts what is actually on disk, refreshed after create,
   delete, purge and sweep. Unit test for the selection (starred survives, active survives,
   recent survives), API test for the directory and the gauge.
+
+- **Item 7, landed.** CI now has `harness` (asset check plus the python suite), `android`
+  (`testDebugUnitTest` with a Gradle cache), `mutations` (60-minute bound) and `nix-build`,
+  alongside the existing server job. Concurrency cancels superseded runs. Not verified on
+  GitHub itself (no push to a runner from here); the commands are the same ones run
+  locally below.

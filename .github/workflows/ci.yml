@@ -4,6 +4,11 @@ on:
   push:
   pull_request:
 
+# A new push to the same branch makes the old run irrelevant.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   server:
     runs-on: ubuntu-latest
@@ -18,3 +23,47 @@ jobs:
         run: nix develop -c just test
       - name: Eval
         run: nix develop -c just eval
+
+  harness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - name: Assets
+        run: nix develop -c just lint-assets
+      - name: Harness tests
+        # Includes the skill-flag check, which builds the CLI on first use.
+        run: nix develop -c python3 -m unittest discover -s harness/tests -v
+
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ hashFiles('android/**/*.gradle*', 'android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: gradle-
+      - name: Unit tests
+        run: nix develop -c sh -c 'cd android && ./gradlew testDebugUnitTest'
+
+  mutations:
+    runs-on: ubuntu-latest
+    # Every case rebuilds the server or the app; a cold run is slow, a hung one is worse.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - name: Reintroduce every known defect and require a red test
+        run: nix develop -c just test-mutations
+
+  nix-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - name: Build the package the host actually runs
+        run: nix build --print-out-paths
