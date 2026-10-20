@@ -113,5 +113,16 @@ class ContinueFlowTests(unittest.TestCase):
         self.assertIn("subscribe_session", section)
 
 
+class BatchReviewTests(unittest.TestCase):
+    """A batch is one tablet note, however many pull requests it contains."""
+
+    def test_a_batch_has_one_eink_session(self):
+        text = (SKILLS / "eink-pr" / "SKILL.md").read_text()
+        section = text[text.index("## Several PRs at once"):text.index("## Testing this workflow")]
+        self.assertIn("one for the whole batch", section)
+        self.assertIn("one brief and one e-ink session", section)
+        self.assertNotIn("one per PR, one observer each", section)
+
+
 if __name__ == "__main__":
     unittest.main()

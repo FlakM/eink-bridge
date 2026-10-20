@@ -283,7 +283,8 @@ send the legend as text.
 
 Create the session and deliver the brief through the `eink` skill's contract — its
 observer, its handshake, its version guard. Add `tags` with `pr=<n>` and `sha=<short>`
-so the review is findable.
+so the review is findable. For a batch, create **one** session for the aggregated brief
+(see "Several PRs at once"), tag it `prs=<n,n>`, and say that it covers all N.
 
 Tell the user, in one line: what is on the tablet, the session id, and that `A`–`F` jump
 to the important lines in the tab you opened. Nothing else.
@@ -345,16 +346,34 @@ question.
 
 ## Several PRs at once
 
-Every per-PR resource is keyed by number, so reviews cannot collide:
+The code work stays per PR so the reviews cannot collide; **the tablet note does not**.
 
 | Resource | Key |
 |---|---|
 | worktree | `pr-<n>` |
 | socket | `/run/user/<uid>/jump-pr-<n>-<repo>.sock` |
-| herdr tab | `PR <n>: <title>` |
-| eink session | one per PR, one observer each |
+| herdr workspace | `PR <n>: <title>` |
+| GitHub review | one per PR (step 11) |
+| **e-ink session** | **one for the whole batch** |
 
-Run the pipeline per PR; the parallel lens reviewers can span PRs in one turn. Record
+Run the code pipeline per PR — read each diff in its own workspace, run the lens reviewers
+in parallel (they can span PRs in one turn), filter per PR. Then aggregate before delivery:
+
+- **one brief and one e-ink session for the batch**, with one observer and one handshake.
+  Do not create a note per PR; the reader answers once, in one place.
+- one section per PR, in the order the reviewer pasted them;
+- **one `## Interfaces` section** covering every contract change across the batch, naming
+  the repository for each;
+- one `## Checks` section covering all the PRs.
+
+Tags for the session: `prs=<n,n>` and `batch=<count>`; do not label a batch with one `pr=`.
+
+When feedback arrives it names its PR (or its anchor is in that PR's section). Resolve it
+to that worktree before editing; if it is about the batch as a whole, answer it at the top
+of the next brief. The per-PR registry rows (`pr`, `sha`, `session`, `socket`, `worktree`)
+share the batch's one `session` id.
+
+Record
 live reviews in `~/.local/state/eink-bridge/pr-reviews.json` (`pr`, `sha`, `session`,
 `socket`, `worktree`) so a second run reattaches instead of duplicating, and so cleanup
 knows what it owns. Clean up by removing only what you created: `herdr workspace close`
