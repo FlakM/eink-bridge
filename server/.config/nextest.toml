@@ -1,0 +1,18 @@
+# `cargo nextest` is the default test runner (`just test`).
+#
+# It runs every test binary in parallel instead of one binary after another, which is
+# most of the difference between the old 28 s `cargo test` and the 6 s suite below.
+[profile.default]
+# A retry turns a flaky test into a passing one and hides the flake. Nothing here is
+# supposed to be timing-dependent, so a flake is a bug worth seeing.
+retries = 0
+
+# A test that hangs is a failure, not a reason to wait for the CI job's own timeout.
+# The slowest honest test is the WebSocket heartbeat (~7 s, real sockets, real clocks).
+slow-timeout = { period = "10s", terminate-after = 3 }
+
+# Run the suite on every save: print failures, and at the end the tests that got slow.
+status-level = "fail"
+final-status-level = "slow"
+failure-output = "immediate-final"
+success-output = "never"

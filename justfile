@@ -11,13 +11,21 @@ default:
 
 # ─── Testing ───────────────────────────────────────────────────────────
 
-# run all server tests (unit + integration)
+# run all server tests (unit + integration) — every binary in parallel
 test:
+    cd {{server_dir}} && cargo nextest run
+
+# run all server tests through plain cargo (slower: one test binary at a time)
+test-cargo:
     cd {{server_dir}} && cargo test
 
-# render unit tests only (~0.02s)
+# render unit tests only (~0.5s)
 test-render:
-    cd {{server_dir}} && cargo test render::tests
+    cd {{server_dir}} && cargo nextest run --lib render::tests
+
+# the tight loop: in-process tests only, no server, no sockets (~2s)
+test-fast:
+    cd {{server_dir}} && cargo nextest run --lib --test health_test --test api_edge_test --test render_validation_test --test eval_render_golden_test --test eval_contract_test
 
 # prove the render invariants bite: reintroduce each known bug, expect a test to fail
 test-mutations:
@@ -25,15 +33,15 @@ test-mutations:
 
 # run a single test by name
 test-one name:
-    cd {{server_dir}} && cargo test {{name}}
+    cd {{server_dir}} && cargo nextest run {{name}}
 
 # HTTP integration tests
 test-http:
-    cd {{server_dir}} && cargo test --test health_test --test session_lifecycle_test --test long_poll_test --test render_validation_test
+    cd {{server_dir}} && cargo nextest run --test health_test --test session_lifecycle_test --test long_poll_test --test render_validation_test
 
 # E2E tests (spawns real server + mock device)
 test-e2e:
-    cd {{server_dir}} && cargo test --test e2e_test --test cli_integration_test
+    cd {{server_dir}} && cargo nextest run --test e2e_test --test cli_integration_test
 
 # run tests with output visible (for debugging)
 test-verbose *args='':
@@ -41,11 +49,11 @@ test-verbose *args='':
 
 # AI-native eval: render goldens + contract goldens
 eval:
-    cd {{server_dir}} && cargo test --test eval_render_golden_test --test eval_contract_test -- --nocapture
+    cd {{server_dir}} && cargo nextest run --test eval_render_golden_test --test eval_contract_test --no-capture
 
 # refresh eval goldens intentionally
 eval-update:
-    cd {{server_dir}} && UPDATE_GOLDENS=1 cargo test --test eval_render_golden_test --test eval_contract_test -- --nocapture
+    cd {{server_dir}} && UPDATE_GOLDENS=1 cargo nextest run --test eval_render_golden_test --test eval_contract_test --no-capture
 
 # OCR fixture benchmark; --compare runs both providers uncached (cloud calls are paid)
 ocr-bench *args='':
@@ -55,20 +63,20 @@ ocr-bench *args='':
 
 # run tests with coverage summary (text report)
 coverage:
-    cd {{server_dir}} && cargo llvm-cov --text
+    cd {{server_dir}} && cargo llvm-cov nextest --summary-only
 
 # run tests with detailed per-file coverage
 coverage-detail:
-    cd {{server_dir}} && cargo llvm-cov --text --show-instantiations
+    cd {{server_dir}} && cargo llvm-cov nextest --text --show-instantiations
 
 # generate HTML coverage report and open it
 coverage-html:
-    cd {{server_dir}} && cargo llvm-cov --html
+    cd {{server_dir}} && cargo llvm-cov nextest --html
     @echo "report: {{server_dir}}/target/llvm-cov/html/index.html"
 
 # show only uncovered regions (lines not hit by any test)
 coverage-uncovered:
-    cd {{server_dir}} && cargo llvm-cov --text --show-missing-lines
+    cd {{server_dir}} && cargo llvm-cov nextest --text --show-missing-lines
 
 # ─── Lint & Format ────────────────────────────────────────────────────
 

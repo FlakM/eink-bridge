@@ -943,7 +943,7 @@ async fn health_says_what_is_actually_wrong() {
     let dir = tempfile::tempdir().unwrap();
     let mut state = AppState::with_config(dir.path().to_path_buf(), 5);
     state.ocr_engine = None;
-    state.ws_heartbeat_seconds = 7;
+    state.ws_heartbeat = std::time::Duration::from_secs(7);
     let app = build_app(state);
     let _first = create(&app, "# One").await;
 
@@ -1463,18 +1463,24 @@ async fn too_much_ink_is_refused_before_anything_is_drawn() {
 #[tokio::test]
 async fn a_relocation_that_takes_too_long_is_given_up_not_waited_on() {
     // The comparison is quadratic and the page is waiting; past the budget it is told
-    // to keep its notes where they are.
+    // to keep its notes where they are. The comparison itself must stop too: answering
+    // in 20 ms and then pinning a core for ten seconds is not "given up".
     let dir = tempfile::tempdir().unwrap();
     let mut state = AppState::with_config(dir.path().to_path_buf(), 5);
-    state.reanchor_budget = std::time::Duration::ZERO;
+    state.reanchor_budget = std::time::Duration::from_millis(20);
     let app = build_app(state);
     let id = create(&app, "# Review").await;
 
+    // Untouched, this pair takes ten seconds to compare. The test would take that long
+    // too if the worker kept running after the answer, which is the point.
     let elements = |fill: &str| -> Vec<serde_json::Value> {
         (0..200)
-            .map(|i| serde_json::json!({"i": i, "tag": "P", "text": format!("paragraph {i} {}", fill.repeat(90))}))
+            .map(|i| {
+                serde_json::json!({"i": i, "tag": "P", "text": format!("paragraph {i} {}", fill.repeat(90))})
+            })
             .collect()
     };
+    let started = std::time::Instant::now();
     let (status, body) = send(
         &app,
         Request::post(format!("/api/sessions/{id}/reanchor"))
@@ -1491,6 +1497,11 @@ async fn a_relocation_that_takes_too_long_is_given_up_not_waited_on() {
         String::from_utf8_lossy(&body).contains("keep them where they are"),
         "{}",
         String::from_utf8_lossy(&body)
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "the answer waited for the comparison: {:?}",
+        started.elapsed()
     );
 }
 

@@ -46,10 +46,11 @@ pub struct AppState {
     pub long_poll_seconds: u64,
     pub assets_dir: PathBuf,
     pub ocr_engine: Option<Arc<OcrEngine>>,
-    /// Seconds between WebSocket pings; 0 disables the heartbeat. A client that says
+    /// How often a WebSocket is pinged; zero disables the heartbeat. A client that says
     /// nothing for three intervals is dropped, which is what makes a half-open socket
-    /// visible instead of silently dead.
-    pub ws_heartbeat_seconds: u64,
+    /// visible instead of silently dead. A duration rather than whole seconds so a test
+    /// can watch the same decision without spending seven seconds on it.
+    pub ws_heartbeat: Duration,
     /// The one client every webhook goes out through, with a bound: a receiver that
     /// never answers used to hold a task forever.
     pub http: reqwest::Client,
@@ -147,7 +148,7 @@ impl AppState {
         // `flush_writes`.
         let (write_tx, write_rx) = tokio::sync::mpsc::unbounded_channel();
         tokio::spawn(crate::session::drain_writes(write_rx));
-        let ws_heartbeat_seconds = 30;
+        let ws_heartbeat = Duration::from_secs(30);
         let ocr_engine = match OcrEngine::new() {
             Ok(engine) => {
                 tracing::info!("OCR engine initialized");
@@ -179,7 +180,7 @@ impl AppState {
             long_poll_seconds,
             assets_dir: default_assets_dir(),
             ocr_engine,
-            ws_heartbeat_seconds,
+            ws_heartbeat,
             http,
             state_dir: state_dir.clone(),
             retention_days: retention_days_from_env(),
@@ -753,7 +754,7 @@ async fn health(State(state): State<AppState>) -> Response {
             "state_dir_writable": writable,
             "sessions": stored,
             "active": active,
-            "ws_heartbeat_seconds": state.ws_heartbeat_seconds,
+            "ws_heartbeat_seconds": state.ws_heartbeat.as_secs(),
         },
     }));
     (status, body).into_response()
@@ -1434,23 +1435,23 @@ async fn reanchor(
     {
         return bad_request("element map exceeds reanchor limits".into());
     }
-    let targets = tokio::time::timeout(
-        state.reanchor_budget,
-        tokio::task::spawn_blocking(move || {
-            crate::reanchor::targets(&body.previous, &body.current)
-        }),
-    )
+    let deadline = std::time::Instant::now() + state.reanchor_budget;
+    let targets = tokio::task::spawn_blocking(move || {
+        crate::reanchor::targets_within(&body.previous, &body.current, Some(deadline))
+    })
     .await;
     match targets {
-        Ok(Ok(targets)) => Json(serde_json::json!({"targets":targets})).into_response(),
-        Ok(Err(_)) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Ok(Some(targets)) => Json(serde_json::json!({"targets":targets})).into_response(),
         // Better to leave the notes where they are than to hold the page while the
-        // comparison runs on: the client keeps its current placement.
-        Err(_) => (
+        // comparison runs on: the client keeps its current placement. The comparison
+        // stops at the same deadline rather than pinning a core for the rest of it.
+        Ok(None) => (
             StatusCode::SERVICE_UNAVAILABLE,
             "relocating the notes took too long; keep them where they are",
         )
             .into_response(),
+        // The worker panicked or the runtime could not schedule it.
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 

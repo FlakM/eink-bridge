@@ -27,8 +27,17 @@ impl HookReceiver {
     }
 
     async fn wait(&self, timeout_ms: u64) -> Option<serde_json::Value> {
+        // Register interest *before* looking at the value: `notify_waiters` leaves no
+        // permit behind, so a delivery that lands between the store and the `select!`
+        // below used to be missed and cost the full timeout on every webhook test.
+        let notified = self.signal.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if let Some(value) = self.value.lock().await.clone() {
+            return Some(value);
+        }
         tokio::select! {
-            _ = self.signal.notified() => self.value.lock().await.clone(),
+            _ = notified => self.value.lock().await.clone(),
             _ = tokio::time::sleep(std::time::Duration::from_millis(timeout_ms)) => {
                 self.value.lock().await.clone()
             }

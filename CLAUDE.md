@@ -118,24 +118,32 @@ page's origin.
 Use `just` for all common operations. Run `just` to see all recipes.
 
 ```bash
-just test          # all server tests
-just test-render   # render unit tests only (~0.02s)
+just test          # all server tests, every binary in parallel (~3s)
+just test-fast     # in-process tests only: no server, no sockets (~1s)
+just test-render   # render unit tests only (~0.5s)
 just test-one NAME # single test by name
-just test-mutations # reintroduce each known render bug, expect a test to fail
+just test-cargo    # the same suite through plain cargo (slower, no nextest)
+just test-mutations # reintroduce each known bug, expect a test to fail
 just lint          # fmt + clippy
 just deploy        # nix build + restart service + verify the restart took
 just verify-deploy # prove the running server is the build in ./result
 just ci            # full CI check
 ```
 
+`just test` is the default because it is fast enough to run before every commit: 382
+tests across 25 binaries in about three seconds, against 28 s when `cargo test` ran the
+binaries one after another. `server/.config/nextest.toml` leaves retries at zero on
+purpose -- a flaky test is a bug worth seeing, not a nuisance to paper over.
+
 ## Quick test loop -- use this for validation
 
-Most changes to `render.rs` can be validated instantly without a server or device:
+Most changes can be validated without a server or device:
 
 ```bash
-just test-render                        # all render unit tests
+just test-render                            # all render unit tests
 just test-one toc_shows_for_single_heading  # single test by name
-just test                               # all fast unit + integration tests
+just test-fast                              # in-process tests only
+just test                                   # everything (~3s)
 ```
 
 ## Eval harness (golden tests)
@@ -187,11 +195,11 @@ golden shows `-->` where the source says `-->`.
 Use `tower::ServiceExt::oneshot()` on an in-process axum app. No real server started. Tempdir for state.
 
 ```bash
-cargo test --test health_test
-cargo test --test session_lifecycle_test
-cargo test --test long_poll_test
-cargo test --test render_validation_test
-cargo test --test webhook_test
+cargo nextest run --test health_test
+cargo nextest run --test session_lifecycle_test
+cargo nextest run --test long_poll_test
+cargo nextest run --test render_validation_test
+cargo nextest run --test webhook_test
 ```
 
 ### 3. E2E tests -- `tests/e2e_test.rs` + `tests/cli_integration_test.rs` (slower)
@@ -199,9 +207,15 @@ cargo test --test webhook_test
 Start a real TCP server on a random port, spawn `eink-review` and `eink-mock-device` as child processes.
 
 ```bash
-cargo test --test e2e_test
-cargo test --test cli_integration_test
+cargo nextest run --test e2e_test
+cargo nextest run --test cli_integration_test
 ```
+
+`cargo test` still works for all of these; `nextest` is what `just` uses because it runs
+every binary at once. A test that needs a real clock and a real socket (the WebSocket
+heartbeat is the only one) is bounded by its own threshold, not by a sleep someone tuned
+on a fast machine: the heartbeat is a `Duration` on `AppState`, so the test drives 200 ms
+intervals instead of spending seven seconds at one second each.
 
 ## Coverage
 
@@ -214,14 +228,19 @@ just test-android        # Android unit tests only (no coverage)
 
 Use `/coverage` skill for automated analysis of gaps.
 
-Last measured: **90.8% of Rust lines** — and **~95%** of everything that is not an
+Last measured: **91.6% of Rust lines** — and **~95%** of everything that is not an
 entrypoint or a benchmark. Together with 280 Android unit tests and every mutation caught
 by `just test-mutations`.
 
-Fully covered: `api.rs`, `metrics.rs`, `render/chunks.rs`, `render/browser.rs`,
-`render/html_utils.rs`, `render/models.rs`. Behind them: `reanchor.rs` 99.6%,
-`render/diagrams.rs` 99.3%, `render.rs` 98.4%, `ocr/cache.rs` 99.5%,
-`ocr/race.rs` 98.9%, `session.rs` 96.5%, `ocr.rs` 94.2%, `ws.rs` 91.7%.
+Two caveats when reading the number. Subprocess runs do count (the CLI and mock device are
+built with instrumentation and their profiles are merged), so `cli.rs`'s 82% is real
+rather than uncollected: what is missing there is the error branches — a refused tag, a
+404 on the observer socket. And the two benchmark binaries are entrypoints, not behaviour.
+
+Fully covered: `api.rs`, `metrics.rs`, `render.rs`, `render/chunks.rs`,
+`render/browser.rs`, `render/html_utils.rs`, `render/models.rs`, `ocr/cache.rs`. Behind
+them: `reanchor.rs` 99.0%, `render/diagrams.rs` 99.3%, `ocr/race.rs` 98.4%,
+`session.rs` 97.6%, `ocr.rs` 95.2%, `ws.rs` 94.8%.
 
 What is left uncovered is deliberately so. `main.rs`, `mock_device.rs` and the two
 benchmark binaries are entrypoints. The rest is error-logging paths for a disk that cannot

@@ -111,6 +111,7 @@
             just
             cargo-watch
             cargo-llvm-cov
+            cargo-nextest
             androidSdk
             jdk17
             einkBridge

@@ -148,8 +148,8 @@ async fn handle_ws(mut socket: WebSocket, id: String, state: AppState) {
         return;
     }
 
-    let heartbeat = state.ws_heartbeat_seconds;
-    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(heartbeat.max(1)));
+    let heartbeat = state.ws_heartbeat;
+    let mut ticker = tokio::time::interval(heartbeat.max(std::time::Duration::from_millis(1)));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     ticker.tick().await; // the first tick fires immediately
     let mut last_seen = tokio::time::Instant::now();
@@ -207,8 +207,8 @@ async fn handle_ws(mut socket: WebSocket, id: String, state: AppState) {
             // A half-open socket looks connected to both ends: a NAT rebind or a tablet
             // that went to sleep leaves the server writing into a void and the gauge
             // reporting a client that is not there. Ping, and give up on silence.
-            _ = ticker.tick(), if heartbeat > 0 => {
-                if last_seen.elapsed() > std::time::Duration::from_secs(heartbeat * 3) {
+            _ = ticker.tick(), if !heartbeat.is_zero() => {
+                if last_seen.elapsed() > heartbeat * 3 {
                     warn!(session_id = %id, "no word from the client, closing");
                     break;
                 }

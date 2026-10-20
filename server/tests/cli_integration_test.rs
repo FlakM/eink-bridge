@@ -59,7 +59,10 @@ async fn observer_reconnects_without_a_one_second_pause() {
 
 async fn start_server() -> (String, tokio::task::JoinHandle<()>) {
     let dir = tempfile::tempdir().unwrap();
-    let state = AppState::with_config(dir.keep(), 2);
+    // One second of long-poll: long enough that "there is no result yet" is measured
+    // rather than assumed, short enough that the pending-result tests do not spend two
+    // seconds each waiting to be told so.
+    let state = AppState::with_config(dir.keep(), 1);
     let app = build_app(state);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1034,8 +1037,10 @@ async fn cli_update_http_put_increments_version() {
     .await
     .unwrap();
 
-    // Drain WS messages until annotation_result (or timeout after 3s)
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    // Drain WS messages until annotation_result. Everything here is in-process, so the
+    // message is either there in a millisecond or it is not coming; the bound only
+    // keeps a missing message from hanging the test.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
     loop {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         let msg = tokio::time::timeout(remaining, ws.next()).await;

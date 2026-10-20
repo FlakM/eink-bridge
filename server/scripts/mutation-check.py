@@ -437,6 +437,15 @@ CASES = [
         "a_relocated_note_never_lands_on_another_paragraph",
     ),
     (
+        "a comparison past its deadline keeps running",
+        text_edit(
+            REANCHOR,
+            "    let expired = || deadline.is_some_and(|deadline| Instant::now() >= deadline);",
+            "    let expired = || false;",
+        ),
+        "a_comparison_past_its_deadline_stops_and_says_it_did_not_finish",
+    ),
+    (
         "the preview is cut at a byte offset",
         text_edit(
             CLII,
@@ -704,7 +713,7 @@ CASES = [
         "a silent client is never dropped",
         text_edit(
             WSI,
-            "if last_seen.elapsed() > std::time::Duration::from_secs(heartbeat * 3) {",
+            "if last_seen.elapsed() > heartbeat * 3 {",
             "if false {",
         ),
         "a_client_that_stops_answering_is_dropped",

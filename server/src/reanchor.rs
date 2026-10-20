@@ -2,6 +2,7 @@
 //! Never trust positional section IDs as identity, or guess between equal matches.
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 
 #[derive(Deserialize)]
 pub struct Element {
@@ -43,6 +44,22 @@ fn similarity(a: &str, b: &str) -> f64 {
 }
 
 pub fn targets(previous: &[Element], current: &[Element]) -> Vec<Option<usize>> {
+    targets_within(previous, current, None).expect("without a deadline the comparison finishes")
+}
+
+/// The same matching, bounded by `deadline`.
+///
+/// The comparison is quadratic -- a page's element map can hold a thousand entries --
+/// and a request that gives up on it must actually stop doing the work, not merely stop
+/// waiting for it. `None` means the deadline passed before every note was placed, and the
+/// caller should tell the reader to keep the notes where they are.
+pub fn targets_within(
+    previous: &[Element],
+    current: &[Element],
+    deadline: Option<Instant>,
+) -> Option<Vec<Option<usize>>> {
+    let expired = || deadline.is_some_and(|deadline| Instant::now() >= deadline);
+
     // A pure reflow/font-size change has no semantic ambiguity, even for repeated
     // labels. Require the entire sequence to match before trusting order.
     if previous.len() == current.len()
@@ -50,7 +67,7 @@ pub fn targets(previous: &[Element], current: &[Element]) -> Vec<Option<usize>> 
             a.tag.eq_ignore_ascii_case(&b.tag) && normalized(&a.text) == normalized(&b.text)
         })
     {
-        return current.iter().map(|e| Some(e.i)).collect();
+        return Some(current.iter().map(|e| Some(e.i)).collect());
     }
     let texts: Vec<_> = current.iter().map(|e| normalized(&e.text)).collect();
 
@@ -60,6 +77,9 @@ pub fn targets(previous: &[Element], current: &[Element]) -> Vec<Option<usize>> 
     let mut resolved: Vec<Option<usize>> = vec![None; previous.len()];
     let mut exact_claims: HashMap<usize, usize> = HashMap::new();
     for (slot, old) in previous.iter().enumerate() {
+        if expired() {
+            return None;
+        }
         let text = normalized(&old.text);
         if text.is_empty() {
             continue;
@@ -86,6 +106,9 @@ pub fn targets(previous: &[Element], current: &[Element]) -> Vec<Option<usize>> 
     let mut guesses: Vec<Option<usize>> = vec![None; previous.len()];
     let mut guess_claims: HashMap<usize, usize> = HashMap::new();
     for (slot, old) in previous.iter().enumerate() {
+        if expired() {
+            return None;
+        }
         if resolved[slot].is_some() {
             continue;
         }
@@ -123,7 +146,7 @@ pub fn targets(previous: &[Element], current: &[Element]) -> Vec<Option<usize>> 
             *slot = guess.filter(|index| guess_claims[index] == 1);
         }
     });
-    resolved
+    Some(resolved)
 }
 
 #[cfg(test)]
@@ -356,5 +379,34 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_comparison_past_its_deadline_stops_and_says_it_did_not_finish() {
+        // The caller answers the page with "keep them where they are" as soon as this
+        // returns None; the point is that the work stops rather than running on in the
+        // blocking pool until the whole map has been compared.
+        let previous: Vec<Element> = (0..200)
+            .map(|i| para(i, &format!("paragraph {i} {}", "x".repeat(90))))
+            .collect();
+        let current: Vec<Element> = (0..200)
+            .map(|i| para(i, &format!("paragraph {i} {}", "y".repeat(90))))
+            .collect();
+
+        let started = Instant::now();
+        let result = targets_within(
+            &previous,
+            &current,
+            Some(Instant::now() + std::time::Duration::from_millis(20)),
+        );
+        assert_eq!(
+            result, None,
+            "an unfinished comparison must not look like a result"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "the comparison ran to the end instead of stopping: {:?}",
+            started.elapsed()
+        );
     }
 }

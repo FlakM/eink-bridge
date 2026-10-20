@@ -38,8 +38,10 @@ async fn a_client_that_stops_answering_is_dropped() {
     eink_bridge::metrics::init();
     let dir = tempfile::tempdir().unwrap();
     let mut state = AppState::with_config(dir.path().to_path_buf(), 5);
-    // One second between pings: a client silent for three intervals is gone.
-    state.ws_heartbeat_seconds = 1;
+    // A fifth of a second between pings: a client silent for three intervals is gone.
+    // The threshold is what is being tested, not the clock, and real sockets and real
+    // timers are used because a paused clock would not prove a half-open socket is seen.
+    state.ws_heartbeat = Duration::from_millis(200);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(axum::serve(listener, build_app(state)).into_future());
@@ -65,8 +67,26 @@ async fn a_client_that_stops_answering_is_dropped() {
 
     // Now stop reading: the handshake is done, so no Pong is ever sent back. The server
     // must notice and let the connection go rather than holding a socket nobody is on.
-    let quiet = tokio::time::timeout(Duration::from_millis(300), socket.next()).await;
-    assert!(quiet.is_err(), "nothing should arrive on a quiet session");
+    //
+    // The window starts after an HTTP gauge scrape, which can take longer than the
+    // heartbeat interval under load, so a Ping may already be due. A control frame is not
+    // a message: ignore Ping/Pong and fail only on data or a close.
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+    let mut saw_data = false;
+    while tokio::time::Instant::now() < deadline {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(left, socket.next()).await {
+            Ok(Some(Ok(tokio_tungstenite::tungstenite::Message::Ping(_))))
+            | Ok(Some(Ok(tokio_tungstenite::tungstenite::Message::Pong(_)))) => continue,
+            Ok(Some(Ok(tokio_tungstenite::tungstenite::Message::Text(_))))
+            | Ok(Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(_)))) => {
+                saw_data = true;
+                break;
+            }
+            _ => break,
+        }
+    }
+    assert!(!saw_data, "nothing should arrive on a quiet session");
     let dropped = wait_for(&url, 0).await;
     assert_eq!(
         dropped, 0,
@@ -81,9 +101,9 @@ async fn a_client_that_stops_answering_is_dropped() {
     let mut beat = tokio::time::Instant::now();
     // Read for longer than the drop threshold: as long as we poll, tungstenite answers
     // each Ping and the connection survives.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(800);
     while tokio::time::Instant::now() < deadline {
-        match tokio::time::timeout(Duration::from_millis(200), live.next()).await {
+        match tokio::time::timeout(Duration::from_millis(100), live.next()).await {
             Ok(Some(Ok(_))) => beat = tokio::time::Instant::now(),
             Ok(Some(Err(_))) | Ok(None) => break,
             Err(_) => {}
