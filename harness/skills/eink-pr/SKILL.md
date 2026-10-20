@@ -300,6 +300,49 @@ A note arrives anchored to nearby text and often names a mark letter.
 5. If the note asks for an explanation rather than a change, answer it in the next
    brief — still under `ihaveadhd`.
 
+## 11. Collect the comments and post the review
+
+Comments come from two places and become one GitHub review:
+
+- **Neovim:** `<leader>gc` (or `:EinkComment`) at a line records `path`, `line`, `side` and
+  text in `~/.local/state/eink-bridge/comments/pr-<n>.jsonl`; `:EinkComments` shows them.
+  The reading workspace sets `EINK_PR_NUMBER`; in a `pr-<n>` worktree it is derived.
+  Diffview's base side is recorded as LEFT and the new side as RIGHT, so the line numbers
+  are the ones GitHub validates.
+- **e-ink:** an annotation that comments on the *code* rather than on how the brief reads
+  is a review comment. Use the `path:line` in its anchor or code snippet; if it has no
+  place, it belongs in the review body. Record it with:
+
+```bash
+python3 <eink-pr-base>/scripts/pr_comments.py add \
+  --pr <n> --path <file> --line <n> --body "<the note>" --source eink
+```
+
+At the end of the review:
+
+```bash
+python3 <eink-pr-base>/scripts/pr_comments.py list --pr <n>
+```
+
+Show that list in chat and ask how to post it: **pending review** (the default; the reader
+finishes it in GitHub), **submit as a comment**, or **discard**. Do not post without the
+answer.
+
+```bash
+# pending review, finished in the GitHub UI
+python3 <eink-pr-base>/scripts/pr_comments.py post --pr <url> --yes
+# or submit it now
+python3 <eink-pr-base>/scripts/pr_comments.py post --pr <url> --submit --yes
+```
+
+A line outside the diff cannot take an inline comment; the script puts it in the review
+body and reports how many. A successful post moves the JSONL aside, so a retry or a second
+agent cannot duplicate the comments. Report the review URL.
+
+Do not turn every e-ink note into a comment: "shorter", "add a diagram" changes the brief;
+"this races with the cache" is a comment. When it is genuinely unclear, ask one short
+question.
+
 ## Several PRs at once
 
 Every per-PR resource is keyed by number, so reviews cannot collide:
@@ -307,15 +350,15 @@ Every per-PR resource is keyed by number, so reviews cannot collide:
 | Resource | Key |
 |---|---|
 | worktree | `pr-<n>` |
-| socket | `/tmp/eink-pr-<n>.sock` |
+| socket | `/run/user/<uid>/jump-pr-<n>-<repo>.sock` |
 | herdr tab | `PR <n>: <title>` |
 | eink session | one per PR, one observer each |
 
 Run the pipeline per PR; the parallel lens reviewers can span PRs in one turn. Record
 live reviews in `~/.local/state/eink-bridge/pr-reviews.json` (`pr`, `sha`, `session`,
 `socket`, `worktree`) so a second run reattaches instead of duplicating, and so cleanup
-knows what it owns. Clean up by removing only what you created: `herdr tab close`
-(before closing a tab you made), `git worktree remove`, and the socket file.
+knows what it owns. Clean up by removing only what you created: `herdr workspace close`
+(only for a workspace you created), `git worktree remove`, and the socket file.
 
 ## Testing this workflow
 
