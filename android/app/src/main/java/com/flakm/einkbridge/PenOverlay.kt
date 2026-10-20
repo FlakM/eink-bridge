@@ -57,6 +57,18 @@ internal fun rawDrawingAction(
     }
 }
 
+/**
+ * A finger that lands while the pen is near, or that covers a palm's worth of glass, is
+ * the writing hand, not a reader's finger. Pure, so the thresholds are testable.
+ */
+internal fun fingerIsPalm(msSinceStylus: Long, touchMajorPx: Float, palmGestureActive: Boolean): Boolean =
+    palmGestureActive || msSinceStylus in 0..PALM_HOVER_WINDOW_MS || touchMajorPx >= PALM_TOUCH_MAJOR_PX
+
+/** How long after the pen was last seen (hovering or drawing) a new finger is a palm. */
+internal const val PALM_HOVER_WINDOW_MS = 600L
+/** A contact wider than this is a hand, whatever the pen is doing. */
+internal const val PALM_TOUCH_MAJOR_PX = 160f
+
 /** Production controller -- wraps the Onyx TouchHelper SDK. */
 internal class OnyxPenController(
     private val buf: StrokeBuffer,
@@ -360,6 +372,8 @@ internal class PenOverlay(
     private var lastStrokeEndMs = 0L
     private var fingerDown = false
     private var paused = false
+    private var lastStylusSeenMs = Long.MIN_VALUE
+    private var palmGesture = false
 
     var annotationMode = false
         set(value) {
@@ -472,16 +486,29 @@ internal class PenOverlay(
         val toolTypes = (0 until event.pointerCount).map { event.getToolType(it) }
         if (action != null) {
             // action == false → finger DOWN, action == true → finger UP/CANCEL
+            val sinceStylus = System.currentTimeMillis() - lastStylusSeenMs
+            if (!action && fingerIsPalm(sinceStylus, event.touchMajor, palmGesture)) {
+                // The writing hand resting on the glass. It must neither take the pen away
+                // nor scroll the page, so the whole gesture is swallowed here.
+                palmGesture = true
+                Log.d("EinkDraw", "touchRouter PALM touchMajor=${event.touchMajor} sinceStylusMs=$sinceStylus")
+                return@OnTouchListener true
+            }
+            if (palmGesture) {
+                if (action) palmGesture = false
+                return@OnTouchListener true
+            }
             fingerDown = !action
             Log.d(
                 "EinkDraw",
                 "touchRouter FINGER actionMasked=${event.actionMasked} fingerDown=$fingerDown " +
-                    "pointerCount=${event.pointerCount} toolTypes=$toolTypes"
+                    "pointerCount=${event.pointerCount} toolTypes=$toolTypes touchMajor=${event.touchMajor}"
             )
             applyDrawingState()
             notifyStrokeView()
             isBindMode || isSelectMode  // consume finger events to prevent WebView scroll
         } else {
+            lastStylusSeenMs = System.currentTimeMillis()
             // Stylus/eraser event — consume it so the WebView doesn't scroll.
             val hasPen = (0 until event.pointerCount).any {
                 val t = event.getToolType(it)
@@ -573,11 +600,38 @@ internal class PenOverlay(
         true
     }
 
+    /**
+     * The pen hovering is the earliest sign the hand on the glass is the writing hand.
+     * A finger already down at that moment becomes a palm: the pen comes back and the
+     * WebView's gesture is cancelled, so the page stops following the hand.
+     */
+    private val hoverListener = View.OnHoverListener { _, event ->
+        val stylus = (0 until event.pointerCount).any {
+            val t = event.getToolType(it)
+            t == MotionEvent.TOOL_TYPE_STYLUS || t == MotionEvent.TOOL_TYPE_ERASER
+        }
+        if (stylus) {
+            lastStylusSeenMs = System.currentTimeMillis()
+            if (fingerDown) {
+                Log.i("EinkDraw", "hover: the pen arrived over a resting hand; treating it as a palm")
+                fingerDown = false
+                palmGesture = true
+                val cancel = MotionEvent.obtain(event)
+                cancel.action = MotionEvent.ACTION_CANCEL
+                webView.onTouchEvent(cancel)
+                cancel.recycle()
+                applyDrawingState()
+            }
+        }
+        false
+    }
+
     @SuppressLint("ClickableViewAccessibility")
     fun init() {
         webView.addOnLayoutChangeListener(layoutListener)
         excludeView?.addOnLayoutChangeListener(layoutListener)
         webView.setOnTouchListener(touchRouter)
+        webView.setOnHoverListener(hoverListener)
         webView.setOnScrollChangeListener(scrollListener)
         strokeView?.transformProvider = { currentTransform() }
         webView.viewTreeObserver.addOnPreDrawListener(scrollPreDrawListener)
@@ -1421,6 +1475,7 @@ internal class PenOverlay(
         webView.removeOnLayoutChangeListener(layoutListener)
         excludeView?.removeOnLayoutChangeListener(layoutListener)
         webView.setOnTouchListener(null)
+        webView.setOnHoverListener(null)
         webView.setOnScrollChangeListener(null as View.OnScrollChangeListener?)
         webView.viewTreeObserver.removeOnPreDrawListener(scrollPreDrawListener)
         strokeView?.transformProvider = null

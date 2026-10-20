@@ -89,6 +89,48 @@ class PenOverlayTest {
         assertFalse("a finger on the page still stops the pen", fix.mock.drawingEnabled)
     }
 
+    // ── The writing hand is not a finger ────────────────────────────────────────
+    // Seen on the tablet: writing over the text column, where the hand rests on the
+    // glass, logged a finger DOWN/UP pair every stroke and no raw callbacks at all. The
+    // palm took the pen away; notes in the margin worked because the hand hung off the edge.
+
+    @Test
+    fun aHandRestingBesideAHoveringPenDoesNotStopThePen() {
+        val fix = buildOverlayWithInit()
+        fix.webView.dispatchGenericMotionEvent(stylusHoverEvent())
+        assertTrue(fix.webView.dispatchTouchEvent(buildFingerEvent(MotionEvent.ACTION_DOWN)))
+        assertTrue("a palm beside the pen is not a finger", fix.mock.drawingEnabled)
+        fix.webView.dispatchTouchEvent(buildFingerEvent(MotionEvent.ACTION_UP))
+        assertTrue(fix.mock.drawingEnabled)
+    }
+
+    @Test
+    fun aPenArrivingOverARestingHandTakesThePenBack() {
+        val fix = buildOverlayWithInit()
+        fix.webView.dispatchTouchEvent(buildFingerEvent(MotionEvent.ACTION_DOWN))
+        assertFalse("until the pen shows up, a finger is a finger", fix.mock.drawingEnabled)
+        fix.webView.dispatchGenericMotionEvent(stylusHoverEvent())
+        assertTrue("the pen hovering proves the hand is the writing hand", fix.mock.drawingEnabled)
+        fix.webView.dispatchTouchEvent(buildFingerEvent(MotionEvent.ACTION_UP))
+        assertTrue("the palm lifting must not toggle anything", fix.mock.drawingEnabled)
+    }
+
+    @Test
+    fun aWideContactIsAPalmWithoutAnyPen() {
+        val fix = buildOverlayWithInit()
+        fix.webView.dispatchTouchEvent(buildFingerEvent(MotionEvent.ACTION_DOWN, touchMajor = PALM_TOUCH_MAJOR_PX + 40f))
+        assertTrue(fix.mock.drawingEnabled)
+    }
+
+    @Test
+    fun thePalmRuleIsPure() {
+        assertTrue(fingerIsPalm(msSinceStylus = 100, touchMajorPx = 0f, palmGestureActive = false))
+        assertFalse(fingerIsPalm(msSinceStylus = PALM_HOVER_WINDOW_MS + 1, touchMajorPx = 0f, palmGestureActive = false))
+        assertFalse("no pen ever seen", fingerIsPalm(msSinceStylus = Long.MAX_VALUE, touchMajorPx = 20f, palmGestureActive = false))
+        assertTrue(fingerIsPalm(msSinceStylus = Long.MAX_VALUE, touchMajorPx = PALM_TOUCH_MAJOR_PX, palmGestureActive = false))
+        assertTrue(fingerIsPalm(msSinceStylus = Long.MAX_VALUE, touchMajorPx = 0f, palmGestureActive = true))
+    }
+
     // ── A drag the system interrupts still counts ───────────────────────────────
 
     @Test
@@ -1062,13 +1104,23 @@ class PenOverlayTest {
         return MotionEvent.obtain(0L, 0L, action, 1, pp, pc, 0, 0, 1f, 1f, 0, 0, 0, 0)
     }
 
-    private fun buildFingerEvent(action: Int): MotionEvent {
+    private fun buildFingerEvent(action: Int, touchMajor: Float = 0f): MotionEvent {
         val pp = arrayOf(MotionEvent.PointerProperties().apply {
             id = 0
             toolType = MotionEvent.TOOL_TYPE_FINGER
         })
-        val pc = arrayOf(MotionEvent.PointerCoords().apply { x = 200f; y = 300f })
+        val pc = arrayOf(MotionEvent.PointerCoords().apply { x = 200f; y = 300f; this.touchMajor = touchMajor })
         return MotionEvent.obtain(0L, 0L, action, 1, pp, pc, 0, 0, 1f, 1f, 0, 0, 0, 0)
+    }
+
+    private fun stylusHoverEvent(): MotionEvent {
+        val pp = arrayOf(MotionEvent.PointerProperties().apply {
+            id = 1
+            toolType = MotionEvent.TOOL_TYPE_STYLUS
+        })
+        val pc = arrayOf(MotionEvent.PointerCoords().apply { x = 220f; y = 310f })
+        return MotionEvent.obtain(0L, 0L, MotionEvent.ACTION_HOVER_MOVE, 1, pp, pc, 0, 0, 1f, 1f, 0, 0,
+            android.view.InputDevice.SOURCE_STYLUS, 0)
     }
 
     private fun buildFakeWebView(width: Int = 400, height: Int = 600): android.webkit.WebView {

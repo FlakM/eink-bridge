@@ -921,6 +921,15 @@ CASES = [
         "gradle:PenOverlayTest",
     ),
     (
+        "a hand resting beside the pen takes the pen away",
+        text_edit(
+            PENOVERLAY,
+            """    palmGestureActive || msSinceStylus in 0..PALM_HOVER_WINDOW_MS || touchMajorPx >= PALM_TOUCH_MAJOR_PX""",
+            """    palmGestureActive || touchMajorPx >= PALM_TOUCH_MAJOR_PX""",
+        ),
+        "gradle:PenOverlayTest",
+    ),
+    (
         "a cancelled drag is thrown away instead of committed",
         text_edit(
             PENOVERLAY,
