@@ -279,6 +279,19 @@ Re-render with `--links links.json` to put the URLs in the legend. If the socket
 gone, reopen Neovim with `--listen` and retry; if marks cannot be set, say so and still
 send the legend as text.
 
+Before delivery, check that every mark in the brief resolves on disk. Repeat `--worktree`
+for a batch:
+
+```bash
+python3 <eink-pr-base>/scripts/check_marks.py <brief.md> \
+  --worktree <worktree> [--worktree <second-worktree>]
+```
+
+A failure is not cosmetic: a file the checkout does not have, or a line past the end of
+the file, means the worktree is stale or the reference is wrong. Fix the checkout or the
+mark; never deliver a pill that shows nothing. (A reused worktree that was checked out at
+an older PR is exactly how this happens.)
+
 ## 9. Deliver, then hand the reader the wheel
 
 Create the session and deliver the brief through the `eink` skill's contract — its

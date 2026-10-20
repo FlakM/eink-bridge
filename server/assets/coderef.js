@@ -7,10 +7,16 @@
     var existing = target.nextElementSibling;
     var isOurs = existing && existing.classList && existing.classList.contains('coderef-wrap');
     if (isOurs) {
-      var open = target.getAttribute('data-open') === '1';
-      target.setAttribute('data-open', open ? '0' : '1');
-      existing.style.display = open ? 'none' : 'block';
-      return;
+      // A failed fetch may have been a stale checkout; let the next tap try again
+      // instead of keeping "not available" for the life of the page.
+      if (existing.getAttribute('data-failed') === '1') {
+        existing.remove();
+      } else {
+        var open = target.getAttribute('data-open') === '1';
+        target.setAttribute('data-open', open ? '0' : '1');
+        existing.style.display = open ? 'none' : 'block';
+        return;
+      }
     }
     target.setAttribute('data-open', '1');
     var wrap = document.createElement('div');
@@ -31,6 +37,8 @@
       })
       .catch(function (error) {
         // Say so rather than showing an empty block: the worktree may be gone.
-        wrap.innerHTML = '<p class="coderef-note">' + ref + ' is not available here (' + error.message + ')</p>';
+        wrap.setAttribute('data-failed', '1');
+        wrap.innerHTML = '<p class="coderef-note">' + ref + ' is not available here ('
+          + error.message + '). Tap to retry.</p>';
       });
   });
