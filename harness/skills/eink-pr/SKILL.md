@@ -98,8 +98,9 @@ look at.
 ## 2. Check the code out into a worktree
 
 **First look in the registry** (`~/.local/state/eink-bridge/pr-reviews.json`): if this PR
-already has an entry, reuse its `worktree` and `socket` and skip to step 4. The widget
-creates both, and re-invoking the skill must not make a second copy.
+already has an entry, reuse its `worktree`, `socket` and `pane_id` and skip to step 4 —
+the editor is already open on the diff. The widget creates all three, and re-invoking the
+skill must not make a second copy or a second editor.
 
 ```bash
 git fetch origin pull/<n>/head          # PRs, including forks
@@ -113,23 +114,35 @@ git worktree add --detach "~/programming/<org>/worktrees/pr-<n>/<repo>" FETCH_HE
   `socket`, workspace ids) so the other entry point finds it.
 - Never check out in the user's own working tree.
 
-## 3. Open the diff in Neovim in a review workspace
+## 3. The diff is already open — do not start a second editor
 
-Only when `HERDR_ENV=1`. Read IDs from the JSON responses; never guess them.
+When the widget launched this review it created the reading workspace, started
+`nvim --listen <socket> -c "DiffviewOpen <merge-base>..HEAD"`, and recorded `socket`,
+`pane_id` and `sha` in the registry. A PR with a registry entry needs **nothing** in this
+step. `EINK_PR_SOCKET` is also in the reading workspace's environment.
+
+Only when you had to create the workspace yourself, start the editor in a **shell** pane:
 
 ```bash
+export EINK_PR_SOCKET=/run/user/$(id -u)/jump-pr-<n>-<repo>.sock
 herdr workspace create --cwd "<worktree-dir>" --label "PR <n>: <short title>" --focus
-# -> .result.workspace.workspace_id, .result.root_pane.pane_id
-export EINK_PR_SOCKET=/run/user/$(id -u)/jump-<repo>.sock
-herdr pane run <pane_id> "nvim --listen $EINK_PR_SOCKET -c 'DiffviewOpen <merge-base>..HEAD'"
+# -> .result.root_pane.pane_id
+herdr pane run <root_pane.pane_id> "nvim --listen $EINK_PR_SOCKET -c 'DiffviewOpen <merge-base>..HEAD'"
 ```
 
+- **Never send `nvim ...` into a pane that already runs Neovim or an agent.** `pane run`
+  delivers the command to the pane's foreground process, so it lands in the buffer as
+  text. Check `herdr pane process-info <pane>`; if it is not a shell, create a tab
+  (`herdr tab create --workspace <id> --cwd <worktree> --focus`) and run the command in
+  that tab's pane.
 - **One workspace per review**, not a tab in someone else's workspace: the review owns its
   editor, its marks and its agent, and closes cleanly. Reuse the registry's workspace if
   one exists.
-- **Always pass `--listen`** and export `EINK_PR_SOCKET`; marks and the `jump` skill
-  depend on it. `jump <ref>` also works here and finds this editor on its own.
-- Wait for the socket (`until [ -S "$EINK_PR_SOCKET" ]`) before sending anything.
+- **Always pass `--listen`** and use the registry's socket. It is
+  `jump-pr-<n>-<repo>.sock`, not `jump-<repo>.sock`: two PRs of one repository are
+  reviewed side by side and must not share an editor socket.
+- Wait for the socket (`until [ -S "$EINK_PR_SOCKET" ]`) before sending anything. Marks and
+  the `jump` skill depend on it; `jump <ref>` also finds this editor on its own.
 
 ## 4. Collect context and start the checks
 
