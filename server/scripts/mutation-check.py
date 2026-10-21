@@ -40,6 +40,7 @@ SESSIONI = SERVER / "src/session.rs"
 SUBMISSION = SERVER.parent / "android/app/src/main/java/com/flakm/einkbridge/SubmissionManager.kt"
 SESSIONVM = SERVER.parent / "android/app/src/main/java/com/flakm/einkbridge/SessionViewModel.kt"
 PENOVERLAY = SERVER.parent / "android/app/src/main/java/com/flakm/einkbridge/PenOverlay.kt"
+STROKEVIEW = SERVER.parent / "android/app/src/main/java/com/flakm/einkbridge/StrokeView.kt"
 THEME = SERVER / "assets/eink-theme.tmTheme"
 
 
@@ -917,6 +918,20 @@ CASES = [
             """        // proof that no finger is on the page.
         fingerDown = false""",
             """        // proof that no finger is on the page.""",
+        ),
+        "gradle:PenOverlayTest",
+    ),
+    (
+        "a live stroke wipes the labels until the commit",
+        text_edit(
+            STROKEVIEW,
+            """    fun updateLive(strokes: List<Stroke>, transform: ViewTransform) {
+        this.strokes = strokes
+        this.transform = transform""",
+            """    fun updateLive(strokes: List<Stroke>, transform: ViewTransform) {
+        this.strokes = strokes
+        this.transform = transform
+        this.bindGroups = emptyList()""",
         ),
         "gradle:PenOverlayTest",
     ),

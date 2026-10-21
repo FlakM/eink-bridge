@@ -1020,6 +1020,26 @@ class PenOverlayTest {
     }
 
     @Test
+    fun aLiveUpdateKeepsTheLabelsAndGroupsOnScreen() {
+        // Every third pen point used to go through the full update with default arguments,
+        // which emptied the groups and labels until the commit restored them: on e-paper
+        // that is every label flashing once per letter.
+        val ctx = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.app.Application>()
+        val strokeView = StrokeView(ctx)
+        val first = Stroke(listOf(100f to 100f, 140f to 140f), 3f)
+        val group = BindGroup(
+            id = 7, color = 0xFF000000.toInt(), strokeIndices = setOf(0), elementIndices = emptyList(),
+            elementRefs = emptyList(), markerDocX = 120f, markerDocY = 120f,
+        )
+        strokeView.update(listOf(first), ViewTransform(), bindGroups = listOf(group))
+        assertEquals(7, strokeView.hitTestGroup(120f, 120f))
+
+        strokeView.updateLive(listOf(first, Stroke(listOf(300f to 300f, 320f to 320f), 3f)), ViewTransform())
+        assertEquals("the group survives the in-progress stroke", 7, strokeView.hitTestGroup(120f, 120f))
+        assertEquals(2, strokeView.strokes.size)
+    }
+
+    @Test
     fun strokeView_update_replaces_previous_strokes() {
         val ctx = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.app.Application>()
         val strokeView = StrokeView(ctx)

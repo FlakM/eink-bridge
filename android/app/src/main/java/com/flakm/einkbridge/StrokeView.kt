@@ -131,7 +131,6 @@ internal class StrokeView @JvmOverloads constructor(
         groupStrokeOffsets: Map<Int, Pair<Float, Float>> = emptyMap(),
         clusterStrokeOffsets: Map<Int, Pair<Float, Float>> = emptyMap(),
     ) {
-        android.util.Log.d("EinkDraw", "StrokeView.update strokesCount=${strokes.size} annotationMode=$annotationMode")
         this.strokes = strokes
         this.transform = transform
         this.bindGroups = bindGroups
@@ -143,6 +142,17 @@ internal class StrokeView @JvmOverloads constructor(
         this.selectedLabel = selectedLabel
         this.groupStrokeOffsets = groupStrokeOffsets
         this.clusterStrokeOffsets = clusterStrokeOffsets
+        invalidate()
+    }
+
+    /**
+     * The in-progress stroke, many times a second. Only the ink and the mapping change;
+     * labels, groups and offsets stay as they are, otherwise every stroke wiped the
+     * labels and the commit put them back, a flash per letter on e-paper.
+     */
+    fun updateLive(strokes: List<Stroke>, transform: ViewTransform) {
+        this.strokes = strokes
+        this.transform = transform
         invalidate()
     }
 

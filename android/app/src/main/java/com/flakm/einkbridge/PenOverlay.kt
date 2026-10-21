@@ -77,12 +77,8 @@ internal class OnyxPenController(
     internal var onStrokeProgress: (() -> Unit)? = null,
     private val onStrokeCommitted: (() -> Unit)? = null,
     internal var onErasePath: ((path: List<Pair<Float, Float>>, transform: ViewTransform) -> Unit)? = null,
-    /**
-     * Called after a stroke/erase ends to request the SDK be re-enabled.
-     * Routed through [PenOverlay.applyDrawingState] so a mode change during the
-     * 50 ms cooldown suppresses the re-enable instead of leaving the SDK on in bind/select mode.
-     */
-    internal var requestReEnable: (() -> Unit)? = null,
+    /** The view that paints the ink. Refresh modes go here, not on the page underneath. */
+    private val inkView: () -> View? = { null },
 ) : PenInputController {
     private var touchHelper: TouchHelper? = null
     private var penViewRef: java.lang.ref.WeakReference<View>? = null
@@ -94,18 +90,42 @@ internal class OnyxPenController(
     private var lastLimitRect: Rect? = null
     private var lastExcludeRects: List<Rect> = emptyList()
     private var currentStyle: Int = TouchHelper.STROKE_STYLE_FOUNTAIN
-    private var pendingReEnable: Runnable? = null
+    private var pendingIdleRefresh: Runnable? = null
 
     /** Monotonic ms timestamp of the last Onyx raw callback we saw (begin/move/end). */
     @Volatile internal var lastRawCallbackMs: Long = 0L
 
+    private fun inkTarget(): View? = inkView() ?: penViewRef?.get()
+
+    /** Fast monochrome updates while the pen is down; the mode is per view, so it must be the ink's. */
     private fun setEpdFastDraw() {
-        val v = penViewRef?.get() ?: return
+        cancelIdleRefresh()
+        val v = inkTarget() ?: return
         try { EpdController.setViewDefaultUpdateMode(v, UpdateMode.DU) } catch (_: Exception) {}
     }
-    private fun setEpdFullColor() {
-        val v = penViewRef?.get() ?: return
-        try { EpdController.setViewDefaultUpdateMode(v, UpdateMode.GC) } catch (_: Exception) {}
+
+    /**
+     * One full refresh after the pen has been idle, not one per stroke: a word written in
+     * one go used to flash between every letter.
+     */
+    private fun scheduleIdleRefresh() {
+        val v = inkTarget() ?: return
+        cancelIdleRefresh()
+        val runnable = Runnable {
+            pendingIdleRefresh = null
+            try {
+                EpdController.setViewDefaultUpdateMode(v, UpdateMode.GC)
+                EpdController.invalidate(v, UpdateMode.GC)
+            } catch (_: Exception) {}
+        }
+        pendingIdleRefresh = runnable
+        v.postDelayed(runnable, IDLE_REFRESH_MS)
+    }
+
+    private fun cancelIdleRefresh() {
+        val runnable = pendingIdleRefresh ?: return
+        inkTarget()?.removeCallbacks(runnable)
+        pendingIdleRefresh = null
     }
 
     private val callback = object : RawInputCallback() {
@@ -145,8 +165,7 @@ internal class OnyxPenController(
                 onStrokeProgress?.invoke()
                 onStrokeCommitted?.invoke()
             }
-            scheduleReEnableAfterCooldown()
-            setEpdFullColor()
+            scheduleIdleRefresh()
         }
         override fun onRawDrawingTouchPointMoveReceived(tp: TouchPoint) {
             lastRawCallbackMs = System.currentTimeMillis()
@@ -173,30 +192,8 @@ internal class OnyxPenController(
             eraserPath.clear()
             onErasePath?.invoke(path, t)
             onEraseApplied(removed)
-            scheduleReEnableAfterCooldown()
-            setEpdFullColor()
+            scheduleIdleRefresh()
         }
-    }
-
-    /**
-     * After a stroke or erase ends, disable raw drawing briefly so finger taps on
-     * the toolbar aren't blocked, then ask the overlay whether it should be re-enabled.
-     * Routing the re-enable through [requestReEnable] lets the overlay suppress it
-     * if a mode change happened during the cooldown.
-     */
-    private fun scheduleReEnableAfterCooldown() {
-        val helper = touchHelper ?: return
-        Log.d(DRAW_TAG, "scheduleReEnableAfterCooldown: setRawDrawingEnabled(false) + post 50ms")
-        helper.setRawDrawingEnabled(false)
-        val view = penViewRef?.get() ?: return
-        pendingReEnable?.let { view.removeCallbacks(it) }
-        val runnable = Runnable {
-            pendingReEnable = null
-            Log.d(DRAW_TAG, "cooldown runnable fired: invoking requestReEnable")
-            requestReEnable?.invoke() ?: touchHelper?.setRawDrawingEnabled(true)
-        }
-        pendingReEnable = runnable
-        view.postDelayed(runnable, 50)
     }
 
     override fun open(view: View, limitRect: Rect, excludeRects: List<Rect>) {
@@ -222,7 +219,6 @@ internal class OnyxPenController(
 
     override fun setEnabled(enabled: Boolean) {
         Log.d(DRAW_TAG, "setEnabled($enabled)")
-        if (!enabled) cancelPendingReEnable()
         touchHelper?.setRawDrawingEnabled(enabled)
     }
     override fun setStrokeWidth(width: Float) {
@@ -244,7 +240,6 @@ internal class OnyxPenController(
     override fun resetRenderBuffer() {
         val helper = touchHelper ?: return
         Log.w(DRAW_TAG, "resetRenderBuffer: CLOSE+REOPEN raw drawing", Throwable("reset stacktrace"))
-        cancelPendingReEnable()
         helper.setRawDrawingEnabled(false)
         helper.closeRawDrawing()
         // Re-apply all state that closeRawDrawing may have dropped.
@@ -264,7 +259,6 @@ internal class OnyxPenController(
     internal fun recreateHelper() {
         val view = penViewRef?.get() ?: return
         Log.w(DRAW_TAG, "recreateHelper: nuclear reset of TouchHelper", Throwable("recreate stacktrace"))
-        cancelPendingReEnable()
         touchHelper?.let { old ->
             runCatching { old.setRawDrawingEnabled(false) }
             runCatching { old.closeRawDrawing() }
@@ -282,21 +276,17 @@ internal class OnyxPenController(
     }
 
     override fun close() {
-        cancelPendingReEnable()
+        cancelIdleRefresh()
         touchHelper?.setRawDrawingEnabled(false)
         touchHelper?.closeRawDrawing()
         touchHelper = null
     }
 
-    private fun cancelPendingReEnable() {
-        val runnable = pendingReEnable ?: return
-        penViewRef?.get()?.removeCallbacks(runnable)
-        pendingReEnable = null
-    }
-
     companion object {
         const val ERASER_RADIUS = 30f
         const val DRAW_TAG = "EinkDraw"
+        /** Quiet time after the last stroke before the ink gets its one full refresh. */
+        const val IDLE_REFRESH_MS = 700L
     }
 }
 
@@ -314,7 +304,7 @@ internal class PenOverlay(
 ) {
     private val bridge = WebViewBridge(webView)
     private val controller: PenInputController by lazy {
-        val c = controllerOverride ?: OnyxPenController(buf, ::currentTransform, onEraseApplied = { removedIndices ->
+        val c = controllerOverride ?: OnyxPenController(buf, ::currentTransform, inkView = { strokeView }, onEraseApplied = { removedIndices ->
             if (removedIndices.isNotEmpty()) {
                 _bindGroups.removeAll { bg -> bg.strokeIndices.all { it in removedIndices } }
                 _bindGroups.replaceAll { bg ->
@@ -361,9 +351,6 @@ internal class PenOverlay(
         }
         if (c is OnyxPenController && c.onErasePath == null) {
             c.onErasePath = { path, transform -> eraseBindGroupsNearPath(path, transform) }
-        }
-        if (c is OnyxPenController) {
-            c.requestReEnable = { applyDrawingState() }
         }
         c
     }
@@ -967,8 +954,7 @@ internal class PenOverlay(
     }
 
     private fun notifyStrokeViewLive() {
-        val all = buf.allStrokes()
-        strokeView?.update(all, currentTransform())
+        strokeView?.updateLive(buf.allStrokes(), currentTransform())
     }
 
     /**
