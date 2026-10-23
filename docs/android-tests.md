@@ -2,14 +2,14 @@
 
 JVM unit tests under `android/app/src/test`, run with `just test-android`
 (`./gradlew testDebugUnitTest` in `android/`). Robolectric stands in for the device;
-no emulator or tablet is needed. Total: **280 tests**, 0 failures, 3 skipped (the E2E
+no emulator or tablet is needed. Total: **285 tests**, 0 failures, 3 skipped (the E2E
 suite, which needs a live server and `ANTHROPIC_API_KEY`).
 
 | Class | Tests | What it holds |
 |-------|------:|---------------|
 | `StrokeBufferTest` | 65 | The pure stroke accumulator: begin/add/end, undo, clear, erase by radius, per-stroke width, proximity grouping. |
 | `PenOverlayTest` | 72 | The overlay around the Onyx controller: toolbar exclusion, undo/clear syncing the StrokeView and the hardware layer, scroll ghost lines, style and width, export, re-arming the pen after a resize or page load. |
-| `MainActivityTest` | 25 | Robolectric: which screen shows on launch, tool-mode transitions, `drawControls` and `contextBar` visibility, the clear confirmation, the quiet notification channel. |
+| `MainActivityTest` | 27 | Robolectric: which screen shows on launch, tool-mode transitions, `drawControls` and `contextBar` visibility, the clear confirmation, the quiet notification channel. |
 | `PenToolbarLayoutTest` | 3 | The toolbar laid out at the tablet's 992dp portrait width fits with slack in DRAW and in MOVE mode with the context bar, DONE is on screen, and the colour drawer opens over its button. |
 | `RenderGoldenTest` | 18 | Golden PNGs for `renderStrokesToPng`; regenerate with `just golden-android`. |
 | `AnnotationRelocationTest` | 16 | The client half of relocation: ink follows its paragraph's top-left, a bound note whose paragraph is gone is archived, and the archived count is truthful. |
@@ -33,3 +33,29 @@ just coverage-android  # JaCoCo report
 just golden-android    # regenerate RenderGoldenTest PNGs after an intentional change
 just test-android-e2e  # the E2E suite against a built eink-serve
 ```
+
+## How long it takes, and why
+
+~9.5 s of test execution on a warm daemon, ~0.5 s when nothing Kotlin-ish changed
+(Gradle's up-to-date check and the build cache). Three things account for the rest:
+
+- **Robolectric boots an Android runtime once per test JVM, ~2.9 s.** A single trivial
+  test costs that on its own. This is why `maxParallelForks = 1`: measured at 9.8 s with
+  one fork, 10.5 s with two and 10.0 s with four on a 32-core machine, because every fork
+  pays the boot again and `MainActivityTest` bounds the wall time either way.
+- **Each `ActivityScenario.launch` is ~115 ms.** `MainActivityTest` pays 27 of them
+  (~3 s); the tests are kept separate so a failure names one behaviour.
+- **`org.gradle.configuration-cache` + `org.gradle.caching`** (in `gradle.properties`)
+  reuse the configuration and task outputs between runs.
+
+`jacocoTestReport` is no longer `finalizedBy` every test run (it cost ~0.6 s per run and
+`just coverage-android` names it explicitly).
+
+### About the coverage number
+
+`just coverage-android` under-reports. Classes that Robolectric loads through its sandbox
+classloader are reported at 0 % even where 27 tests exercise them (`MainActivity`,
+`PenOverlay`, `StrokeView`), while pure-Kotlin classes are accurate
+(`BindGestureHandler` 100 %, `StrokeBuffer` 86 %, `MetricsReporter` 62 %). Treat the
+report as directional, and the 285 tests plus the five `gradle:` mutation cases as the
+real statement of confidence.

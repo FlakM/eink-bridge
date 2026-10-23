@@ -44,11 +44,16 @@ android {
             // `android.util.Log` is a stub in JVM tests; without this any class that logs
             // throws "not mocked" and the test says nothing about the behaviour.
             isReturnDefaultValues = true
-            all {
-                it.finalizedBy(tasks.named("jacocoTestReport"))
-            }
         }
     }
+}
+
+tasks.withType<Test>().configureEach {
+    // One fork on purpose. Robolectric boots an Android runtime inside whichever test JVM
+    // runs first (~3 s) and every extra fork pays that again; measured at 9.8 s (one
+    // fork), 10.5 s (two) and 10.0 s (four) on a 32-core machine, with the slowest class
+    // (MainActivityTest) bounding the wall time either way. Raise it only with numbers.
+    maxParallelForks = 1
 }
 
 tasks.register<JacocoReport>("jacocoTestReport") {

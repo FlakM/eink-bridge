@@ -12,8 +12,9 @@ just
 ## Common Commands
 
 ```bash
-just test
-just test-render
+just test          # server + tablet + harness: the whole gate
+just test-server   # server tests only (~3s between edits)
+just test-render   # render tests only
 just eval
 just lint
 ```

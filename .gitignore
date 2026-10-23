@@ -4,6 +4,7 @@ result
 android/app/build/
 android/local.properties
 android/.gradle/
+android/.kotlin/
 android/build/
 node_modules/
 __pycache__/

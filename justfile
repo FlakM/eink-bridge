@@ -11,8 +11,12 @@ default:
 
 # ─── Testing ───────────────────────────────────────────────────────────
 
-# run all server tests (unit + integration) — every binary in parallel
-test:
+# run every test: server, tablet and harness
+test: test-server test-android harness-test
+    @echo "all tests passed: server, tablet, harness"
+
+# run all server tests (unit + integration) — every binary in parallel (~3s)
+test-server:
     cd {{server_dir}} && cargo nextest run
 
 # run all server tests through plain cargo (slower: one test binary at a time)
@@ -23,7 +27,7 @@ test-cargo:
 test-render:
     cd {{server_dir}} && cargo nextest run --lib render::tests
 
-# the tight loop: in-process tests only, no server, no sockets (~2s)
+# the tight loop: in-process server tests only, no sockets (~1s)
 test-fast:
     cd {{server_dir}} && cargo nextest run --lib --test health_test --test api_edge_test --test render_validation_test --test eval_render_golden_test --test eval_contract_test
 
@@ -206,7 +210,7 @@ logs-recent n='50':
 
 # run android unit tests
 test-android:
-    cd android && ./gradlew testDebugUnitTest
+    cd android && ./gradlew testDebugUnitTest --console=plain -q
 
 # portable OpenCode watcher and Claude MCP-channel contracts
 test-delivery:
@@ -313,11 +317,11 @@ manual-e2e file='README.md':
 
 # ─── CI / pre-commit checks ───────────────────────────────────────────
 
-# full check: fmt + clippy + test + eval + nix build
+# full check: fmt + clippy + every test + eval + nix build
 ci: check-fmt clippy lint-assets test eval nix-build
     @echo "all checks passed"
 
-# quick pre-commit: fmt check + clippy + fast tests
+# pre-commit: fmt check + clippy + server, tablet and harness tests (~20s)
 pre-commit: check-fmt clippy test
     @echo "ready to commit"
 
@@ -411,11 +415,11 @@ doctor host='localhost:3333':
 
 # watch for changes and re-run render tests
 watch-render:
-    cd {{server_dir}} && cargo watch -c -x 'test render::tests'
+    cd {{server_dir}} && cargo watch -c -x 'nextest run --lib render::tests'
 
-# watch for changes and re-run all tests
+# watch for changes and re-run all server tests
 watch:
-    cd {{server_dir}} && cargo watch -c -x test
+    cd {{server_dir}} && cargo watch -c -x 'nextest run'
 
 # ─── Cleanup ───────────────────────────────────────────────────────────
 

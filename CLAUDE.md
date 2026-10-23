@@ -124,11 +124,14 @@ a document that can carry script, and an image URL shares the page's origin.
 Use `just` for all common operations. Run `just` to see all recipes.
 
 ```bash
-just test          # all server tests, every binary in parallel (~3s)
-just test-fast     # in-process tests only: no server, no sockets (~1s)
+just test          # everything: server, tablet, harness (~15s, 7s when the tablet is unchanged)
+just test-server   # server tests only, every binary in parallel (~3s)
+just test-fast     # in-process server tests only: no sockets (~1s)
 just test-render   # render unit tests only (~0.5s)
 just test-one NAME # single test by name
-just test-cargo    # the same suite through plain cargo (slower, no nextest)
+just test-cargo    # the server suite through plain cargo (slower, no nextest)
+just test-android  # tablet unit tests only (gradle)
+just harness-test  # python harness tests only
 just test-mutations # reintroduce each known bug, expect a test to fail
 just lint          # fmt + clippy
 just deploy        # nix build + restart service + verify the restart took
@@ -136,10 +139,14 @@ just verify-deploy # prove the running server is the build in ./result
 just ci            # full CI check
 ```
 
-`just test` is the default because it is fast enough to run before every commit: 382
-tests across 25 binaries in about three seconds, against 28 s when `cargo test` ran the
-binaries one after another. `server/.config/nextest.toml` leaves retries at zero on
-purpose -- a flaky test is a bug worth seeing, not a nuisance to paper over.
+`just test` is the gate: the Rust suite (404 tests across 25 binaries, about three
+seconds), the tablet's 285 JVM tests, and the 85 harness tests. The server part is fast
+enough to run before every commit because `cargo nextest` runs the binaries in parallel,
+against 28 s when `cargo test` ran them one after another. `just test-server` is what to
+run while editing the server; gradle's test task is up-to-date-aware, so a second
+`just test` with no Kotlin change costs only the server and harness time.
+`server/.config/nextest.toml` leaves retries at zero on purpose -- a flaky test is a bug
+worth seeing, not a nuisance to paper over.
 
 ## Quick test loop -- use this for validation
 
@@ -148,8 +155,9 @@ Most changes can be validated without a server or device:
 ```bash
 just test-render                            # all render unit tests
 just test-one toc_shows_for_single_heading  # single test by name
-just test-fast                              # in-process tests only
-just test                                   # everything (~3s)
+just test-fast                              # in-process server tests only
+just test-server                            # all server tests (~3s)
+just test                                   # everything, before committing
 ```
 
 ## Eval harness (golden tests)
@@ -235,7 +243,7 @@ just test-android        # Android unit tests only (no coverage)
 Use `/coverage` skill for automated analysis of gaps.
 
 Last measured: **91.6% of Rust lines** — and **~95%** of everything that is not an
-entrypoint or a benchmark. Together with 280 Android unit tests and every mutation caught
+entrypoint or a benchmark. Together with 285 Android unit tests and every mutation caught
 by `just test-mutations`.
 
 Two caveats when reading the number. Subprocess runs do count (the CLI and mock device are
@@ -394,7 +402,7 @@ label values are escaped: one malformed line and the whole batch is rejected, si
 ### The tablet (`android/`)
 
 ```bash
-just test-android        # all JVM unit tests (280 of them)
+just test-android        # all JVM unit tests (285 of them)
 just coverage-android    # JaCoCo report
 ```
 
