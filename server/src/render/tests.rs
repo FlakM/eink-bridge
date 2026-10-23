@@ -923,6 +923,38 @@ fn session_id_embedded_in_html() {
 }
 
 #[test]
+fn a_document_image_is_served_from_the_session_that_owns_it() {
+    // The brief says where the image is inside the document; the page has to say where
+    // the server serves it from, because a relative URL would resolve against /session/{id}
+    // and 404.
+    let html = to_eink_html("![error page](image/shot.png)", "abc123");
+    assert!(
+        html.contains("src=\"/api/sessions/abc123/image/shot.png\""),
+        "the image was not pointed at the session route: {html}"
+    );
+    assert!(
+        !html.contains("src=\"image/"),
+        "a bare image/ path survived"
+    );
+}
+
+#[test]
+fn an_image_that_is_not_a_session_image_is_left_alone() {
+    // An absolute or external URL belongs to whoever wrote it.
+    for markdown in [
+        "![x](https://example.com/a.png)",
+        "![x](image-files/a.png)",
+        "![x](/elsewhere/a.png)",
+    ] {
+        let html = to_eink_html(markdown, "abc123");
+        assert!(
+            !html.contains("/api/sessions/abc123/image/"),
+            "{markdown} was rewritten as a session image"
+        );
+    }
+}
+
+#[test]
 fn assets_script_tags_present() {
     let html = render("hello");
     assert!(html.contains("src=\"/assets/diagram/mermaid.min.js\""));

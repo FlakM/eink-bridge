@@ -40,7 +40,9 @@ Hack on an idea, plan, or codebase in an AI tool or vim. Send it to an e-ink tab
 - [x] diagram blocks with Mermaid, ELK graph layout, and custom mindmap syntax
 - [x] code blocks with syntax highlighting (syntect, e-ink-tuned theme)
 - [x] rich meta information rendering (hidden by default, revealed on tap)
-- [x] image inclusion in the rendered document
+- [x] image inclusion in the rendered document: a screenshot, sketch or photo travels with
+  the brief (`image/<name>`) and is served from the session that owns it, so no other host
+  has to stay up
 - [x] use of colors for emphasis and organization (e.g. red for warnings, green for good parts, blue for questions)
 
 ## Usage
@@ -62,6 +64,12 @@ cat notes.md | eink-review push -
 
 # non-blocking — prints session ID
 eink-review push --async document.md
+
+# a picture travels with the brief; ![x](shot.png) beside the document is uploaded too
+eink-review push --async brief.md --image shot.png
+
+# add one to a review that is already running; prints the markdown to paste
+eink-review image <session-id> sketch.png --alt "whiteboard sketch"
 
 # check result
 eink-review result <session-id>
@@ -471,8 +479,9 @@ Enter the dev shell with `nix develop`, then use `just` for all common tasks:
 
 ```bash
 just                  # list all recipes
-just test             # unit + integration tests
-just test-render      # render tests only (~0.02s)
+just test             # server + tablet + harness (~15s, the whole gate)
+just test-server      # server tests only (~3s)
+just test-render      # render tests only (~0.5s)
 just eval             # render + contract goldens
 just lint             # format + clippy
 just build            # cargo dev build

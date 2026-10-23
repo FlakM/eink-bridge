@@ -2,11 +2,15 @@ use clap::{Parser, Subcommand};
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;
 use std::io::Read as _;
+use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
 use std::time::{Duration, Instant};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use eink_bridge::api::SCHEMA_VERSION;
+use eink_bridge::images::{
+    alt_from_name, bytes_are_image, document_image_type, format_label, image_name,
+};
 use eink_bridge::session::SessionOrigin;
 
 #[derive(Parser)]
@@ -24,8 +28,8 @@ struct Cli {
 enum Command {
     /// Push content for review
     Push {
-        /// File to push (use - for stdin)
-        file: String,
+        /// File to push (use - for stdin). Omit when the push is only --image
+        file: Option<String>,
         /// Session title
         #[arg(long)]
         title: Option<String>,
@@ -50,6 +54,10 @@ enum Command {
         /// Attach a tag to the session (repeatable), k=v
         #[arg(long = "tag", value_name = "K=V")]
         tags: Vec<String>,
+        /// Attach an image (repeatable). A markdown reference to the file is retargeted
+        /// where it stands; an unreferenced image is added at the end of the document
+        #[arg(long = "image", value_name = "PATH")]
+        images: Vec<String>,
     },
     /// Pin a session so it survives purge, expire, and server restarts
     Star {
@@ -76,6 +84,20 @@ enum Command {
         /// Zero-based annotation indices incorporated, comma-separated
         #[arg(long, value_delimiter = ',')]
         consumed: Vec<u32>,
+        /// Attach an image (repeatable). A markdown reference to the file is retargeted
+        /// where it stands; an unreferenced image is added at the end of the document
+        #[arg(long = "image", value_name = "PATH")]
+        images: Vec<String>,
+    },
+    /// Add an image to a session and print the markdown that shows it
+    Image {
+        /// Session ID
+        id: String,
+        /// Image file (png, jpg, jpeg, webp or gif)
+        file: String,
+        /// Alt text; defaults to the file name without its extension
+        #[arg(long)]
+        alt: Option<String>,
     },
     /// Print a session's current markdown
     Content {
@@ -169,6 +191,7 @@ async fn main() {
         Command::List { .. } => "list",
         Command::Star { .. } => "star",
         Command::Unstar { .. } => "unstar",
+        Command::Image { .. } => "image",
     };
 
     let start = std::time::Instant::now();
@@ -183,11 +206,12 @@ async fn main() {
             callback_url,
             star,
             tags,
+            images,
         } => {
             cmd_push(
                 &client,
                 &cli.server,
-                &file,
+                file.as_deref(),
                 title,
                 timeout,
                 non_blocking,
@@ -196,6 +220,7 @@ async fn main() {
                 callback_url,
                 star,
                 tags,
+                images,
             )
             .await
         }
@@ -205,6 +230,7 @@ async fn main() {
             expected_version,
             feedback_id,
             consumed,
+            images,
         } => {
             cmd_update(
                 &cli.server,
@@ -213,9 +239,11 @@ async fn main() {
                 expected_version,
                 feedback_id,
                 consumed,
+                images,
             )
             .await
         }
+        Command::Image { id, file, alt } => cmd_image(&client, &cli.server, &id, &file, alt).await,
         Command::Content { id, json } => cmd_content(&client, &cli.server, &id, json).await,
         Command::Progress {
             id,
@@ -301,7 +329,7 @@ async fn push_cli_metrics(command: &str, duration_secs: f64, result: &str) {
 async fn cmd_push(
     client: &Client,
     server: &str,
-    file: &str,
+    file: Option<&str>,
     title: Option<String>,
     timeout_minutes: u64,
     non_blocking: bool,
@@ -310,6 +338,7 @@ async fn cmd_push(
     callback_url: Option<String>,
     star: bool,
     tags: Vec<String>,
+    images: Vec<String>,
 ) -> anyhow::Result<()> {
     let mut tag_map = std::collections::HashMap::new();
     for tag in tags {
@@ -321,20 +350,40 @@ async fn cmd_push(
         }
         tag_map.insert(key.to_string(), value.to_string());
     }
-    let content = if file == "-" {
-        let mut buf = String::new();
-        std::io::stdin().read_to_string(&mut buf)?;
-        buf
-    } else {
-        std::fs::read_to_string(file)?
+    let mut content = match file {
+        None => String::new(),
+        Some("-") => {
+            let mut buf = String::new();
+            std::io::stdin().read_to_string(&mut buf)?;
+            buf
+        }
+        Some(path) => std::fs::read_to_string(path)?,
     };
+    if file.is_none() && images.is_empty() {
+        anyhow::bail!("nothing to push: give a file to read or --image to attach");
+    }
+    let base_dir = match file {
+        Some(path) if path != "-" => Path::new(path).parent().map(Path::to_path_buf),
+        _ => None,
+    }
+    .unwrap_or_else(|| PathBuf::from("."));
+    let images = collect_images(&mut content, &base_dir, &images)?;
+    check_upload_size(&content, &images)?;
 
-    let title = title.or_else(|| extract_title(&content));
+    // A push that carries only pictures needs a name in the session list; the first
+    // picture's file name is the honest one.
+    let title = match title.or_else(|| extract_title(&content)) {
+        Some(title) => Some(title),
+        None if file.is_none() => images
+            .first()
+            .map(|image| alt_from_name(&image.name).to_string()),
+        None => None,
+    };
     let origin = capture_origin();
 
-    let resp = client
-        .post(format!("{server}/api/sessions"))
-        .json(&serde_json::json!({
+    let request = client.post(format!("{server}/api/sessions"));
+    let request = if images.is_empty() {
+        request.json(&serde_json::json!({
             "schema_version": SCHEMA_VERSION,
             "title": title,
             "content": content,
@@ -343,10 +392,34 @@ async fn cmd_push(
             "tags": tag_map,
             "origin": origin,
         }))
-        .send()
-        .await?;
+    } else {
+        // The images travel with the create request so the first render already shows
+        // them: uploading afterwards would bump the version and redraw the page.
+        let mut form = reqwest::multipart::Form::new()
+            .text("content", content)
+            .text("starred", if star { "true" } else { "false" })
+            .text("tags", serde_json::to_string(&tag_map)?)
+            .text("origin", serde_json::to_string(&origin)?);
+        if let Some(title) = &title {
+            form = form.text("title", title.clone());
+        }
+        if let Some(callback_url) = &callback_url {
+            form = form.text("callback_url", callback_url.clone());
+        }
+        for image in &images {
+            form = form.part(
+                "image",
+                reqwest::multipart::Part::bytes(image.read()?).file_name(image.name.clone()),
+            );
+        }
+        request.multipart(form)
+    };
+
+    let resp = request.send().await?;
     if !resp.status().is_success() {
-        anyhow::bail!("failed to create session: {}", resp.status());
+        let status = resp.status();
+        let detail = resp.text().await.unwrap_or_default();
+        anyhow::bail!("failed to create session: {status}: {detail}");
     }
 
     let body: serde_json::Value = resp.json().await?;
@@ -394,6 +467,227 @@ async fn cmd_push(
             s => anyhow::bail!("unexpected status: {s}"),
         }
     }
+}
+
+/// How much a create or an image upload may weigh. The server enforces the same bound
+/// (see `MAX_BODY_SIZE` in `app.rs`); checking here names the file that is too big instead
+/// of failing the request with a bare 413.
+const MAX_UPLOAD_BYTES: usize = 10 * 1024 * 1024;
+
+/// An image the document displays, ready to travel with the request that carries it.
+#[derive(Debug)]
+struct DocumentImage {
+    name: String,
+    path: PathBuf,
+}
+
+impl DocumentImage {
+    fn read(&self) -> anyhow::Result<Vec<u8>> {
+        Ok(std::fs::read(&self.path)?)
+    }
+}
+
+/// Turn a document's local image references into `image/<name>` and collect the files that
+/// must be uploaded with it.
+///
+/// A reference is local when it is a relative path that exists on disk next to the
+/// markdown. Anything else — `https://…`, an absolute path, a `data:` URI, or an
+/// `image/…/` reference whose file is not here — is left exactly as written: it is either
+/// already a session image or a picture the reader's browser fetches itself.
+fn collect_images(
+    content: &mut String,
+    base_dir: &Path,
+    extra: &[String],
+) -> anyhow::Result<Vec<DocumentImage>> {
+    let references: Vec<String> = pulldown_cmark::Parser::new(content.as_str())
+        .filter_map(|event| match event {
+            pulldown_cmark::Event::Start(pulldown_cmark::Tag::Image { dest_url, .. }) => {
+                Some(dest_url.to_string())
+            }
+            _ => None,
+        })
+        .collect();
+
+    let mut images: Vec<DocumentImage> = Vec::new();
+    for reference in references {
+        if is_external_image(&reference) {
+            continue;
+        }
+        let path = base_dir.join(&reference);
+        if !path.is_file() {
+            continue;
+        }
+        let name = image_name(&reference).to_string();
+        check_image_file(&name, &path)?;
+        retarget_image(content, &reference, &name)?;
+        add_image(&mut images, DocumentImage { name, path })?;
+    }
+
+    for given in extra {
+        let path = PathBuf::from(given);
+        if !path.is_file() {
+            anyhow::bail!("no such image: {given}");
+        }
+        let name = image_name(given).to_string();
+        check_image_file(&name, &path)?;
+        let reference = format!("image/{name}");
+        if !content.contains(&reference) {
+            // A push that is only a picture starts with it, not with two blank lines.
+            if !content.trim().is_empty() {
+                if !content.ends_with('\n') {
+                    content.push('\n');
+                }
+                content.push('\n');
+            }
+            content.push_str(&format!("![{}]({reference})\n", alt_from_name(&name)));
+        }
+        add_image(&mut images, DocumentImage { name, path })?;
+    }
+    Ok(images)
+}
+
+/// A reference that does not point at a file next to the document.
+fn is_external_image(reference: &str) -> bool {
+    let reference = reference.trim();
+    if reference.is_empty() || reference.starts_with('/') || reference.starts_with("data:") {
+        return true;
+    }
+    // Any URL scheme, including `image:` and `https:`.
+    reference
+        .split_once(':')
+        .is_some_and(|(scheme, _)| scheme.len() > 1 && !scheme.contains('/'))
+}
+
+fn check_image_file(name: &str, path: &Path) -> anyhow::Result<()> {
+    let Some(content_type) = document_image_type(name) else {
+        anyhow::bail!(
+            "cannot attach {}: an image name must be a plain file name ending in .png, .jpg, .jpeg, .webp or .gif",
+            path.display()
+        );
+    };
+    let bytes = std::fs::read(path)?;
+    if !bytes_are_image(content_type, &bytes) {
+        anyhow::bail!(
+            "{} is named like a {} image but its bytes are something else",
+            path.display(),
+            format_label(content_type)
+        );
+    }
+    Ok(())
+}
+
+/// Keep the picture where the author put it. The markdown is text, so this rewrites the
+/// destination of the reference that names the file, not the whole document.
+fn retarget_image(content: &mut String, reference: &str, name: &str) -> anyhow::Result<()> {
+    let target = format!("image/{name}");
+    if reference == target {
+        return Ok(());
+    }
+    let before = content.clone();
+    *content = content
+        .replace(&format!("]({reference})"), &format!("]({target})"))
+        .replace(&format!("](<{reference}>)"), &format!("]({target})"))
+        .replace(&format!("]({reference} "), &format!("]({target} "));
+    if *content == before {
+        // The file is there and a reference names it, but not in a shape this rewrite
+        // recognises. Silently leaving the local path would ship a broken image.
+        anyhow::bail!(
+            "found {reference} on disk but could not rewrite the markdown reference to it; write it as ![alt]({reference})"
+        );
+    }
+    Ok(())
+}
+
+fn add_image(images: &mut Vec<DocumentImage>, image: DocumentImage) -> anyhow::Result<()> {
+    if let Some(existing) = images.iter().find(|existing| existing.name == image.name) {
+        if existing.path != image.path {
+            anyhow::bail!(
+                "two different images are both named {}; rename one of them ({} and {})",
+                image.name,
+                existing.path.display(),
+                image.path.display()
+            );
+        }
+        return Ok(());
+    }
+    images.push(image);
+    Ok(())
+}
+
+fn check_upload_size(content: &str, images: &[DocumentImage]) -> anyhow::Result<()> {
+    let mut total = content.len() + 2048; // multipart framing
+    for image in images {
+        total += std::fs::metadata(&image.path).map_or(0, |meta| meta.len()) as usize;
+    }
+    if total > MAX_UPLOAD_BYTES {
+        anyhow::bail!(
+            "the document and its {} image(s) total {} MiB; the server accepts {} MiB per request — shrink the images or push them in a second round",
+            images.len(),
+            total / (1024 * 1024),
+            MAX_UPLOAD_BYTES / (1024 * 1024)
+        );
+    }
+    Ok(())
+}
+
+async fn upload_image(
+    client: &Client,
+    server: &str,
+    id: &str,
+    image: &DocumentImage,
+) -> anyhow::Result<()> {
+    let content_type = document_image_type(&image.name).unwrap_or("application/octet-stream");
+    let resp = client
+        .post(format!("{server}/api/sessions/{id}/image/{}", image.name))
+        .header("content-type", content_type)
+        .body(image.read()?)
+        .send()
+        .await?;
+    match resp.status().as_u16() {
+        201 => Ok(()),
+        400 => anyhow::bail!(
+            "image {} refused: {}",
+            image.name,
+            resp.text().await.unwrap_or_default()
+        ),
+        404 => anyhow::bail!("session {id} not found"),
+        409 => anyhow::bail!("session {id} is no longer active; its document cannot change"),
+        413 => anyhow::bail!("image {} is too large for the server", image.name),
+        status => anyhow::bail!("unexpected status {status} while uploading {}", image.name),
+    }
+}
+
+async fn upload_images(
+    client: &Client,
+    server: &str,
+    id: &str,
+    images: &[DocumentImage],
+) -> anyhow::Result<()> {
+    for image in images {
+        upload_image(client, server, id, image).await?;
+    }
+    Ok(())
+}
+
+async fn cmd_image(
+    client: &Client,
+    server: &str,
+    id: &str,
+    file: &str,
+    alt: Option<String>,
+) -> anyhow::Result<()> {
+    let image = DocumentImage {
+        name: image_name(file).to_string(),
+        path: PathBuf::from(file),
+    };
+    if !image.path.is_file() {
+        anyhow::bail!("no such image: {file}");
+    }
+    check_image_file(&image.name, &image.path)?;
+    upload_image(client, server, id, &image).await?;
+    let alt = alt.unwrap_or_else(|| alt_from_name(&image.name).to_string());
+    println!("![{alt}](image/{})", image.name);
+    Ok(())
 }
 
 async fn cmd_push_interactive(server: &str, id: &str, timeout_minutes: u64) -> anyhow::Result<()> {
@@ -548,9 +842,18 @@ async fn cmd_update(
     expected_version: Option<u32>,
     feedback_id: Option<String>,
     consumed: Vec<u32>,
+    images: Vec<String>,
 ) -> anyhow::Result<()> {
-    let content = std::fs::read_to_string(file)?;
+    let mut content = std::fs::read_to_string(file)?;
+    let base_dir = Path::new(file)
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let images = collect_images(&mut content, &base_dir, &images)?;
+    check_upload_size(&content, &images)?;
     let client = Client::new();
+    // New pictures have to exist before the document that points at them is served.
+    upload_images(&client, server, id, &images).await?;
     // A plain-text update stays the default: it is what the watcher and older agents do,
     // and it cannot acknowledge anything by accident.
     let guarded = expected_version.is_some() || feedback_id.is_some() || !consumed.is_empty();
@@ -1027,6 +1330,130 @@ fn extract_title(markdown: &str) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn png() -> Vec<u8> {
+        b"\x89PNG\r\n\x1a\n0000".to_vec()
+    }
+
+    #[test]
+    fn a_picture_next_to_the_brief_is_retargeted_at_the_session_route() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("shot.png"), png()).unwrap();
+        let mut content =
+            "![the error page](shot.png)\n\n![web](https://example.com/x.png)\n".to_string();
+
+        let images = collect_images(&mut content, dir.path(), &[]).unwrap();
+
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].name, "shot.png");
+        assert!(
+            content.contains("![the error page](image/shot.png)"),
+            "{content}"
+        );
+        // A remote picture is not the server's to store, and an absolute path is not a
+        // file beside the brief.
+        assert!(content.contains("https://example.com/x.png"), "{content}");
+    }
+
+    #[test]
+    fn a_document_that_is_only_a_picture_starts_with_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let shot = dir.path().join("shot.png");
+        std::fs::write(&shot, png()).unwrap();
+        let mut content = String::new();
+
+        collect_images(
+            &mut content,
+            dir.path(),
+            &[shot.to_string_lossy().to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(content, "![shot](image/shot.png)\n");
+    }
+
+    #[test]
+    fn an_image_the_brief_does_not_mention_is_added_at_the_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let sketch = dir.path().join("whiteboard.png");
+        std::fs::write(&sketch, png()).unwrap();
+        let mut content = "# Plan\n\nOnly words.\n".to_string();
+
+        collect_images(
+            &mut content,
+            dir.path(),
+            &[sketch.to_string_lossy().to_string()],
+        )
+        .unwrap();
+
+        assert!(
+            content.ends_with("![whiteboard](image/whiteboard.png)\n"),
+            "{content}"
+        );
+    }
+
+    #[test]
+    fn a_picture_already_referenced_by_name_is_not_added_twice() {
+        let dir = tempfile::tempdir().unwrap();
+        let shot = dir.path().join("shot.png");
+        std::fs::write(&shot, png()).unwrap();
+        let mut content = "![x](image/shot.png)\n".to_string();
+
+        let images = collect_images(
+            &mut content,
+            dir.path(),
+            &[shot.to_string_lossy().to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(images.len(), 1);
+        assert_eq!(content.matches("image/shot.png").count(), 1, "{content}");
+    }
+
+    #[test]
+    fn a_file_that_is_not_an_image_is_refused_before_the_upload() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("shot.png"), b"just text").unwrap();
+        let mut content = "![x](shot.png)\n".to_string();
+        let message = collect_images(&mut content, dir.path(), &[])
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("bytes are something else"), "{message}");
+    }
+
+    #[test]
+    fn two_images_cannot_share_a_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("one");
+        let second = dir.path().join("two");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        std::fs::write(first.join("shot.png"), png()).unwrap();
+        std::fs::write(second.join("shot.png"), png()).unwrap();
+        let mut content = String::new();
+        let message = collect_images(
+            &mut content,
+            dir.path(),
+            &[
+                first.join("shot.png").to_string_lossy().to_string(),
+                second.join("shot.png").to_string_lossy().to_string(),
+            ],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(message.contains("both named shot.png"), "{message}");
+    }
+
+    #[test]
+    fn only_a_path_to_a_file_beside_the_brief_counts_as_local() {
+        assert!(is_external_image("https://example.com/a.png"));
+        assert!(is_external_image("image:shot.png"));
+        assert!(is_external_image("/tmp/shot.png"));
+        assert!(is_external_image("data:image/png;base64,AAAA"));
+        assert!(is_external_image(""));
+        assert!(!is_external_image("shot.png"));
+        assert!(!is_external_image("pictures/shot.png"));
+    }
 
     #[test]
     fn a_review_exit_code_is_the_contract_a_pipeline_gates_on() {

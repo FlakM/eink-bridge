@@ -27,6 +27,7 @@ use crate::api::{
     SessionResultResponse, SessionSummaryResponse, SetStarredRequest, SubmitReviewRequest,
     openapi_spec,
 };
+use crate::images::{alt_from_name, bytes_are_image, document_image_type, format_label};
 use crate::ocr::OcrEngine;
 use crate::render;
 use crate::session::{NewSession, Session, SessionManager, SessionStatus, SubmitResult};
@@ -616,6 +617,10 @@ pub fn build_app(state: AppState) -> Router {
             "/api/sessions/{id}/annotation/{index}",
             get(annotation_image),
         )
+        .route(
+            "/api/sessions/{id}/image/{name}",
+            post(upload_image).get(document_image),
+        )
         .route("/api/sessions/{id}/source", get(source_snippet))
         .route("/api/sessions/{id}/submit", post(submit_review))
         .route("/api/sessions/{id}/request_update", post(request_update))
@@ -849,37 +854,43 @@ async fn create_session(
     body: Bytes,
 ) -> Response {
     let content_type = content_type(&headers);
-    let request = if content_type.starts_with("application/json") {
+    let (mut request, images) = if content_type.starts_with("application/json") {
         match serde_json::from_slice::<CreateSessionRequest>(&body) {
-            Ok(mut request) => {
-                if request.schema_version.is_none() {
-                    request.schema_version = Some(SCHEMA_VERSION);
-                }
-                if request.title.is_none() {
-                    request.title = params.title.clone();
-                }
-                if request.callback_url.is_none() {
-                    request.callback_url = params.callback_url.clone();
-                }
-                request
-            }
+            Ok(request) => (request, Vec::new()),
             Err(error) => return bad_request(format!("invalid create-session JSON: {error}")),
+        }
+    } else if content_type.starts_with("multipart/form-data") {
+        match parse_multipart_create(&headers, body).await {
+            Ok(parsed) => parsed,
+            Err(response) => return response,
         }
     } else {
         let content = match String::from_utf8(body.to_vec()) {
             Ok(content) => content,
             Err(error) => return bad_request(format!("request body must be valid UTF-8: {error}")),
         };
-        CreateSessionRequest {
-            schema_version: Some(SCHEMA_VERSION),
-            title: params.title,
-            content,
-            callback_url: params.callback_url,
-            tags: HashMap::new(),
-            starred: false,
-            origin: None,
-        }
+        (
+            CreateSessionRequest {
+                schema_version: Some(SCHEMA_VERSION),
+                title: params.title.clone(),
+                content,
+                callback_url: params.callback_url.clone(),
+                tags: HashMap::new(),
+                starred: false,
+                origin: None,
+            },
+            Vec::new(),
+        )
     };
+    if request.schema_version.is_none() {
+        request.schema_version = Some(SCHEMA_VERSION);
+    }
+    if request.title.is_none() {
+        request.title = params.title.clone();
+    }
+    if request.callback_url.is_none() {
+        request.callback_url = params.callback_url.clone();
+    }
 
     if let Some(url) = &request.callback_url
         && let Err(reason) = validate_callback_url(url)
@@ -904,6 +915,7 @@ async fn create_session(
         starred: request.starred,
         origin: request.origin,
         source_root,
+        images,
     });
     tracing::info!(
         id = %session.id,
@@ -1401,6 +1413,96 @@ async fn annotation_image(
     };
     match tokio::fs::read(&path).await {
         Ok(bytes) => ([(header::CONTENT_TYPE, "image/png")], bytes).into_response(),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// Add an image to a session's document. The document is not rewritten: the caller
+/// references it from the markdown as `image/<name>`, which the renderer resolves to this
+/// route, so the same reference works before and after an update.
+async fn upload_image(
+    State(state): State<AppState>,
+    Path((id, name)): Path<(String, String)>,
+    body: Bytes,
+) -> Response {
+    let Some(content_type) = document_image_type(&name) else {
+        return bad_request(format!(
+            "image name {name:?} must be a single file name ending in .png, .jpg, .jpeg, .webp or .gif"
+        ));
+    };
+    // The session is checked before the bytes: a mistyped id should say "no such session",
+    // not send the caller looking for a problem with a picture that was fine.
+    let dir = {
+        let mgr = state.sessions.read().await;
+        match mgr.get(&id) {
+            None => return StatusCode::NOT_FOUND.into_response(),
+            Some(session) if session.status != SessionStatus::Active => {
+                return (
+                    StatusCode::CONFLICT,
+                    "the session is no longer active; its document cannot change",
+                )
+                    .into_response();
+            }
+            Some(session) => session.images_dir(),
+        }
+    };
+    if body.is_empty() {
+        return bad_request("the image body is empty".into());
+    }
+    if !bytes_are_image(content_type, &body) {
+        return bad_request(format!(
+            "the bytes are not a {} image",
+            format_label(content_type)
+        ));
+    }
+    if let Err(error) = tokio::fs::create_dir_all(&dir).await {
+        tracing::error!(id = %id, error = %error, "failed to create the image directory");
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+    if let Err(error) = tokio::fs::write(dir.join(&name), &body).await {
+        tracing::error!(id = %id, name = %name, error = %error, "failed to write a document image");
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+    tracing::info!(id = %id, name = %name, bytes = body.len(), "document image stored");
+    (
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "name": name,
+            "url": format!("/api/sessions/{id}/image/{name}"),
+            "markdown": format!("![{}](image/{})", alt_from_name(&name), name),
+        })),
+    )
+        .into_response()
+}
+
+async fn document_image(
+    State(state): State<AppState>,
+    Path((id, name)): Path<(String, String)>,
+) -> Response {
+    let Some(content_type) = document_image_type(&name) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let dir = {
+        let mgr = state.sessions.read().await;
+        match mgr.get(&id) {
+            Some(session) => session.images_dir(),
+            None => return StatusCode::NOT_FOUND.into_response(),
+        }
+    };
+    match tokio::fs::read(dir.join(&name)).await {
+        Ok(bytes) => (
+            [
+                (header::CONTENT_TYPE, content_type),
+                // The page and these images share an origin. A browser must not decide
+                // for itself that the bytes are something executable.
+                (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+                // A redrawn screenshot reuses its name, and a stale one would be worse
+                // than a slow one.
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            bytes,
+        )
+            .into_response(),
         Err(_) => StatusCode::NOT_FOUND.into_response(),
     }
 }
@@ -2161,6 +2263,116 @@ async fn parse_multipart_submit(
         annotations,
         document_version,
     })
+}
+
+/// A create request may carry the images its document displays, so the very first
+/// version of the page shows them instead of rendering broken and reloading a second
+/// later. Fields are the same as the JSON request; `image` repeats once per file, and the
+/// part's file name is the name the markdown references as `image/<name>`.
+async fn parse_multipart_create(
+    headers: &HeaderMap,
+    body: Bytes,
+) -> Result<(CreateSessionRequest, Vec<crate::session::SessionImage>), Response> {
+    let boundary = match parse_boundary(content_type(headers)) {
+        Ok(boundary) => boundary,
+        Err(error) => return Err(bad_request(format!("invalid multipart boundary: {error}"))),
+    };
+    let stream = stream::once(async move { Ok::<Bytes, std::io::Error>(body) });
+    let mut multipart = MulterMultipart::new(stream, boundary);
+    let mut request = CreateSessionRequest {
+        schema_version: Some(SCHEMA_VERSION),
+        title: None,
+        content: String::new(),
+        callback_url: None,
+        tags: HashMap::new(),
+        starred: false,
+        origin: None,
+    };
+    let mut images = Vec::new();
+    let mut has_content = false;
+
+    let field_error =
+        |field: &str, error: multer::Error| bad_request(format!("failed to read {field}: {error}"));
+    loop {
+        let field = match multipart.next_field().await {
+            Ok(Some(field)) => field,
+            Ok(None) => break,
+            Err(error) => {
+                return Err(bad_request(format!(
+                    "failed to parse multipart body: {error}"
+                )));
+            }
+        };
+        match field.name().unwrap_or("") {
+            "content" => {
+                request.content = field.text().await.map_err(|e| field_error("content", e))?;
+                has_content = true;
+            }
+            "title" => {
+                let text = field.text().await.map_err(|e| field_error("title", e))?;
+                request.title = (!text.trim().is_empty()).then_some(text);
+            }
+            "callback_url" => {
+                request.callback_url = Some(
+                    field
+                        .text()
+                        .await
+                        .map_err(|e| field_error("callback_url", e))?,
+                );
+            }
+            "starred" => {
+                let text = field.text().await.map_err(|e| field_error("starred", e))?;
+                request.starred = matches!(text.trim(), "true" | "1");
+            }
+            "tags" => {
+                let text = field.text().await.map_err(|e| field_error("tags", e))?;
+                if !text.trim().is_empty() {
+                    request.tags = serde_json::from_str(&text)
+                        .map_err(|e| bad_request(format!("invalid tags JSON: {e}")))?;
+                }
+            }
+            "origin" => {
+                let text = field.text().await.map_err(|e| field_error("origin", e))?;
+                if !text.trim().is_empty() {
+                    request.origin = Some(
+                        serde_json::from_str(&text)
+                            .map_err(|e| bad_request(format!("invalid origin JSON: {e}")))?,
+                    );
+                }
+            }
+            "image" => {
+                // A browser sends the whole client path; only the file name is used.
+                let name = field
+                    .file_name()
+                    .unwrap_or_default()
+                    .rsplit(['/', '\\'])
+                    .next()
+                    .unwrap_or_default()
+                    .to_string();
+                let Some(content_type) = document_image_type(&name) else {
+                    return Err(bad_request(format!(
+                        "image name {name:?} must be a single file name ending in .png, .jpg, .jpeg, .webp or .gif"
+                    )));
+                };
+                let data = field.bytes().await.map_err(|e| field_error("image", e))?;
+                if !bytes_are_image(content_type, &data) {
+                    return Err(bad_request(format!(
+                        "the bytes of {name} are not a {} image",
+                        format_label(content_type)
+                    )));
+                }
+                images.push(crate::session::SessionImage {
+                    name,
+                    bytes: data.to_vec(),
+                });
+            }
+            _ => {}
+        }
+    }
+    if !has_content {
+        return Err(bad_request("a create request needs a content field".into()));
+    }
+    Ok((request, images))
 }
 
 fn parse_verdict_override(verdict: Option<String>) -> Result<Option<Verdict>, SubmitError> {

@@ -35,22 +35,23 @@ pub fn normalize_html(html: &str) -> String {
     regex_replace_session_id(&html)
 }
 
+/// Replace the session id wherever it appears, not only in `data-session-id`: a document
+/// image is served from a URL that carries the id too, and a golden must not depend on
+/// which session the renderer happened to be given.
 fn regex_replace_session_id(html: &str) -> String {
-    let mut out = String::new();
     let needle = "data-session-id=\"";
-    let mut cursor = 0;
-    while let Some(rel) = html[cursor..].find(needle) {
-        let start = cursor + rel + needle.len();
-        out.push_str(&html[cursor..start]);
-        let end = html[start..]
-            .find('"')
-            .map(|i| start + i)
-            .unwrap_or(html.len());
-        out.push_str("<session-id>");
-        cursor = end;
+    let Some(start) = html.find(needle).map(|at| at + needle.len()) else {
+        return html.to_string();
+    };
+    let end = html[start..]
+        .find('"')
+        .map(|offset| start + offset)
+        .unwrap_or(html.len());
+    let id = &html[start..end];
+    if id.is_empty() {
+        return html.to_string();
     }
-    out.push_str(&html[cursor..]);
-    out
+    html.replace(id, "<session-id>")
 }
 
 fn replace_inline_scripts(html: &str) -> String {

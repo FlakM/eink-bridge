@@ -112,6 +112,16 @@ pub struct Session {
     writer: Option<tokio::sync::mpsc::UnboundedSender<WriteRequest>>,
 }
 
+/// An image a caller attached to the document as it was created.
+///
+/// The bytes travel with the create request so the first version of the document already
+/// shows them: uploading after creation would render the page twice — once with a broken
+/// image and once with the picture — because the document version changes.
+pub struct SessionImage {
+    pub name: String,
+    pub bytes: Vec<u8>,
+}
+
 /// What a new session is made from.
 #[derive(Default)]
 pub struct NewSession {
@@ -122,6 +132,7 @@ pub struct NewSession {
     pub starred: bool,
     pub origin: Option<SessionOrigin>,
     pub source_root: Option<PathBuf>,
+    pub images: Vec<SessionImage>,
 }
 
 /// A disk write that has been moved off the session lock.
@@ -192,14 +203,32 @@ pub fn write_annotation(dir: &Path, data: &[u8]) -> std::io::Result<String> {
     Ok(path.to_string_lossy().to_string())
 }
 
+/// Write one image the document itself displays into the session's `images/` directory.
+///
+/// The name is a single path segment and is validated by the caller before it gets here,
+/// so joining it cannot escape the directory.
+pub fn write_image(dir: &Path, name: &str, data: &[u8]) -> std::io::Result<()> {
+    fs::create_dir_all(dir)?;
+    fs::write(dir.join(name), data)
+}
+
 impl Session {
     /// Where this session's annotation images live.
     pub fn annotations_dir(&self) -> PathBuf {
         self.state_dir.join("annotations")
     }
 
+    /// Where the images the document displays live.
+    pub fn images_dir(&self) -> PathBuf {
+        self.state_dir.join("images")
+    }
+
     pub fn save_annotation(&self, data: &[u8]) -> std::io::Result<String> {
         write_annotation(&self.annotations_dir(), data)
+    }
+
+    pub fn save_image(&self, name: &str, data: &[u8]) -> std::io::Result<()> {
+        write_image(&self.images_dir(), name, data)
     }
 
     /// Serialize now (cheap, and done while the caller holds the session), write later.
@@ -348,6 +377,7 @@ impl SessionManager {
             starred,
             origin,
             source_root: None,
+            images: Vec::new(),
         })
     }
 
@@ -387,6 +417,17 @@ impl SessionManager {
             state_dir: session_dir,
             writer: self.writer.clone(),
         };
+        for image in new.images {
+            if let Err(error) = session.save_image(&image.name, &image.bytes) {
+                // The document still renders; a missing image is visible in the page.
+                error!(
+                    id = %session.id,
+                    name = %image.name,
+                    error = %error,
+                    "failed to write a document image"
+                );
+            }
+        }
         session.persist();
         self.sessions.insert(id, session.clone());
         session

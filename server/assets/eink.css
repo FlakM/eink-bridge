@@ -112,7 +112,17 @@ li { margin: 4px 0; }
 table { border-collapse: collapse; width: 100%; margin: 16px 0; }
 th, td { border: 1px solid #333; padding: 8px 12px; text-align: left; }
 th { font-weight: bold; background: #f0f0f0; }
-img { max-width: 100%; height: auto; }
+/* A picture the reader is meant to look at, not decoration: centred in the column, at
+   most the column wide, on paper white, with an edge so a white screenshot has a
+   boundary. Pinch-to-zoom is how a dense image stays readable. */
+img {
+    display: block;
+    max-width: 100%;
+    height: auto;
+    margin: 18px auto;
+    background: #fff;
+    border: 1px solid #b8b8b8;
+}
 a { color: #000; text-decoration: underline; }
 hr { border: none; border-top: 1px solid #333; margin: 24px 0; }
 .diagram-block {

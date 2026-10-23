@@ -1963,3 +1963,223 @@ async fn a_finished_session_directory_leaves_on_the_retention_sweep() {
         "the disk gauge must be exported after a sweep"
     );
 }
+
+// --- the images a document displays -----------------------------------------
+//
+// These are the pictures the reader looks at — a screenshot of a broken page, a sketch,
+// a photo of a whiteboard — as opposed to the ink the reader draws on top. A brief
+// references one as `image/<name>`, and the server keeps the bytes beside the session so
+// the page and the tablet do not depend on any other host being up.
+
+/// Enough of a PNG for the magic check; the server stores bytes, it does not decode them.
+const PNG: &[u8] = b"\x89PNG\r\n\x1a\n0000000000000000";
+
+fn multipart_create(content: &str, images: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend_from_slice(
+        format!("--b\r\nContent-Disposition: form-data; name=\"content\"\r\n\r\n{content}\r\n")
+            .as_bytes(),
+    );
+    for (name, bytes) in images {
+        body.extend_from_slice(
+            format!(
+                "--b\r\nContent-Disposition: form-data; name=\"image\"; filename=\"{name}\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(bytes);
+        body.extend_from_slice(b"\r\n");
+    }
+    body.extend_from_slice(b"--b--\r\n");
+    body
+}
+
+async fn create_with_image(app: &axum::Router, content: &str, name: &str) -> String {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::post("/api/sessions")
+                .header("content-type", "multipart/form-data; boundary=b")
+                .body(Body::from(multipart_create(content, &[(name, PNG)])))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body: serde_json::Value =
+        serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    body["id"].as_str().unwrap().to_string()
+}
+
+async fn upload(app: &axum::Router, id: &str, name: &str, bytes: &[u8]) -> (StatusCode, Bytes) {
+    send(
+        app,
+        Request::post(format!("/api/sessions/{id}/image/{name}"))
+            .header("content-type", "application/octet-stream")
+            .body(Body::from(bytes.to_vec()))
+            .unwrap(),
+    )
+    .await
+}
+
+async fn fetch_image(app: &axum::Router, id: &str, name: &str) -> (StatusCode, Bytes) {
+    send(
+        app,
+        Request::get(format!("/api/sessions/{id}/image/{name}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn an_image_can_travel_with_the_create_request() {
+    // The picture is on disk before "created" is answered. Uploading after creation would
+    // serve the document first without it and redraw the whole page once it arrived.
+    let dir = tempfile::tempdir().unwrap();
+    let app = test_app(dir.path().to_path_buf());
+    let id = create_with_image(
+        &app,
+        "# Shot\n\n![the error page](image/error.png)\n",
+        "error.png",
+    )
+    .await;
+
+    let (status, body) = fetch_image(&app, &id, "error.png").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(&body[..], PNG, "the stored bytes must be the sent bytes");
+}
+
+#[tokio::test]
+async fn an_image_added_mid_review_is_served_with_a_type_nobody_sniffs() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = test_app(dir.path().to_path_buf());
+    let id = create(&app, "# Shot\n\nBody").await;
+
+    let (status, body) = upload(&app, &id, "later.png", PNG).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["name"], "later.png");
+    assert_eq!(body["markdown"], "![later](image/later.png)");
+    assert_eq!(body["url"], format!("/api/sessions/{id}/image/later.png"));
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::get(format!("/api/sessions/{id}/image/later.png"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let headers = resp.headers().clone();
+    assert_eq!(headers["content-type"], "image/png");
+    // The page and its pictures share an origin: a browser must not decide for itself
+    // that the bytes are something executable, and a redrawn screenshot must not be
+    // served from cache under its old content.
+    assert_eq!(headers["x-content-type-options"], "nosniff");
+    assert_eq!(headers["cache-control"], "no-store");
+}
+
+#[tokio::test]
+async fn an_image_name_is_one_segment_and_an_image_extension() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = test_app(dir.path().to_path_buf());
+    let id = create(&app, "# Shot\n\nBody").await;
+
+    for name in [
+        "..%2Fescape.png",
+        "sub%2Fdir.png",
+        ".hidden.png",
+        "script.svg",
+        "page.html",
+    ] {
+        let (status, _) = upload(&app, &id, name, PNG).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{name} was accepted");
+    }
+    assert!(
+        !session_dir(dir.path(), &id)
+            .join("images")
+            .join("escape.png")
+            .exists(),
+        "a name must not be able to escape the session's image directory"
+    );
+}
+
+#[tokio::test]
+async fn bytes_that_are_not_the_image_their_name_promises_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = test_app(dir.path().to_path_buf());
+    let id = create(&app, "# Shot\n\nBody").await;
+
+    let (status, body) = upload(
+        &app,
+        &id,
+        "shot.png",
+        b"<svg xmlns=\"http://www.w3.org/2000/svg\">",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        String::from_utf8_lossy(&body).contains("not a PNG image"),
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    let (status, _) = fetch_image(&app, &id, "shot.png").await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a refused upload must not be stored"
+    );
+}
+
+#[tokio::test]
+async fn a_finished_review_takes_no_new_images_and_a_missing_one_is_a_404() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = test_app(dir.path().to_path_buf());
+    let id = create(&app, "# Shot\n\nBody").await;
+
+    let (status, _) = fetch_image(&app, &id, "never-uploaded.png").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // A mistyped id says so, rather than blaming a picture that was fine.
+    let (status, _) = upload(&app, "no-such-session", "shot.png", PNG).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, _) = send(
+        &app,
+        Request::post(format!("/api/sessions/{id}/submit"))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"typed_notes":"done","verdict":"LGTM"}"#))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _) = upload(&app, &id, "late.png", PNG).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "a submitted document cannot change, so it cannot gain a picture either"
+    );
+}
+
+#[tokio::test]
+async fn removing_a_session_removes_the_images_it_showed() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = test_app(dir.path().to_path_buf());
+    let id = create_with_image(&app, "# Shot\n\n![x](image/x.png)", "x.png").await;
+    let stored = session_dir(dir.path(), &id).join("images").join("x.png");
+    assert!(stored.exists());
+
+    let (status, _) = send(
+        &app,
+        Request::delete(format!("/api/sessions/{id}?remove=true&force=true"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!stored.exists(), "the picture outlived the review");
+}

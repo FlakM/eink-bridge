@@ -369,12 +369,45 @@
         "summary": "List sessions"
       },
       "post": {
-        "description": "Supports either plain text markdown body with optional query params or JSON request body.",
+        "description": "Supports plain text markdown, a JSON body, or multipart/form-data carrying the images the document displays as repeated `image` parts. A document refers to an attached image as `image/<name>`; the renderer points that at the session's image route.",
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/CreateSessionRequest"
+              }
+            },
+            "multipart/form-data": {
+              "schema": {
+                "properties": {
+                  "callback_url": {
+                    "type": "string"
+                  },
+                  "content": {
+                    "type": "string"
+                  },
+                  "image": {
+                    "description": "Repeatable. The file name is the name the markdown references; png, jpg, jpeg, webp or gif.",
+                    "format": "binary",
+                    "type": "string"
+                  },
+                  "origin": {
+                    "description": "JSON SessionOrigin",
+                    "type": "string"
+                  },
+                  "starred": {
+                    "description": "true or false",
+                    "type": "string"
+                  },
+                  "tags": {
+                    "description": "JSON object of string values",
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
               }
             },
             "text/plain": {
@@ -473,6 +506,77 @@
           }
         },
         "summary": "Recover durable pending feedback and latest content-update instructions"
+      }
+    },
+    "/api/sessions/{id}/image/{name}": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "The image, with its content type, nosniff, and no-store"
+          },
+          "404": {
+            "description": "No such image in this session"
+          }
+        },
+        "summary": "Fetch a picture the document displays"
+      },
+      "post": {
+        "description": "The raw image bytes. The name is one path segment ending in .png, .jpg, .jpeg, .webp or .gif, and the bytes must be that format. The document shows it as `image/<name>`, which the renderer resolves to this route. Only an active session accepts a new image.",
+        "parameters": [
+          {
+            "description": "A plain file name, matching [A-Za-z0-9._-]+ with an image extension",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "image/gif": {
+              "schema": {
+                "format": "binary",
+                "type": "string"
+              }
+            },
+            "image/jpeg": {
+              "schema": {
+                "format": "binary",
+                "type": "string"
+              }
+            },
+            "image/png": {
+              "schema": {
+                "format": "binary",
+                "type": "string"
+              }
+            },
+            "image/webp": {
+              "schema": {
+                "format": "binary",
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Stored; returns {name, url, markdown}"
+          },
+          "400": {
+            "description": "Unusable name or bytes that are not the named format"
+          },
+          "404": {
+            "description": "Session not found"
+          },
+          "409": {
+            "description": "Session no longer active"
+          }
+        },
+        "summary": "Attach a picture to the document"
       }
     },
     "/api/sessions/{id}/reanchor": {

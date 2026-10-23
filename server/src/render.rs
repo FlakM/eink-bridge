@@ -63,6 +63,23 @@ fn link_code_references(html: &str) -> String {
     out
 }
 
+/// Point a document's own image references at the session that owns them.
+///
+/// A brief says `![caption](image/shot.png)`; the server stores that file under the
+/// session's `images/` directory and serves it from `/api/sessions/{id}/image/{name}`.
+/// Resolving here rather than in the markdown keeps the content portable: the same brief
+/// can be pushed as a new session and still show its pictures, and an update round does
+/// not have to know the session id. A reference that is not a bare `image/<name>` (an
+/// absolute URL, a data URI) is left alone.
+fn resolve_session_images(html: &str, session_id: &str) -> String {
+    if !html.contains("src=\"image/") && !html.contains("src='image/") {
+        return html.to_string();
+    }
+    let prefix = format!("/api/sessions/{session_id}/image/");
+    html.replace("src=\"image/", &format!("src=\"{prefix}"))
+        .replace("src='image/", &format!("src='{prefix}"))
+}
+
 fn link_refs_in_text(text: &str, in_code: bool) -> String {
     if in_code || text.is_empty() {
         return text.to_string();
@@ -141,6 +158,7 @@ pub fn to_eink_html(markdown: &str, session_id: &str) -> String {
         .collect::<Vec<_>>()
         .join("");
     let content = link_code_references(&content);
+    let content = resolve_session_images(&content, session_id);
 
     format!(
         r#"<!DOCTYPE html>

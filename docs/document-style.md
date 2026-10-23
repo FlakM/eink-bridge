@@ -70,6 +70,46 @@ This is where the pen annotations are most valuable.
 - Layout direction: `RIGHT` for data flow, `DOWN` for dependency chains
 - Edge labels should be verbs: "calls", "reads from", "publishes to"
 
+## When a picture beats a diagram
+
+A diagram shows the structure you already understand. A picture shows the artefact itself,
+including the thing you are asking about — the misaligned label, the wrong colour, the
+broken layout. Use one when the subject *is* the appearance:
+
+- the rendered page, app screen or report under review
+- a photograph of a whiteboard, a sketch on paper, a hand-drawn flow
+- an artefact that cannot be reconstructed in text without losing the point
+
+Use a `mermaid`, `graph` or `mindmap` block instead when the point is relationships,
+ordering or hierarchy — a diagram stays sharp at any zoom, is searchable, and can be
+annotated line by line. A picture is a raster: at reading size on e-ink the detail is
+limited, and the reader has to pinch-zoom to make out fine text.
+
+Rules:
+
+- One or two pictures per document, no more. They cost a page of scrolling each.
+- Always caption it with an italic line underneath, saying what to look at and why.
+  The alt text is not shown on the page.
+- Do not paste a screenshot of code or of a terminal. A `snippet` or `diff` block is
+  sharper, selectable and annotatable per line; a screenshot of code is the one case where
+  the picture is reliably worse.
+- Crop to the part that matters. A full desktop screenshot on a 992px column is mostly
+  chrome.
+- PNG for UI and screenshots, JPEG for photographs. The server accepts `.png`, `.jpg`,
+  `.jpeg`, `.webp` and `.gif`, and checks that the bytes match the extension.
+
+In markdown, reference the file as `image/<name>` and let the CLI upload it:
+
+```markdown
+![the error page as it renders today](image/error-page.png)
+
+*Figure 1 — the banner overlaps the heading at 992px; the fix should move it below.*
+```
+
+```bash
+eink-review push brief.md --image error-page.png
+```
+
 ## Typography and Layout
 
 The renderer uses Georgia serif at 28px on a 2800px-wide canvas.
@@ -84,6 +124,6 @@ Documents should be written assuming:
 
 - Don't produce documents longer than ~800 lines — the tablet scrolls poorly beyond that
 - Don't use nested bullet lists deeper than 2 levels — they're hard to read on e-ink
-- Don't use images unless they're essential — the e-ink screen has limited color depth
+- Don't use pictures as decoration — one or two per document, and only when the artefact itself is the point (see above)
 - Don't add "Summary" sections at the end — the reviewer will write their own summary with the pen
 - Don't use emoji — they render inconsistently on e-ink displays

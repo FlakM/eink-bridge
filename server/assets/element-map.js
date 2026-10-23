@@ -30,10 +30,15 @@
       var sx = window.pageXOffset || 0;
       var tag = el.tagName;
       if (tag === 'H1' || tag === 'H2' || tag === 'H3') currentSection = el.id || null;
+      // An <img> has no text content; without its alt text a note on a picture reaches
+      // the agent as an empty anchor and cannot be told apart from any other block.
+      var text = tag === 'IMG'
+        ? '[image] ' + (el.getAttribute('alt') || el.getAttribute('src') || '')
+        : el.textContent;
       window.__einkElementMap.push({
         i: i, tag: tag, id: el.id || null, section: currentSection,
         t: r.top + sy, b: r.bottom + sy, l: r.left + sx, r: r.right + sx,
-        text: el.textContent.substring(0, 150).replace(/\s+/g, ' ').trim()
+        text: text.substring(0, 150).replace(/\s+/g, ' ').trim()
       });
     });
   }

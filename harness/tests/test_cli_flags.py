@@ -12,7 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 BIN = ROOT / "server" / "target" / "debug" / "eink-review"
 COMMANDS = {"push", "star", "unstar", "update", "content", "source", "watch",
-            "result", "cancel", "remove", "list"}
+            "result", "cancel", "remove", "list", "image"}
 GLOBAL_FLAGS = {"--server"}
 
 

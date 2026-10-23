@@ -287,7 +287,7 @@ pub fn openapi_spec() -> serde_json::Value {
                 },
                 "post": {
                     "summary": "Create session",
-                    "description": "Supports either plain text markdown body with optional query params or JSON request body.",
+                    "description": "Supports plain text markdown, a JSON body, or multipart/form-data carrying the images the document displays as repeated `image` parts. A document refers to an attached image as `image/<name>`; the renderer points that at the session's image route.",
                     "requestBody": {
                         "required": true,
                         "content": {
@@ -296,6 +296,24 @@ pub fn openapi_spec() -> serde_json::Value {
                             },
                             "text/plain": {
                                 "schema": {"type": "string"}
+                            },
+                            "multipart/form-data": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "content": {"type": "string"},
+                                        "title": {"type": "string"},
+                                        "callback_url": {"type": "string"},
+                                        "starred": {"type": "string", "description": "true or false"},
+                                        "tags": {"type": "string", "description": "JSON object of string values"},
+                                        "origin": {"type": "string", "description": "JSON SessionOrigin"},
+                                        "image": {
+                                            "type": "string",
+                                            "format": "binary",
+                                            "description": "Repeatable. The file name is the name the markdown references; png, jpg, jpeg, webp or gif."
+                                        }
+                                    }
+                                }
                             }
                         }
                     },
@@ -374,6 +392,43 @@ pub fn openapi_spec() -> serde_json::Value {
                 "get": {
                     "summary": "Recover durable pending feedback and latest content-update instructions",
                     "responses": {"200": {"description": "version, pending (annotation_result or null), last_content_update (version_updated or null)"}, "404": {"description": "Session not found"}}
+                }
+            },
+            "/api/sessions/{id}/image/{name}": {
+                "post": {
+                    "summary": "Attach a picture to the document",
+                    "description": "The raw image bytes. The name is one path segment ending in .png, .jpg, .jpeg, .webp or .gif, and the bytes must be that format. The document shows it as `image/<name>`, which the renderer resolves to this route. Only an active session accepts a new image.",
+                    "parameters": [
+                        {
+                            "name": "name",
+                            "in": "path",
+                            "required": true,
+                            "schema": {"type": "string"},
+                            "description": "A plain file name, matching [A-Za-z0-9._-]+ with an image extension"
+                        }
+                    ],
+                    "requestBody": {
+                        "required": true,
+                        "content": {
+                            "image/png": {"schema": {"type": "string", "format": "binary"}},
+                            "image/jpeg": {"schema": {"type": "string", "format": "binary"}},
+                            "image/webp": {"schema": {"type": "string", "format": "binary"}},
+                            "image/gif": {"schema": {"type": "string", "format": "binary"}}
+                        }
+                    },
+                    "responses": {
+                        "201": {"description": "Stored; returns {name, url, markdown}"},
+                        "400": {"description": "Unusable name or bytes that are not the named format"},
+                        "404": {"description": "Session not found"},
+                        "409": {"description": "Session no longer active"}
+                    }
+                },
+                "get": {
+                    "summary": "Fetch a picture the document displays",
+                    "responses": {
+                        "200": {"description": "The image, with its content type, nosniff, and no-store"},
+                        "404": {"description": "No such image in this session"}
+                    }
                 }
             },
             "/api/sessions/{id}/reanchor": {

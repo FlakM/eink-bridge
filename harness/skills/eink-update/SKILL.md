@@ -54,8 +54,16 @@ EOF
 
 ```bash
 eink-review update <session-id> /tmp/eink-update-XXXXX.md \
-  [--expected-version <n>] [--feedback-id <id>] [--consumed 0,2]
+  [--expected-version <n>] [--feedback-id <id>] [--consumed 0,2] [--image picture.png]
 ```
+
+A picture added in this round travels the same way it does on a new push: a
+`![what to look at](shot.png)` next to the markdown file is uploaded, and `--image` adds a
+file the document does not reference. The existing pictures stay in place — an
+`image/<name>` reference in the new content resolves to the same session route, and
+re-uploading under the same name replaces the bytes (the page is served `no-store`, so the
+reader sees the new one on reload). Keep the alt text on a picture the reader wrote a note
+on: the note arrives anchored to the text `[image] <alt>`.
 
 On success, the server responds with the new version number. Retained native ink is
 repositioned using server text matches; deleted/ambiguous targets are archived.

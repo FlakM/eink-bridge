@@ -28,6 +28,7 @@ CHUNKS = SERVER / "src/render/chunks.rs"
 REANCHOR = SERVER / "src/reanchor.rs"
 CLII = SERVER / "src/cli.rs"
 APII = SERVER / "src/api.rs"
+IMAGES = SERVER / "src/images.rs"
 APPI = SERVER / "src/app.rs"
 METRICS = SERVER / "src/metrics.rs"
 WSI = SERVER / "src/ws.rs"
@@ -62,6 +63,8 @@ TARGETS = {
     "the_webhook_metric_counts_what_actually_happened": "--test api_edge_test",
     "the_cli_pushes_its_own_command_metrics": "--test cli_integration_test",
     "an_annotation_index_cannot_escape_the_session_directory": "--test api_edge_test",
+    "an_image_name_is_one_segment_and_an_image_extension": "--test api_edge_test",
+    "a_picture_beside_the_brief_travels_with_it_and_stays_where_it_was_written": "--test cli_integration_test",
     "a_client_that_stops_answering_is_dropped": "--test ws_heartbeat_test",
     "an_occupied_port_is_reported_in_words": "--test startup_test",
     "the_allowlist_matches_the_filter_in_the_flake": "--test build_source_test",
@@ -1021,6 +1024,38 @@ CASES = [
             """    if false && !authorized {""",
         ),
         "a_token_keeps_the_lan_out_and_this_machine_in",
+    ),
+    (
+        "a document image is served from a route nobody serves",
+        text_edit(
+            RENDER,
+            'let prefix = format!("/api/sessions/{session_id}/image/");',
+            'let prefix = format!("/api/sessions/{session_id}/pictures/");',
+        ),
+        "a_document_image_is_served_from_the_session_that_owns_it",
+    ),
+    (
+        "an image name may walk out of the session's image directory",
+        text_edit(
+            IMAGES,
+            """    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+    {
+        return None;
+    }""",
+            "",
+        ),
+        "an_image_name_is_one_segment_and_an_image_extension",
+    ),
+    (
+        "a picture is retargeted at a route the renderer does not resolve",
+        text_edit(
+            CLII,
+            """    let target = format!("image/{name}");""",
+            """    let target = format!("pictures/{name}");""",
+        ),
+        "a_picture_beside_the_brief_travels_with_it_and_stays_where_it_was_written",
     ),
     (
         "retention keeps every finished session forever",

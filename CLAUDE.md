@@ -113,6 +113,12 @@ link-local address. Raw HTML in a brief is sanitised before it reaches the page,
 diagram payloads cannot close their own `<script>`, so a brief cannot run code in the
 page's origin.
 
+A picture in a brief is uploaded as bytes, never as a path for the server to open, and it
+lands under that session's `images/` directory. The name must be one path segment with a
+png/jpeg/webp/gif extension, the bytes must be that format, and the file is served back
+from the session's own route with `nosniff` and `no-store`. SVG is not on the list: it is
+a document that can carry script, and an image URL shares the page's origin.
+
 ## Task runner
 
 Use `just` for all common operations. Run `just` to see all recipes.
@@ -254,6 +260,7 @@ be exercised in a unit test without racing every other test in the binary.
 | `assets/*.css`, `assets/*.js` or render HTML output | `just test-render`, `just lint-assets`, then `just eval` |
 | Annotation / highlighting / tap behaviour | `just test-render` then `just test-mutations` |
 | Snippet, diff, steps or fence handling | `cargo test render::tests::parse_chunks` / `a_snippet` / `a_line_mark` |
+| Document images (`image/` refs, `--image`, upload) | `cargo test images::` then `cargo test --test api_edge_test` and `--test cli_integration_test` |
 | Relocating notes after an edit | `cargo test reanchor::tests` |
 | HTTP edge cases (remove, purge, ack, limits) | `cargo test --test api_edge_test` |
 | CLI commands end to end | `cargo test --test cli_integration_test` |
@@ -319,6 +326,34 @@ each has a test:
 
 Everything a reader sees in a block comes from a pasted brief, so caption, language badge
 and step text are escaped: `tests::review_text_in_a_snippet_or_step_block_is_escaped`.
+
+### Pictures in a document (`images.rs`)
+
+A brief may show a screenshot, a sketch or a photo — the artefact itself, where a diagram
+would only show the structure around it. Four things can go wrong quietly, and each has a
+test:
+
+- **The picture is served from the wrong place.** The markdown says `image/shot.png`; the
+  renderer must point that at `/api/sessions/{id}/image/shot.png`, because a bare relative
+  path would resolve against `/session/{id}` and 404.
+  `tests::a_document_image_is_served_from_the_session_that_owns_it` pins the URL, and
+  `an_image_that_is_not_a_session_image_is_left_alone` keeps an external link external.
+- **A name escapes the session directory.** A name is one path segment with an image
+  extension; `..%2Fescape.png`, `sub%2Fdir.png` and `.hidden.png` are a 400, and nothing
+  is written outside the session's `images/`. SVG is refused on purpose: it is a document
+  that can carry script, and these images are served from the page's own origin.
+- **The bytes are not the format the name promises.** A `.png` that is not a PNG is
+  refused before it is stored, so the image route can never serve something else. Served
+  images carry `nosniff` and `no-store` (a redrawn screenshot reuses its name).
+- **The picture arrives after the page does.** A create request may carry its images
+  (`multipart/form-data`, repeated `image` parts), so the first version of the document
+  already shows them; uploading afterwards would render the page once broken and then
+  reload it. Only an active session accepts a new image (409 otherwise).
+
+No caller hands the server a path to read: the bytes travel in the request. The CLI hides
+the route — `push` uploads a `![x](shot.png)` that sits next to the brief and rewrites the
+reference, `--image` adds a file the brief does not reference, and `image <id> <file>`
+prints the markdown to paste into an existing review.
 
 ### Relocating notes after an edit (`reanchor.rs`)
 
@@ -511,3 +546,10 @@ stalls every other mutation for its duration.
 `EINK_OCR_TIMEOUT_SECONDS` and `EINK_OCR_INTERACTIVE_TIMEOUT_SECONDS` bound every call the
 same way. A session cannot ask for a longer budget for a dense page or a shorter one for a
 quick margin note.
+
+### Document images have no quota beyond one request
+
+One image is bounded by the request body (10 MB), and the whole set is bounded only by the
+disk: a session may keep as many pictures as a caller uploads, and they are removed with
+the session at retention. A server shared by several agents would want a per-session count
+and a total-byte cap; for one reviewer on one tablet, the file system is the limit.

@@ -24,6 +24,8 @@ POST   /api/sessions/{id}/reanchor              map paragraphs of an old element
 GET    /api/sessions/{id}/feedback              unacknowledged annotation feedback
 PUT    /api/sessions/{id}/star                  pin a session so purge and expiry leave it alone
 GET    /api/sessions/{id}/annotation/{index}    uploaded annotation PNG
+GET    /api/sessions/{id}/image/{name}          a picture the document displays
+POST   /api/sessions/{id}/image/{name}          attach a picture to the document
 GET    /api/sessions/{id}/source?ref=path:line  lines around a code reference (see below)
 POST   /api/sessions/{id}/submit                finish the review (JSON or multipart)
 POST   /api/sessions/{id}/request_update        send ink + OCR to the agent without finishing
@@ -134,6 +136,44 @@ nothing is written to disk until the session has accepted the submission.
 
 The result carries both `annotation_images` (filesystem paths on the server, for a local
 agent) and `annotation_urls` (relative URLs, for anything else).
+
+## Document images
+
+A brief may carry pictures — a screenshot of a rendered page, a sketch, a photo of a
+whiteboard — not only diagrams. The markdown refers to one as a bare session path:
+
+```markdown
+![the error page as it renders today](image/error.png)
+
+*Figure 1 — what the reader sees, not what the code says.*
+```
+
+The renderer resolves `image/<name>` to `/api/sessions/{id}/image/<name>`, so the same
+content can be pushed as a new session or rewritten in place without knowing the id.
+
+`POST /api/sessions/{id}/image/{name}` takes the raw bytes. The name is one path segment
+of ASCII letters, digits, dot, dash or underscore with an extension from `.png`, `.jpg`,
+`.jpeg`, `.webp`, `.gif`, and the bytes must actually be that format — a `.png` that is
+not a PNG is a 400, and so is `script.svg`, which is a document that can carry script and
+these images are served from the page's own origin. Only an active session accepts a new
+image (409 otherwise). The answer is `{name, url, markdown}`.
+
+`GET /api/sessions/{id}/image/{name}` serves it with its content type,
+`X-Content-Type-Options: nosniff` and `Cache-Control: no-store` (a redrawn screenshot
+reuses its name). Removing the session removes its pictures.
+
+To avoid a page that renders without the picture and then reloads with it, the images can
+travel in the create request itself as `multipart/form-data`: the same fields as the JSON
+request plus a repeated `image` file part, whose file name is the `image/<name>` name. The
+CLI does this for you:
+
+```bash
+eink-review push brief.md                      # ![x](shot.png) next to the brief is uploaded
+eink-review push brief.md --image shot.png     # appended if the brief does not reference it
+eink-review push --image shot.png --title "Rendered page"
+eink-review image <session-id> sketch.png --alt "whiteboard sketch"   # prints the markdown
+eink-review update <session-id> brief.md --image late.png
+```
 
 ## Source references
 

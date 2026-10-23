@@ -1386,14 +1386,23 @@ async fn the_cli_reads_content_and_source_and_guards_an_update() {
     assert_eq!(code, 0, "{stderr}");
     assert!(stdout.contains("# First"), "{stdout}");
 
-    // `source` reads from the checkout the review was pushed from.
+    // `source` reads from the checkout the review was pushed from. The line is found in
+    // the file rather than hard-coded: an import added above it must not fail a test that
+    // is about reading a checkout, not about the shape of an import block.
+    let cited = std::fs::read_to_string("src/cli.rs")
+        .unwrap()
+        .lines()
+        .position(|line| line.contains("use eink_bridge::session::SessionOrigin"))
+        .map(|index| index + 1)
+        .expect("the CLI still imports SessionOrigin");
+    let reference = format!("src/cli.rs:{cited}");
     let (code, stdout, stderr) = run_cli_raw(
         &[
             "--server",
             &server,
             "source",
             &id,
-            "src/cli.rs:10",
+            &reference,
             "--context",
             "1",
         ],
@@ -1401,7 +1410,6 @@ async fn the_cli_reads_content_and_source_and_guards_an_update() {
     )
     .await;
     assert_eq!(code, 0, "{stderr}");
-    assert!(stdout.contains("src/cli.rs:9-11"), "{stdout}");
     assert!(
         stdout.contains("use eink_bridge::session::SessionOrigin"),
         "the cited lines must be printed: {stdout}"
@@ -1550,5 +1558,156 @@ async fn the_cli_narrates_progress_for_the_pending_feedback() {
     .await;
     assert_ne!(code, 0);
     assert!(stderr.contains("not pending"), "{stderr}");
+    handle.abort();
+}
+
+// --- pictures in a review document ------------------------------------------
+
+/// The PNG magic plus filler: the server checks the header, not the pixels.
+const PNG: &[u8] = b"\x89PNG\r\n\x1a\n0000000000000000";
+
+#[tokio::test]
+async fn a_picture_beside_the_brief_travels_with_it_and_stays_where_it_was_written() {
+    let (server, handle) = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let png = dir.path().join("shot.png");
+    let md = dir.path().join("brief.md");
+    std::fs::write(&png, PNG).unwrap();
+    std::fs::write(
+        &md,
+        "# Shot\n\nBefore the picture.\n\n![the broken page](shot.png)\n\nAfter.\n",
+    )
+    .unwrap();
+
+    let (code, stdout, stderr) = run_cli_raw(
+        &["--server", &server, "push", "--async", md.to_str().unwrap()],
+        &[],
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    let id = stdout.trim().to_string();
+
+    // The document names the picture the way the renderer resolves, and the local path is
+    // gone: a path from this machine means nothing to the tablet.
+    let stored: serde_json::Value = reqwest::get(format!("{server}/api/sessions/{id}/content"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let content = stored["content"].as_str().unwrap();
+    assert!(
+        content.contains("![the broken page](image/shot.png)"),
+        "{content}"
+    );
+    assert!(!content.contains("](shot.png)"), "{content}");
+
+    // The bytes arrived, and the page points at the session route the reader can load.
+    let image = reqwest::get(format!("{server}/api/sessions/{id}/image/shot.png"))
+        .await
+        .unwrap();
+    assert_eq!(image.status(), 200);
+    assert_eq!(image.bytes().await.unwrap().as_ref(), PNG);
+    let page = reqwest::get(format!("{server}/session/{id}"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        page.contains(&format!("src=\"/api/sessions/{id}/image/shot.png\"")),
+        "the page does not show the picture"
+    );
+
+    handle.abort();
+}
+
+#[tokio::test]
+async fn an_image_given_on_the_command_line_is_added_to_the_document() {
+    let (server, handle) = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let png = dir.path().join("whiteboard.jpg");
+    let md = dir.path().join("brief.md");
+    // A JPEG by header, so the case does not pass only because everything is a PNG.
+    std::fs::write(&png, [0xFF, 0xD8, 0xFF, 0xE0, 0, 0]).unwrap();
+    std::fs::write(&md, "# Whiteboard\n\nNo picture reference here.\n").unwrap();
+
+    let (code, stdout, stderr) = run_cli_raw(
+        &[
+            "--server",
+            &server,
+            "push",
+            "--async",
+            md.to_str().unwrap(),
+            "--image",
+            png.to_str().unwrap(),
+        ],
+        &[],
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    let id = stdout.trim().to_string();
+
+    let stored: serde_json::Value = reqwest::get(format!("{server}/api/sessions/{id}/content"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let content = stored["content"].as_str().unwrap();
+    assert!(
+        content.contains("![whiteboard](image/whiteboard.jpg)"),
+        "an unreferenced image must be added at the end: {content}"
+    );
+    handle.abort();
+}
+
+#[tokio::test]
+async fn an_image_can_be_added_to_a_running_review_and_its_markdown_printed() {
+    let (server, handle) = start_server().await;
+    let id = push_document(&server, "# Running review\n\nBody").await;
+    let dir = tempfile::tempdir().unwrap();
+    let png = dir.path().join("sketch.png");
+    std::fs::write(&png, PNG).unwrap();
+
+    let (code, stdout, stderr) = run_cli_raw(
+        &[
+            "--server",
+            &server,
+            "image",
+            &id,
+            png.to_str().unwrap(),
+            "--alt",
+            "whiteboard sketch",
+        ],
+        &[],
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stdout.trim(), "![whiteboard sketch](image/sketch.png)");
+
+    let image = reqwest::get(format!("{server}/api/sessions/{id}/image/sketch.png"))
+        .await
+        .unwrap();
+    assert_eq!(image.status(), 200);
+    handle.abort();
+}
+
+#[tokio::test]
+async fn a_file_that_is_not_an_image_is_refused_before_it_reaches_the_tablet() {
+    let (server, handle) = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let fake = dir.path().join("shot.png");
+    let md = dir.path().join("brief.md");
+    std::fs::write(&fake, b"This is a text file pretending to be a PNG.").unwrap();
+    std::fs::write(&md, "# Shot\n\n![oops](shot.png)\n").unwrap();
+
+    let (code, _, stderr) = run_cli_raw(
+        &["--server", &server, "push", "--async", md.to_str().unwrap()],
+        &[],
+    )
+    .await;
+    assert_ne!(code, 0);
+    assert!(stderr.contains("bytes are something else"), "{stderr}");
     handle.abort();
 }

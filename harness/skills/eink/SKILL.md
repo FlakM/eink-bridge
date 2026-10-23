@@ -1,6 +1,6 @@
 ---
 name: eink
-description: Clarify what the user wants to read or review on the Boox, send a focused document, and observe handwritten feedback for live revision. Use for /eink, tablet review, or resuming a review in OpenCode or Claude Code.
+description: Clarify what the user wants to read or review on the Boox, send a focused document — including a screenshot, sketch or photo when the artefact itself is the point — and observe handwritten feedback for live revision. Use for /eink, tablet review, or resuming a review in OpenCode or Claude Code.
 ---
 
 # E-Ink Review
@@ -22,10 +22,14 @@ it delegates delivery back to this skill's contract.
 
 ```
 /eink [file]
+/eink screenshot.png
 /eink continue [session-id]
 ```
 
 - First establish the user's review goal, including when a file path is supplied.
+- A picture on its own is a complete request when the user has already said what to look
+  for ("put this on the tablet"): push it with a title and a one-line caption rather than
+  asking again.
 - Send only the agreed content; an invocation is not permission to dump the conversation.
 - `continue` resumes watching an already-active session (no new push).
 
@@ -95,6 +99,10 @@ Claude channel notifications are enabled (`--dangerously-load-development-channe
 SESSION_ID=$(eink-review --server "${EINK_SERVER_URL:-http://localhost:3333}" push --async <file>)
 echo "SESSION_ID:$SESSION_ID"
 ```
+
+When the brief carries a picture, add `--image shot.png` (repeatable). A markdown
+reference like `![what to look at](shot.png)` next to the brief is uploaded even without
+the flag; see "When a picture says it better".
 
 Immediately after getting the session ID, call the `subscribe_session` tool with it:
 ```
@@ -294,11 +302,11 @@ If `eink-review push` fails: `systemctl --user start eink-serve`
 Structure every document like this:
 1. **Brief overview** — 1–3 sentences or bullets stating what this is and why it matters.
 2. **Body** — short bulleted points, not paragraphs. Break prose into bullets whenever possible.
-3. **At most one diagram per document**, and only when structure genuinely cannot be expressed in bullets.
+3. **At most one diagram or picture per document**, and only when structure or appearance genuinely cannot be expressed in bullets.
 
 Hard limits:
 - Prefer bullets over prose. If a paragraph is more than ~3 lines, split it into bullets.
-- **Maximum one diagram per document.** Two only if they show fundamentally different things (e.g. an architecture graph and a state machine). Never use a diagram as decoration.
+- **Maximum one diagram or picture per document.** Two only if they show fundamentally different things (e.g. an architecture graph and a state machine). Never use a diagram or a picture as decoration.
 - Skip the diagram entirely if a bulleted list communicates the same information.
 - No "executive summary" + "summary" + "TL;DR" stacking — one overview, then content.
 
@@ -309,6 +317,30 @@ The renderer supports normal Markdown plus the diagram blocks below. Use them sp
 - `graph` for architecture maps — when relationships between components are the point
 
 If you find yourself reaching for a second diagram, replace it with bullets.
+
+### When a picture says it better
+
+A diagram shows structure; a picture shows the artefact. Send a screenshot, a photo of a
+whiteboard, a sketch, or the rendered page itself when appearance is what the reader has to
+judge — a layout bug, a visual regression, a design choice — or when the thing cannot be
+reconstructed in text without losing the point. Prefer a picture over a diagram whenever
+the reader has to *look at* something rather than follow a relationship.
+
+- Reference it in the brief as `![what to look at](image/name.png)` and pass the file with
+  `--image`; the CLI uploads it and keeps it where you wrote it. A `![x](shot.png)` that
+  sits next to the brief is uploaded too.
+- Caption it with an italic line underneath — alt text is not shown on the page:
+  `*Figure 1 — the banner overlaps the heading; the fix should move it below.*`
+- Crop to the part that matters and keep the file a few MB at most. A full desktop
+  screenshot on a 992px column is mostly chrome, and the page takes 10 MB per request.
+- PNG for UI and screenshots, JPEG for photographs. `.png`, `.jpg`, `.jpeg`, `.webp` and
+  `.gif` are accepted; the bytes must match the extension.
+- A screenshot of code or a terminal is the one case where the picture is worse: use a
+  `snippet` or `diff` block instead. It is sharper, searchable, and annotatable per line.
+- One picture per document, two only if they show fundamentally different things. A note
+  the reader writes on a picture reaches you as an annotation whose anchor text starts with
+  `[image]`, so make the alt text say what the picture is: that is how you know which one
+  they mean.
 
 ### Color semantics — use consistently
 
