@@ -125,7 +125,7 @@ Only when you had to create the workspace yourself, start the editor in a **shel
 
 ```bash
 export EINK_PR_SOCKET=/run/user/$(id -u)/jump-pr-<n>-<repo>.sock
-herdr workspace create --cwd "<worktree-dir>" --label "PR <n>: <short title>" --focus
+herdr workspace create --cwd "<worktree-dir>" --label "💻 <repo-short> PR <n>: <short title>" --focus
 # -> .result.root_pane.pane_id
 herdr pane run <root_pane.pane_id> "nvim --listen $EINK_PR_SOCKET -c 'DiffviewOpen <merge-base>..HEAD'"
 ```
@@ -138,6 +138,11 @@ herdr pane run <root_pane.pane_id> "nvim --listen $EINK_PR_SOCKET -c 'DiffviewOp
 - **One workspace per review**, not a tab in someone else's workspace: the review owns its
   editor, its marks and its agent, and closes cleanly. Reuse the registry's workspace if
   one exists.
+- **Name it like the launcher does**: the editor emoji first, then the reviewer's short
+  repository name (`security-token-service` → `sts`, `cx-web-workspace` → `web`,
+  `identity-service` → `identity`, `sso-service` → `sso`), then the PR. The emoji first is
+  what keeps the labels aligned in the sidebar, and `eink-pr-launch --tidy` recognizes the
+  shape: it renames old `PR <n>` workspaces and closes the ones whose editor is gone.
 - **Always pass `--listen`** and use the registry's socket. It is
   `jump-pr-<n>-<repo>.sock`, not `jump-<repo>.sock`: two PRs of one repository are
   reviewed side by side and must not share an editor socket.
@@ -365,7 +370,7 @@ The code work stays per PR so the reviews cannot collide; **the tablet note does
 |---|---|
 | worktree | `pr-<n>` |
 | socket | `/run/user/<uid>/jump-pr-<n>-<repo>.sock` |
-| herdr workspace | `PR <n>: <title>` |
+| herdr workspace | `💻 <repo-short> PR <n>: <title>` |
 | GitHub review | one per PR (step 11) |
 | **e-ink session** | **one for the whole batch** |
 
