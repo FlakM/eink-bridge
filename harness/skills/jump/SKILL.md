@@ -16,7 +16,8 @@ herdr backend alongside tmux and hyprland.
 
 The eink-pr workflow also opens Neovim with an explicit `--listen` socket. When you
 already know that socket, the marks helper is the more precise tool: it can set marks,
-jump to a mark, and read back where the cursor landed. Prefer it inside a review;
+draw a note on a line (a `▶` in the gutter plus `:EinkNote`), jump to a mark, and read
+back where the cursor landed. Prefer it inside a review;
 use `jump` for one-off references and for link generation.
 
 ## Going to a location

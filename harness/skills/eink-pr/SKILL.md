@@ -273,6 +273,25 @@ python3 <skill-base>/scripts/nvim_marks.py --socket "$EINK_PR_SOCKET" \
   --marks "A:server/src/app.rs:170,B:proto/api.proto:12" --verify A,B
 ```
 
+Put the finding on its line, without burying the code under it:
+
+```bash
+python3 <skill-base>/scripts/nvim_marks.py --socket "$EINK_PR_SOCKET" \
+  --comment "A:peek then take: two callbacks both pass the peek" \
+  --comment "B:redirect_uri is rebuilt from config"
+```
+
+- A note is a `▶` in the sign column; the reader runs `:EinkNote` on the line to read it.
+  `--verify-comments A,B` reads them back, `--clear-comments` takes them away.
+- `--inline A,B` draws those notes as a full line above the code. Use it for the one or
+  two findings that must be impossible to miss, never for every mark: a block of notes
+  in the middle of a function hides the function.
+- Notes are extmarks: display only, nothing is written to the file, and they follow their
+  text when the agent rewrites code above them. Set the marks first — a note attaches to
+  a mark, not to a line number.
+- Both work while the reader is typing (they go through `--remote-expr`, not keys). If the
+  socket is gone, say so rather than claiming the marks are set.
+
 Then attach permalinks pinned to the reviewed sha, so the legend works away from the
 tablet (the `jump` skill covers this):
 
