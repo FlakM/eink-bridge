@@ -43,6 +43,18 @@ internal fun parseViewport(raw: String?): ViewportReport? {
     }
 }
 
+/** One card the page draws under the block a note was spoken at. */
+internal data class VoiceCard(
+    val n: Int,
+    val elementIndex: Int,
+    val text: String,
+    val raw: String,
+    val severity: String,
+    val color: Int,
+    val state: String,
+    val guarded: Boolean,
+)
+
 internal interface ElementLookup {
     fun findElements(left: Float, top: Float, right: Float, bottom: Float, callback: (List<FoundElement>) -> Unit)
     fun findNearestElement(cx: Float, cy: Float, callback: (List<FoundElement>) -> Unit)
@@ -83,6 +95,31 @@ internal class WebViewBridge(private val webView: WebView) {
         }
         webView.post {
             webView.evaluateJavascript("window.__einkApplyBindGroups && window.__einkApplyBindGroups($groupsJson)", null)
+        }
+    }
+
+    /** Redraw every spoken note's card. Idempotent on the page side. */
+    fun applyVoiceNotes(cards: List<VoiceCard>) {
+        val json = JSONArray().apply {
+            for (c in cards) {
+                put(JSONObject().apply {
+                    put("n", c.n); put("i", c.elementIndex); put("text", c.text); put("raw", c.raw)
+                    put("severity", c.severity); put("color", "#%06X".format(c.color and 0xFFFFFF))
+                    put("state", c.state); put("guarded", c.guarded)
+                })
+            }
+        }
+        webView.post {
+            webView.evaluateJavascript("window.__einkVoiceNotes && window.__einkVoiceNotes($json)", null)
+        }
+    }
+
+    /** The sentence of a spoken note under a document point, for a pen strike. */
+    fun voiceSentenceAt(docX: Float, docY: Float, callback: (note: Int, sentence: Int) -> Unit) {
+        webView.evaluateJavascript("window.__einkVoiceSentenceAt ? window.__einkVoiceSentenceAt($docX, $docY) : null") { raw ->
+            val cleaned = raw?.trim()?.removeSurrounding("\"")?.replace("\\\"", "\"") ?: return@evaluateJavascript
+            if (cleaned.isBlank() || cleaned == "null") return@evaluateJavascript
+            runCatching { JSONObject(cleaned) }.getOrNull()?.let { callback(it.getInt("n"), it.getInt("s")) }
         }
     }
 

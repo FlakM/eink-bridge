@@ -515,6 +515,108 @@
     }
   };
 
+  // --- Voice notes: a card under the block the reader spoke at ---
+  //
+  // Cards are deliberately not in QUERY. The element map is index-based, so a card that
+  // counted as an element would renumber every block below it and move every bind group
+  // the tablet holds by index. A card is a sibling of its block (or of the table/list
+  // that contains it, where a sibling of a cell or item would be nothing), and the map
+  // is rebuilt afterwards because the blocks below have moved down.
+  var BLOCKER = '#c0392b';
+
+  function sentences(text) {
+    var out = [];
+    var re = /[^.!?]+[.!?]*\s*/g;
+    var m;
+    while ((m = re.exec(text)) !== null) {
+      if (m[0].trim()) out.push(m[0].trim());
+    }
+    return out.length ? out : [text];
+  }
+
+  function cardHost(el) {
+    var tag = el.tagName;
+    if (tag === 'TD' || tag === 'TH') return el.closest('table') || el;
+    if (tag === 'LI') return el.closest('ul, ol') || el;
+    return el;
+  }
+
+  function voiceCard(note) {
+    var blocker = note.severity === 'blocker';
+    var color = blocker ? BLOCKER : (note.color || '#e74c3c');
+    var secs = note.state || '';
+    var card = document.createElement('aside');
+    card.className = 'voice-block';
+    card.dataset.note = String(note.n);
+    card.dataset.severity = blocker ? 'blocker' : 'note';
+    card.style.borderLeftColor = color;
+
+    var badge = document.createElement('span');
+    badge.className = 'eink-link-badge';
+    badge.style.background = color;
+    badge.textContent = String(note.n);
+    card.appendChild(badge);
+
+    var state = document.createElement('span');
+    state.className = 'voice-state';
+    state.textContent = secs;
+    card.appendChild(state);
+
+    var text = document.createElement('span');
+    text.className = 'voice-text';
+    sentences(note.text || '').forEach(function(s, i) {
+      if (i) text.appendChild(document.createTextNode(' '));
+      var span = document.createElement('span');
+      span.className = 'voice-sentence';
+      span.dataset.s = String(i);
+      span.textContent = s;
+      text.appendChild(span);
+    });
+    card.appendChild(text);
+
+    if (note.raw) {
+      var raw = document.createElement('details');
+      raw.className = 'voice-raw';
+      var summary = document.createElement('summary');
+      summary.textContent = 'heard';
+      raw.appendChild(summary);
+      raw.appendChild(document.createTextNode(note.raw));
+      card.appendChild(raw);
+    }
+    return card;
+  }
+
+  window.__einkVoiceNotes = function(notes) {
+    document.querySelectorAll('.voice-block').forEach(function(c) { c.parentNode.removeChild(c); });
+    var count = 0;
+    (notes || []).forEach(function(note) {
+      var el = getEl(note.i);
+      if (!el) return;
+      var host = cardHost(el);
+      host.parentNode.insertBefore(voiceCard(note), host.nextSibling);
+      count++;
+    });
+    buildMap();
+    return JSON.stringify(count);
+  };
+
+  window.__einkVoiceSentenceAt = function(docX, docY) {
+    var sy = window.pageYOffset || 0;
+    var sx = window.pageXOffset || 0;
+    var spans = document.querySelectorAll('.voice-block .voice-sentence');
+    for (var i = 0; i < spans.length; i++) {
+      var rects = spans[i].getClientRects();
+      for (var k = 0; k < rects.length; k++) {
+        var r = rects[k];
+        if (docX >= r.left + sx && docX <= r.right + sx && docY >= r.top + sy && docY <= r.bottom + sy) {
+          var card = spans[i].closest('.voice-block');
+          return JSON.stringify({ n: parseInt(card.dataset.note, 10), s: parseInt(spans[i].dataset.s, 10) });
+        }
+      }
+    }
+    return JSON.stringify(null);
+  };
+
   window.__einkRebuildElementMap = buildMap;
   document.addEventListener('DOMContentLoaded', buildMap);
   window.addEventListener('resize', buildMap);

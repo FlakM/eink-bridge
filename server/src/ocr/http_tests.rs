@@ -51,6 +51,16 @@ fn cloud_text(text: &str) -> Value {
 }
 
 fn engine(local: &Mock, cloud: Option<&Mock>) -> OcrEngine {
+    // 100 ms is short enough that the fallback case can prove a late cloud answer is
+    // abandoned by using a one second delay.
+    engine_with_cloud_budget(local, cloud, Duration::from_millis(100))
+}
+
+fn engine_with_cloud_budget(
+    local: &Mock,
+    cloud: Option<&Mock>,
+    cloud_budget: Duration,
+) -> OcrEngine {
     OcrEngine {
         debug_save: false,
         client: reqwest::Client::builder()
@@ -66,7 +76,7 @@ fn engine(local: &Mock, cloud: Option<&Mock>) -> OcrEngine {
             providers::OpenAi::new(
                 "test-key",
                 "test-vision".into(),
-                Duration::from_millis(100),
+                cloud_budget,
                 format!("{}/v1/responses", mock.url),
             )
             .unwrap()
@@ -335,7 +345,12 @@ async fn benchmark_bypasses_cache_and_does_not_cancel_either_provider() {
         Duration::from_millis(20),
     )
     .await;
-    let engine = engine(&local, Some(&cloud));
+    // The 20 ms delay is what makes "the loser is not cancelled" meaningful, but it sat
+    // only five times inside the 100 ms cloud budget: under a full parallel run (gradle,
+    // whisper, 400 other tests) a scheduler hiccup turned it into a timeout and the test
+    // failed on a build that had nothing wrong with it. The budget is generous here; the
+    // timeout behaviour has its own test.
+    let engine = engine_with_cloud_budget(&local, Some(&cloud), Duration::from_secs(2));
     for _ in 0..2 {
         let results = engine.compare_image(b"png").await;
         assert_eq!(results.len(), 2);

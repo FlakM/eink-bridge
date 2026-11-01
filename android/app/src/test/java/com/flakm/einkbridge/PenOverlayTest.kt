@@ -1076,7 +1076,192 @@ class PenOverlayTest {
         assertFalse("Controller must not open if WebView has no size", mock.isOpen)
     }
 
+    // ── The pen must always draw in DRAW mode ─────────────────────────────────
+    //
+    // Each of these is a way the pen went quiet on the tablet with the toolbar still
+    // showing DRAW. The rule: every event that can leave touch state behind rearms the
+    // pen, and a stylus DOWN that produces no raw callback is recovered, not waited on.
+
+    @Test
+    fun aStylusDownThatTheReaderIgnoresReopensTheRawLayer() {
+        val fix = buildOverlayWithInit()
+        fix.mock.lastRawCallbackMs = 1_000L
+        fix.overlay.onStylusDown()
+        assertEquals(0, fix.mock.renderBufferResetCount)
+        idleMainLooper(RAW_WATCHDOG_MS_FOR_TEST + 1)
+        assertEquals("no callback within the window: the raw layer is reopened", 1, fix.mock.renderBufferResetCount)
+        assertEquals(0, fix.mock.recreateCount)
+    }
+
+    @Test
+    fun aStylusDownTheReaderAnsweredIsLeftAlone() {
+        val fix = buildOverlayWithInit()
+        fix.overlay.onStylusDown()
+        fix.mock.lastRawCallbackMs = System.currentTimeMillis() + 1
+        idleMainLooper(RAW_WATCHDOG_MS_FOR_TEST + 1)
+        assertEquals(0, fix.mock.renderBufferResetCount)
+        assertEquals(0, fix.mock.rearmCount)
+    }
+
+    @Test
+    fun aSecondSilentStylusDownRebuildsTheHelper() {
+        val fix = buildOverlayWithInit()
+        fix.overlay.onStylusDown(now = 10_000L)
+        idleMainLooper(RAW_WATCHDOG_MS_FOR_TEST + 1)
+        assertEquals(1, fix.mock.renderBufferResetCount)
+        fix.overlay.onStylusDown(now = 11_000L)
+        idleMainLooper(RAW_WATCHDOG_MS_FOR_TEST + 1)
+        assertEquals("the reset did not help: escalate", 1, fix.mock.recreateCount)
+    }
+
+    @Test
+    fun anSdkThatDroppedItsFlagIsRearmedWithoutATeardown() {
+        val fix = buildOverlayWithInit()
+        fix.mock.drawingEnabled = false
+        fix.overlay.onStylusDown()
+        idleMainLooper(RAW_WATCHDOG_MS_FOR_TEST + 1)
+        assertEquals(1, fix.mock.rearmCount)
+        assertEquals("a dropped flag is not a wedged reader", 0, fix.mock.renderBufferResetCount)
+        assertTrue(fix.mock.drawingEnabled)
+    }
+
+    @Test
+    fun theWatchdogDoesNotFireWhileAGestureModeHasThePenOff() {
+        val fix = buildOverlayWithInit()
+        fix.overlay.setMode(ToolMode.TAG)
+        fix.overlay.onStylusDown()
+        idleMainLooper(RAW_WATCHDOG_MS_FOR_TEST + 1)
+        assertEquals(0, fix.mock.renderBufferResetCount)
+        assertFalse(fix.mock.drawingEnabled)
+    }
+
+    @Test
+    fun aPageLoadThatNeverFinishesGivesThePenBackAfterTheGrace() {
+        val fix = buildOverlayWithInit(withStrokeView = true)
+        fix.overlay.setInputEnabled(false)
+        assertFalse(fix.mock.drawingEnabled)
+        idleMainLooper(PenOverlay.PAGE_LOAD_GRACE_MS - 1)
+        assertFalse("inside the grace the load is still trusted", fix.mock.drawingEnabled)
+        idleMainLooper(2)
+        assertTrue("a dead pen is worse than ink over a page that is still loading", fix.mock.drawingEnabled)
+        assertEquals(View.VISIBLE, fix.strokeView!!.visibility)
+    }
+
+    @Test
+    fun aPageThatFinishesCancelsTheGrace() {
+        val fix = buildOverlayWithInit()
+        fix.overlay.setInputEnabled(false)
+        fix.overlay.onPageReady()
+        fix.overlay.setMode(ToolMode.TAG)
+        idleMainLooper(PenOverlay.PAGE_LOAD_GRACE_MS + 1)
+        assertFalse("the stale grace must not switch the pen on under a gesture mode", fix.mock.drawingEnabled)
+    }
+
+    @Test
+    fun aRearmForgetsAPalmWhoseUpWasLost() {
+        val fix = buildOverlayWithInit()
+        val webView = fix.webView
+        webView.dispatchGenericMotionEvent(stylusHoverEvent())
+        assertTrue("a finger right after the pen is a palm and is swallowed",
+            webView.dispatchTouchEvent(buildFingerEvent(MotionEvent.ACTION_DOWN)))
+        // The palm's UP never arrives (a dialog took it). Every later finger would be eaten.
+        fix.overlay.rearm("window focus regained")
+        assertTrue(fix.mock.drawingEnabled)
+        assertFalse("after the rearm a finger scrolls the page again",
+            webView.dispatchTouchEvent(fingerEventAt(MotionEvent.ACTION_DOWN, 50f, 50f)))
+    }
+
+    @Test
+    fun aNewDownAbandonsALassoWhoseUpWasLost() {
+        val fix = buildOverlayWithInit(withStrokeView = true)
+        val webView = fix.webView
+        fix.overlay.setMode(ToolMode.TAG)
+        webView.dispatchTouchEvent(fingerEventAt(MotionEvent.ACTION_DOWN, 10f, 10f))
+        webView.dispatchTouchEvent(fingerEventAt(MotionEvent.ACTION_MOVE, 80f, 90f))
+        assertTrue(fix.strokeView!!.bindDrawingActive)
+        // No UP. The next DOWN proves the old gesture is over.
+        webView.dispatchTouchEvent(fingerEventAt(MotionEvent.ACTION_DOWN, 200f, 200f))
+        webView.dispatchTouchEvent(fingerEventAt(MotionEvent.ACTION_UP, 200f, 200f))
+        assertFalse("the second gesture was a tap, and the first did not survive into it", fix.strokeView.bindDrawingActive)
+    }
+
+    @Test
+    fun aRearmForgetsALassoWhoseUpWasLost() {
+        val fix = buildOverlayWithInit(withStrokeView = true)
+        fix.overlay.setMode(ToolMode.TAG)
+        fix.webView.dispatchTouchEvent(fingerEventAt(MotionEvent.ACTION_DOWN, 10f, 10f))
+        fix.webView.dispatchTouchEvent(fingerEventAt(MotionEvent.ACTION_MOVE, 80f, 90f))
+        assertTrue(fix.overlay.debugGestureArmed())
+        // A dialog took the UP. Nothing else will come to reset the lasso.
+        fix.overlay.rearm("window focus regained")
+        assertFalse("a lasso with no UP would keep the watchdog off the pen for good", fix.overlay.debugGestureArmed())
+    }
+
+    @Test
+    fun aRearmDropsAnArmedDrag() {
+        val fix = buildOverlayWithInit(withStrokeView = true)
+        fix.mock.simulateStroke(listOf(100f to 100f, 140f to 100f))
+        fix.overlay.loadBindGroups(listOf(BindGroup(1, Color.RED, setOf(0), listOf(0), emptyList(), 120f, 100f)))
+        fix.overlay.setMode(ToolMode.MOVE)
+        fix.webView.dispatchTouchEvent(fingerEventAt(MotionEvent.ACTION_DOWN, 120f, 100f))
+        assertEquals("group", fix.overlay.debugDragTarget())
+        fix.overlay.rearm("window focus regained")
+        assertNull(fix.overlay.debugDragTarget())
+    }
+
+    @Test
+    fun aResizedPageMovesTheDrawZoneWithIt() {
+        val bounds = android.graphics.Rect(0, 0, 400, 600)
+        val fix = buildOverlay(limitRect = bounds)
+        fix.overlay.init()
+        assertEquals(android.graphics.Rect(0, 0, 400, 600), fix.mock.lastLimitRect)
+        bounds.set(0, 0, 600, 400)
+        fix.overlay.onViewResized()
+        assertEquals("a rotation used to leave the pen limited to the portrait rectangle",
+            android.graphics.Rect(0, 0, 600, 400), fix.mock.lastLimitRect)
+        assertTrue(fix.mock.drawingEnabled)
+    }
+
+    // ── Speaking a note ───────────────────────────────────────────────────────
+
+    @Test
+    fun voiceModeKeepsThePenOffAndConsumesTheTap() {
+        val fix = buildOverlayWithInit()
+        fix.overlay.setMode(ToolMode.VOICE)
+        assertFalse("a finger aiming at a block must not draw", fix.mock.drawingEnabled)
+        assertTrue("the tap is the overlay's, not the page's",
+            fix.webView.dispatchTouchEvent(fingerEventAt(MotionEvent.ACTION_DOWN, 50f, 50f)))
+        fix.overlay.setMode(ToolMode.DRAW)
+        assertTrue(fix.mock.drawingEnabled)
+    }
+
+    @Test
+    fun anAcceptedNoteLandsOnItsGroupAndADiscardedOneIsGone() {
+        val fix = buildOverlayWithInit()
+        var changes = 0
+        fix.overlay.onBindGroupsChanged = { changes++ }
+        fix.overlay.loadBindGroups(listOf(
+            BindGroup(7, Color.RED, emptySet(), listOf(2), listOf(ElementRef(null, "P", "x")), 1f, 2f, source = "voice"),
+        ))
+        fix.overlay.setVoiceNote(7, "drop it", "blocker", """{"raw":"so drop it","seconds":4}""")
+        val group = fix.overlay.bindGroups.single()
+        assertEquals("drop it", group.recognizedText)
+        assertEquals("blocker", group.severity)
+        assertTrue(group.isVoice)
+        assertEquals(1, changes)
+        fix.overlay.removeBindGroup(7)
+        assertTrue(fix.overlay.bindGroups.isEmpty())
+    }
+
+    private fun idleMainLooper(ms: Long) {
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(ms))
+    }
+
     // ── helpers ────────────────────────────────────────────────────────────────
+
+    private companion object {
+        const val RAW_WATCHDOG_MS_FOR_TEST = PenOverlay.RAW_WATCHDOG_MS
+    }
 
     private data class OverlayFixture(
         val overlay: PenOverlay, val buf: StrokeBuffer, val mock: MockPenController,

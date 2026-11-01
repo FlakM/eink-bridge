@@ -62,19 +62,19 @@ class HttpClientsTest {
         assertNull(headerFor("   "))
     }
 
-    @Test fun theWebSocketCarriesTheTokenInTheQuery() {
+    @Test fun theWebSocketSaysItIsATabletAndCarriesTheTokenInTheQuery() {
         assertEquals(
-            "ws://amd-pc:3333/ws/abc?token=s3cret",
+            "ws://amd-pc:3333/ws/abc?client=tablet&token=s3cret",
             HttpClients.websocketUrl("http://amd-pc:3333", "abc", "s3cret"),
         )
         assertEquals(
-            "ws://amd-pc:3333/ws/abc",
+            "ws://amd-pc:3333/ws/abc?client=tablet",
             HttpClients.websocketUrl("http://amd-pc:3333/", "abc", null),
         )
         assertTrue(
             "a token with URL characters must be encoded",
             HttpClients.websocketUrl("http://amd-pc:3333", "abc", "a b&c")
-                .endsWith("?token=a+b%26c"),
+                .endsWith("&token=a+b%26c"),
         )
     }
 }

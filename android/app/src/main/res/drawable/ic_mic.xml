@@ -1,0 +1,19 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- capsule -->
+    <path
+        android:strokeColor="#000000"
+        android:strokeWidth="2.5"
+        android:fillColor="#00000000"
+        android:pathData="M12,3 C9.8,3 8,4.8 8,7 L8,12 C8,14.2 9.8,16 12,16 C14.2,16 16,14.2 16,12 L16,7 C16,4.8 14.2,3 12,3 Z"/>
+    <!-- cradle and stand -->
+    <path
+        android:strokeColor="#000000"
+        android:strokeWidth="2.5"
+        android:fillColor="#00000000"
+        android:strokeLineCap="round"
+        android:pathData="M5,11 C5,15 8,18 12,18 C16,18 19,15 19,11 M12,18 L12,22 M8,22 L16,22"/>
+</vector>

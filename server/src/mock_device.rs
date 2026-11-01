@@ -145,11 +145,13 @@ async fn poll_active(client: &Client, server: &str) -> anyhow::Result<Vec<serde_
 ///   2. Wait for annotation_result (server processed the annotations)
 ///   3. Wait for version_updated (agent pushed new content via HTTP PUT)
 async fn simulate_request_update(server: &str, session_id: &str) {
+    // `client=tablet` is what makes a screenshot request count as delivered.
     let ws_url = server
         .replacen("http://", "ws://", 1)
         .replacen("https://", "wss://", 1)
         + "/ws/"
-        + session_id;
+        + session_id
+        + "?client=tablet";
 
     let Ok(Ok((mut ws, _))) = tokio::time::timeout(
         Duration::from_secs(5),
@@ -194,10 +196,38 @@ async fn simulate_request_update(server: &str, session_id: &str) {
                         eprintln!("mock-device: version_updated v{version} — document reloaded");
                         break;
                     }
+                    "screenshot_requested" => {
+                        let request_id = v["request_id"].as_str().unwrap_or_default();
+                        answer_screenshot(server, session_id, request_id).await;
+                    }
                     _ => {}
                 }
             }
             _ => break,
         }
+    }
+}
+
+/// What a tablet does when the agent asks to see the page: PUT a PNG under the request
+/// id. The picture is a one-pixel PNG; the point is the round trip, not the pixels.
+async fn answer_screenshot(server: &str, session_id: &str, request_id: &str) {
+    const ONE_PIXEL_PNG: &[u8] = &[
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f,
+        0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8,
+        0xcf, 0xc0, 0xf0, 0x1f, 0x00, 0x05, 0x00, 0x01, 0xff, 0x8e, 0x9a, 0x7a, 0x3e, 0x00, 0x00,
+        0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+    let resp = Client::new()
+        .put(format!(
+            "{server}/api/sessions/{session_id}/screenshot/{request_id}"
+        ))
+        .header("content-type", "image/png")
+        .body(ONE_PIXEL_PNG.to_vec())
+        .send()
+        .await;
+    match resp {
+        Ok(resp) => eprintln!("mock-device: screenshot {request_id} → {}", resp.status()),
+        Err(e) => eprintln!("mock-device: screenshot {request_id} failed: {e}"),
     }
 }

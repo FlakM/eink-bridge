@@ -833,6 +833,67 @@ fn every_block_kind_can_be_bound_by_a_tap() {
 }
 
 #[test]
+fn the_page_can_show_a_spoken_note_and_find_the_sentence_under_a_pen() {
+    // The tablet draws voice cards through these two entry points; a rename on either
+    // side leaves the reader speaking into a page that shows nothing.
+    let page = page_source();
+    for entry in [
+        "window.__einkVoiceNotes = function(notes)",
+        "window.__einkVoiceSentenceAt = function(docX, docY)",
+    ] {
+        assert!(page.contains(entry), "the page must define {entry}");
+    }
+}
+
+#[test]
+fn a_voice_card_is_not_an_element_the_map_counts() {
+    // The map is index-based: a card counted as an element would renumber every block
+    // below it and move every bind group the tablet holds by index.
+    assert!(
+        !annotatable_selectors().iter().any(|s| s == ".voice-block"),
+        "'.voice-block' must stay out of QUERY in assets/element-map.js"
+    );
+    assert!(
+        css_rule(".voice-block {").contains("border-left"),
+        "the card carries the group colour on its left rule"
+    );
+}
+
+#[test]
+fn a_blocker_shows_its_red_rule_and_a_numeral_a_greyscale_panel_can_read() {
+    assert!(
+        css_rule(".voice-block[data-severity=\"blocker\"] {").contains("#c0392b"),
+        "a blocker's rule is the red the design names"
+    );
+    let page = page_source();
+    assert!(
+        page.contains("badge.textContent = String(note.n)"),
+        "the card's badge is the numeral, in the same badge the tap links use"
+    );
+}
+
+#[test]
+fn what_was_heard_stays_folded_until_the_reader_asks() {
+    // The raw transcript is a `details`; forcing it open would show the messy words
+    // under every note, and the page's own stylesheet is the only place that could.
+    let raw = css_rule(".voice-raw {");
+    assert!(
+        !raw.contains("display:"),
+        "'.voice-raw' leaves the details element folded: {raw}"
+    );
+    assert!(
+        !css_rules()
+            .iter()
+            .any(|(selector, _)| selector.contains("voice-raw[open]")),
+        "nothing forces the transcript open"
+    );
+    assert!(
+        page_source().contains("summary.textContent = 'heard'"),
+        "the toggle reads 'heard'"
+    );
+}
+
+#[test]
 fn the_pen_owns_taps_so_a_steps_block_does_not_steal_them() {
     assert!(
         css_rule(".steps-list {").contains("pointer-events: none"),

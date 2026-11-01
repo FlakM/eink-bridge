@@ -17,6 +17,9 @@ internal class MockPenController(private val buf: StrokeBuffer) : PenInputContro
     var lastLimitRect: Rect? = null
     var lastExcludeRects: List<Rect> = emptyList()
     var renderBufferResetCount = 0
+    var rearmCount = 0
+    var recreateCount = 0
+    override var lastRawCallbackMs = 0L
 
     override fun open(view: View, limitRect: Rect, excludeRects: List<Rect>) {
         isOpen = true
@@ -36,6 +39,9 @@ internal class MockPenController(private val buf: StrokeBuffer) : PenInputContro
     override fun setStyleBrush() { style = "brush" }
     override fun setStyleEraser() { style = "eraser" }
     override fun resetRenderBuffer() { drawingEnabled = true; renderBufferResetCount++ }
+    override fun isEnabled(): Boolean? = drawingEnabled
+    override fun rearm() { drawingEnabled = true; rearmCount++ }
+    override fun recreate() { drawingEnabled = true; recreateCount++; lastRawCallbackMs = System.currentTimeMillis() }
     override fun close() { isOpen = false; drawingEnabled = false }
 
     /**

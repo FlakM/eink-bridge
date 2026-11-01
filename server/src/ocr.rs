@@ -8,7 +8,7 @@ use tracing::info;
 mod cache;
 #[cfg(test)]
 mod http_tests;
-mod providers;
+pub(crate) mod providers;
 mod race;
 
 pub use race::ProviderBenchmark;

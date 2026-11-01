@@ -18,6 +18,9 @@ exists.
 | OCR slow | `eink_ocr_duration_seconds` buckets |
 | OCR cache not helping | `eink_ocr_cache_total{result="hit"}` / `{result="miss"}` |
 | Which provider answered | `eink_ocr_provider_wins_total{provider="local"}` |
+| Spoken notes failing or abandoned | `eink_voice_captures_total{result="failed"}` / `{result="abandoned"}` |
+| The cleaner keeps being refused | `eink_voice_guard_total{result="refused"}` |
+| The recogniser is slow or down | `eink_asr_duration_seconds` buckets, `eink_asr_requests_total{provider="local",result="error"}` |
 | WebSocket drops | `eink_ws_connections_active` |
 | Long-poll timing out too fast | `eink_long_poll_total{result="timeout"}` |
 | Webhook not firing | `eink_webhook_total{result="error"}` |

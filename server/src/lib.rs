@@ -8,4 +8,5 @@ pub mod reanchor;
 pub mod render;
 pub mod session;
 pub mod verdict;
+pub mod voice;
 pub mod ws;

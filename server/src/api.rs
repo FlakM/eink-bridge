@@ -61,6 +61,78 @@ pub struct AnnotationGroup {
     pub recognized_text: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    /// How these words got here. A pen stroke run through OCR and a spoken note are both
+    /// `recognized_text`; an agent that needs to know which is reading this. Absent means
+    /// pen, which is what every client before voice sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<NoteSource>,
+    /// Only when `source` is voice: what was heard, and how it became the text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice: Option<VoiceNote>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NoteSource {
+    Pen,
+    Tap,
+    Voice,
+}
+
+/// A spoken note, with its provenance. `recognized_text` on the group is what the agent
+/// reads; this is what to look at when it reads wrong.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct VoiceNote {
+    /// Exactly what was heard. Never rewritten, never dropped.
+    pub raw: String,
+    /// The instructions applied to get from `raw` to the text, in order.
+    #[serde(default)]
+    pub edits: Vec<VoiceEdit>,
+    /// Every identifier the vocabulary pass rewrote, with what it heard.
+    #[serde(default)]
+    pub repairs: Vec<Repair>,
+    /// The worst segment confidence in the note, 0..1. Low means the recogniser was
+    /// unsure of some of it: worth a screenshot or a question before acting.
+    #[serde(default)]
+    pub confidence: f32,
+    #[serde(default)]
+    pub stt: SttProvenance,
+    #[serde(default)]
+    pub seconds: f32,
+    /// The session route the audio can be replayed from, when it was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio: Option<String>,
+    /// `note` unless the reader marked it a blocker.
+    #[serde(default = "default_severity")]
+    pub severity: String,
+    /// The cleaned text was refused by the guard, so the text is `raw` verbatim.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub guarded: bool,
+}
+
+pub fn default_severity() -> String {
+    "note".into()
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct VoiceEdit {
+    pub instruction: String,
+    pub before: String,
+    pub after: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Repair {
+    pub heard: String,
+    pub wrote: String,
+}
+
+/// Which recogniser answered.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SttProvenance {
+    pub provider: String,
+    pub model: String,
+    pub language: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -431,6 +503,82 @@ pub fn openapi_spec() -> serde_json::Value {
                     }
                 }
             },
+            "/api/sessions/{id}/voice": {
+                "get": {
+                    "summary": "Speak a note: a WebSocket the tablet streams audio on",
+                    "description": "Upgrade to a WebSocket. Binary frames up are 16 kHz mono signed 16-bit PCM; text frames down carry `seq` and are `ready`, `partial`, `final` (raw, text, seconds, confidence, repairs, guarded, audio), `edit`, `done` (the VoiceNote to put under `voice` in an annotation) or `error`. The capture closes itself after 1.5 s of silence following speech, on `{\"type\":\"stop\"}`, and at 300 s or 4 MB. After `final` the client may send `edit` with an instruction (closed verbs apply at once; anything else goes through the cleaner and the content-word guard), `undo`, `done` or `discard`.",
+                    "responses": {
+                        "101": {"description": "Switching to WebSocket"},
+                        "404": {"description": "Session not found"},
+                        "409": {"description": "The session is over, or a capture is already open on it"},
+                        "503": {"description": "No speech recogniser configured"}
+                    }
+                }
+            },
+            "/api/sessions/{id}/voice/{capture}.wav": {
+                "get": {
+                    "summary": "The audio of a spoken note",
+                    "description": "What the reader said, as 16 kHz mono WAV, kept with the session and removed with it. The name is the capture id from the `final` frame; anything else is a 404.",
+                    "responses": {
+                        "200": {"description": "audio/wav, nosniff, no-store"},
+                        "404": {"description": "Session or capture not found"}
+                    }
+                }
+            },
+            "/api/sessions/{id}/speech": {
+                "post": {
+                    "summary": "Read a note aloud",
+                    "description": "Synthesises `text` (at most 2000 characters) with the server's one voice and answers with WAV bytes. Nothing is stored.",
+                    "requestBody": {
+                        "required": true,
+                        "content": {"application/json": {"schema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}}
+                    },
+                    "responses": {
+                        "200": {"description": "audio/wav"},
+                        "400": {"description": "Empty or too long"},
+                        "404": {"description": "Session not found"},
+                        "503": {"description": "No voice configured"}
+                    }
+                }
+            },
+            "/api/sessions/{id}/screenshot": {
+                "post": {
+                    "summary": "Ask the tablet to send a picture of what it is showing",
+                    "description": "Broadcasts a screenshot_requested message on the session WebSocket. The tablet answers by PUTting a PNG to /api/sessions/{id}/screenshot/{request_id}. A repeat ask while that request is unanswered (up to 20 seconds) reuses its id; an answered or failed request is never reused. `delivered` is false when no tablet (a WebSocket client that connected with ?client=tablet) has the session open, which is worth saying instead of waiting.",
+                    "responses": {
+                        "202": {"description": "{id, url, delivered}"},
+                        "404": {"description": "Session not found"},
+                        "409": {"description": "Session no longer active"}
+                    }
+                }
+            },
+            "/api/sessions/{id}/screenshot/{request_id}": {
+                "get": {
+                    "summary": "Fetch a screenshot the tablet sent",
+                    "description": "404 until the tablet has answered, which is what a caller polls for. Served as image/png with nosniff and no-store.",
+                    "responses": {
+                        "200": {"description": "The PNG"},
+                        "404": {"description": "Not sent yet, or no such request"},
+                        "410": {"description": "The tablet could not take the picture; the body says why"}
+                    }
+                },
+                "put": {
+                    "summary": "Send the screenshot the agent asked for",
+                    "description": "Raw PNG bytes, or `{\"error\": \"...\"}` as application/json when the tablet could not take the picture. The request id must be the one the server is waiting on.",
+                    "requestBody": {
+                        "required": true,
+                        "content": {
+                            "image/png": {"schema": {"type": "string", "format": "binary"}},
+                            "application/json": {"schema": {"type": "object", "properties": {"error": {"type": "string"}}}}
+                        }
+                    },
+                    "responses": {
+                        "204": {"description": "Stored, or the failure recorded"},
+                        "400": {"description": "Empty body, malformed id, or bytes that are not a PNG"},
+                        "404": {"description": "Session not found, or no request with that id is being waited for"}
+                    }
+                }
+            },
             "/api/sessions/{id}/reanchor": {
                 "post": {
                     "summary": "Resolve previous layout elements to current layout elements by text",
@@ -681,6 +829,8 @@ mod tests {
             pressures: vec![vec![0.5, 0.5]],
             recognized_text: Some("WRITE A TLDR".into()),
             color: Some("#CC0000".into()),
+            source: None,
+            voice: None,
         }];
         session.updated_at = session.created_at + chrono::Duration::seconds(75);
         session

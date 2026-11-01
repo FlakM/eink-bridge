@@ -70,6 +70,37 @@ pub struct AppState {
     pub source_roots: Option<Vec<PathBuf>>,
     /// How long a reanchor may compute before the page is told to keep its notes put.
     pub reanchor_budget: Duration,
+    /// The newest screenshot request per session. A second ask while one is pending
+    /// reuses the id and re-broadcasts it, so an agent that retries (or a tablet that
+    /// reconnected) does not flash the reader twice; an answered or failed request is
+    /// never reused, because "show me again" wants a new picture.
+    pub screenshot_requests: Arc<RwLock<HashMap<String, ScreenshotRequest>>>,
+    /// Tablets connected per session, kept by the WebSocket handler. An observer (the CLI,
+    /// the channel) subscribes to the same socket, so the broadcast's receiver count
+    /// cannot say whether anyone can answer a screenshot request; this can.
+    pub tablets: Arc<std::sync::Mutex<HashMap<String, usize>>>,
+    /// Speech: the recogniser the tablet streams to, the cleaner, and the voice that
+    /// reads a note back. None when no recogniser is configured.
+    pub voice: Option<Arc<crate::voice::Voice>>,
+    /// Sessions with a voice capture open right now; a second ask is a 409.
+    pub captures: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+}
+
+/// A screenshot the agent asked for, from the ask until the tablet answers.
+#[derive(Debug, Clone)]
+pub struct ScreenshotRequest {
+    pub id: String,
+    pub asked_at: tokio::time::Instant,
+    /// Why the tablet could not take the picture, when it said so.
+    pub failure: Option<String>,
+}
+
+impl ScreenshotRequest {
+    /// A repeat ask reuses a request that is still waiting for its answer, and only for
+    /// [`SCREENSHOT_COALESCE`]: past that, the tablet is not going to answer it.
+    fn is_pending(&self) -> bool {
+        self.failure.is_none() && self.asked_at.elapsed() < SCREENSHOT_COALESCE
+    }
 }
 
 /// How long a webhook receiver has to answer.
@@ -196,7 +227,16 @@ impl AppState {
             ],
             source_roots: source_roots_from_env(),
             reanchor_budget: Duration::from_secs(10),
+            screenshot_requests: Arc::new(RwLock::new(HashMap::new())),
+            tablets: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            voice: crate::voice::Voice::from_env(),
+            captures: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         }
+    }
+
+    /// How many tablets have this session open on the WebSocket right now.
+    pub fn tablets_listening(&self, id: &str) -> usize {
+        self.tablets.lock().unwrap().get(id).copied().unwrap_or(0)
     }
 
     /// Wait until every queued write has landed, and learn whether one of them failed.
@@ -449,6 +489,7 @@ fn query_token_allowed(path: &str) -> bool {
         || path.starts_with("/review/")
         || path.starts_with("/ws/")
         || (path.starts_with("/api/sessions/") && path.contains("/annotation/"))
+        || (path.starts_with("/api/sessions/") && path.ends_with("/voice"))
 }
 
 fn query_value<'a>(query: &'a str, key: &str) -> Option<&'a str> {
@@ -622,6 +663,23 @@ pub fn build_app(state: AppState) -> Router {
             post(upload_image).get(document_image),
         )
         .route("/api/sessions/{id}/source", get(source_snippet))
+        .route("/api/sessions/{id}/screenshot", post(request_screenshot))
+        .route(
+            "/api/sessions/{id}/screenshot/{request_id}",
+            get(get_screenshot).put(upload_screenshot),
+        )
+        .route(
+            "/api/sessions/{id}/voice",
+            get(crate::voice::capture::voice_ws),
+        )
+        .route(
+            "/api/sessions/{id}/voice/{name}",
+            get(crate::voice::capture::get_audio),
+        )
+        .route(
+            "/api/sessions/{id}/speech",
+            post(crate::voice::capture::speech),
+        )
         .route("/api/sessions/{id}/submit", post(submit_review))
         .route("/api/sessions/{id}/request_update", post(request_update))
         .route("/ws/{id}", get(crate::ws::ws_handler))
@@ -755,6 +813,8 @@ async fn health(State(state): State<AppState>) -> Response {
             "version": env!("CARGO_PKG_VERSION"),
             "ocr": if state.ocr_engine.is_some() { "available" } else { "unavailable" },
             "ocr_optional": true,
+            "voice": if state.voice.is_some() { "available" } else { "unavailable" },
+            "speech": if state.voice.as_ref().is_some_and(|v| v.tts.is_some()) { "available" } else { "unavailable" },
             "state_dir": state_dir.to_string_lossy(),
             "state_dir_writable": writable,
             "sessions": stored,
@@ -1505,6 +1565,214 @@ async fn document_image(
             .into_response(),
         Err(_) => StatusCode::NOT_FOUND.into_response(),
     }
+}
+
+/// How long an unanswered screenshot request stands before a repeat ask makes a new one.
+/// Long enough that an agent retrying while it polls reuses the id, short enough that a
+/// tablet which never answered is not waited on forever.
+const SCREENSHOT_COALESCE: Duration = Duration::from_secs(20);
+
+/// Ask the tablet for a picture of what it is showing right now.
+///
+/// The agent has the HTML and the element map; what it does not have is the reader's
+/// actual view — scrolled where, zoomed how much, ink over what. That is the part of a
+/// layout bug that only the device can answer, and asking costs the reader nothing but a
+/// brief "the agent wants to see this" line.
+///
+/// Answers 202 with the request id the PNG will be filed under. `delivered` says whether
+/// a tablet has the session open; a caller that gets `false` can say so rather than wait.
+async fn request_screenshot(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    {
+        let mgr = state.sessions.read().await;
+        match mgr.get(&id) {
+            None => return StatusCode::NOT_FOUND.into_response(),
+            Some(session) if session.status != SessionStatus::Active => {
+                return (
+                    StatusCode::CONFLICT,
+                    "the session is no longer active; there is no page to photograph",
+                )
+                    .into_response();
+            }
+            Some(_) => {}
+        }
+    }
+
+    let request_id = {
+        let mut pending = state.screenshot_requests.write().await;
+        match pending.get(&id) {
+            Some(request) if request.is_pending() => request.id.clone(),
+            _ => {
+                let fresh = uuid::Uuid::new_v4().as_simple().to_string();
+                pending.insert(
+                    id.clone(),
+                    ScreenshotRequest {
+                        id: fresh.clone(),
+                        asked_at: tokio::time::Instant::now(),
+                        failure: None,
+                    },
+                );
+                fresh
+            }
+        }
+    };
+
+    // Delivered means a tablet heard it. The agent's own observer socket also receives
+    // the broadcast, and counting it once made the CLI wait twenty seconds for a device
+    // that was not there.
+    let delivered = state.tablets_listening(&id) > 0;
+    state
+        .ws_send(
+            &id,
+            ServerMessage::ScreenshotRequested {
+                request_id: request_id.clone(),
+            },
+        )
+        .await;
+    tracing::info!(id = %id, request_id = %request_id, delivered, "screenshot requested");
+
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({
+            "id": request_id,
+            "url": format!("/api/sessions/{id}/screenshot/{request_id}"),
+            "delivered": delivered,
+        })),
+    )
+        .into_response()
+}
+
+/// The tablet's answer: the page as it is, composited with whatever is drawn on it.
+///
+/// Only the request the server is waiting on can be answered, so a caller cannot fill the
+/// session with pictures nobody asked for. A JSON body (`{"error": "..."}`) is the tablet
+/// saying it could not take the picture; the agent then hears why instead of waiting out
+/// its timeout.
+async fn upload_screenshot(
+    State(state): State<AppState>,
+    Path((id, request_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    // The id becomes a file name, so it has to be one this server could have made.
+    if !is_request_id(&request_id) {
+        return bad_request("the request id is not one this server issues".into());
+    }
+    let dir = {
+        let mgr = state.sessions.read().await;
+        match mgr.get(&id) {
+            None => return StatusCode::NOT_FOUND.into_response(),
+            Some(session) => session.screenshots_dir(),
+        }
+    };
+    {
+        let pending = state.screenshot_requests.read().await;
+        if pending.get(&id).map(|request| request.id.as_str()) != Some(request_id.as_str()) {
+            return (
+                StatusCode::NOT_FOUND,
+                "no screenshot with that id is being waited for",
+            )
+                .into_response();
+        }
+    }
+    if body.is_empty() {
+        return bad_request("the screenshot body is empty".into());
+    }
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("image/png");
+    if content_type.starts_with("application/json") {
+        let reason = serde_json::from_slice::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|value| value["error"].as_str().map(str::to_string))
+            .filter(|reason| !reason.trim().is_empty());
+        let Some(reason) = reason else {
+            return bad_request("a failure report needs an `error` string".into());
+        };
+        let mut pending = state.screenshot_requests.write().await;
+        if let Some(request) = pending.get_mut(&id).filter(|r| r.id == request_id) {
+            request.failure = Some(reason.clone());
+        }
+        tracing::warn!(id = %id, request_id = %request_id, reason = %reason, "screenshot failed on the tablet");
+        return StatusCode::NO_CONTENT.into_response();
+    }
+    if !bytes_are_image(content_type, &body) {
+        return bad_request(format!(
+            "the bytes are not a {} image",
+            format_label(content_type)
+        ));
+    }
+    if let Err(error) = tokio::fs::create_dir_all(&dir).await {
+        tracing::error!(id = %id, error = %error, "failed to create the screenshot directory");
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+    if let Err(error) = tokio::fs::write(dir.join(format!("{request_id}.png")), &body).await {
+        tracing::error!(id = %id, error = %error, "failed to write a screenshot");
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+    // Answered: the next ask is a new picture, not this one again.
+    let mut pending = state.screenshot_requests.write().await;
+    if pending
+        .get(&id)
+        .is_some_and(|request| request.id == request_id)
+    {
+        pending.remove(&id);
+    }
+    tracing::info!(id = %id, request_id = %request_id, bytes = body.len(), "screenshot stored");
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// Fetch a screenshot the tablet has sent. 404 means "not yet", which is what a caller
+/// polling for one will see until it arrives; 410 means the tablet tried and could not,
+/// with its reason, so the caller stops polling.
+async fn get_screenshot(
+    State(state): State<AppState>,
+    Path((id, request_id)): Path<(String, String)>,
+) -> Response {
+    if !is_request_id(&request_id) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let dir = {
+        let mgr = state.sessions.read().await;
+        match mgr.get(&id) {
+            Some(session) => session.screenshots_dir(),
+            None => return StatusCode::NOT_FOUND.into_response(),
+        }
+    };
+    let failure = state
+        .screenshot_requests
+        .read()
+        .await
+        .get(&id)
+        .filter(|request| request.id == request_id)
+        .and_then(|request| request.failure.clone());
+    if let Some(reason) = failure {
+        return (
+            StatusCode::GONE,
+            format!("the tablet could not take the picture: {reason}"),
+        )
+            .into_response();
+    }
+    match tokio::fs::read(dir.join(format!("{request_id}.png"))).await {
+        Ok(bytes) => (
+            [
+                (header::CONTENT_TYPE, "image/png"),
+                (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// 32 lowercase hex characters: what `Uuid::as_simple` produces, and nothing else.
+fn is_request_id(value: &str) -> bool {
+    value.len() == 32
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
 }
 
 async fn get_content(State(state): State<AppState>, Path(id): Path<String>) -> Response {

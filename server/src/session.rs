@@ -223,6 +223,16 @@ impl Session {
         self.state_dir.join("images")
     }
 
+    /// Where screenshots the agent asked for live: one PNG per request id.
+    pub fn screenshots_dir(&self) -> PathBuf {
+        self.state_dir.join("screenshots")
+    }
+
+    /// Where the audio of spoken notes lives: one WAV per capture, kept with the session.
+    pub fn voice_dir(&self) -> PathBuf {
+        self.state_dir.join("voice")
+    }
+
     pub fn save_annotation(&self, data: &[u8]) -> std::io::Result<String> {
         write_annotation(&self.annotations_dir(), data)
     }

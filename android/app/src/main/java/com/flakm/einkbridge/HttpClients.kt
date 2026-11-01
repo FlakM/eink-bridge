@@ -25,13 +25,18 @@ internal object HttpClients {
         }.build()
 
     /** The WebSocket upgrade is browser-shaped, so the token travels in the query. */
+    /**
+     * `client=tablet` tells the server this socket can answer a screenshot request. The
+     * agent's own observer shares the socket, so without it "someone is listening" and
+     * "the tablet is listening" would be the same thing.
+     */
     fun websocketUrl(serverUrl: String, sessionId: String, token: String?): String {
         val base = serverUrl.trimEnd('/')
             .replaceFirst("http://", "ws://")
             .replaceFirst("https://", "wss://")
         val value = token?.trim().orEmpty()
-        val suffix = if (value.isEmpty()) ""
-        else "?token=" + URLEncoder.encode(value, "UTF-8")
-        return "$base/ws/$sessionId$suffix"
+        val tokenParam = if (value.isEmpty()) ""
+        else "&token=" + URLEncoder.encode(value, "UTF-8")
+        return "$base/ws/$sessionId?client=tablet$tokenParam"
     }
 }

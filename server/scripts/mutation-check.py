@@ -35,6 +35,8 @@ WSI = SERVER / "src/ws.rs"
 OCRI = SERVER / "src/ocr.rs"
 PROVIDERSI = SERVER / "src/ocr/providers.rs"
 MAINI = SERVER / "src/main.rs"
+VOICE_CLEAN = SERVER / "src/voice/clean.rs"
+VOICE_CAPTURE = SERVER / "src/voice/capture.rs"
 STROKEBUFFER = SERVER.parent / "android/app/src/main/java/com/flakm/einkbridge/StrokeBuffer.kt"
 FLAKE = SERVER.parent / "flake.nix"
 SESSIONI = SERVER / "src/session.rs"
@@ -58,6 +60,15 @@ TARGETS = {
     "an_acknowledgement_must_name_the_feedback_it_consumes": "--test api_edge_test",
     "metrics_are_served_in_the_format_prometheus_scrapes": "--test api_edge_test",
     "server_side_ocr_is_optional_and_says_so": "--test api_edge_test",
+    "a_request_id_cannot_name_a_file_outside_the_session": "--test screenshot_test",
+    "an_answer_to_a_request_nobody_made_is_refused": "--test screenshot_test",
+    "asking_names_a_request_the_tablet_can_answer": "--test screenshot_test",
+    "an_ask_after_the_answer_is_a_new_picture": "--test screenshot_test",
+    "the_guard_refuses_an_invented_word_and_allows_a_reorder": "--lib",
+    "discard_throws_the_audio_away_and_a_name_cannot_leave_the_session": "--test voice_test",
+    "one_capture_per_session_and_none_on_a_finished_or_unknown_one": "--test voice_test",
+    "nothing_heard_is_an_error_not_an_empty_note": "--test voice_test",
+    "the_gate_closes_after_speech_then_silence_and_not_before": "--lib",
     "cli_remove_takes_the_review_away_and_cancel_keeps_it": "--test cli_integration_test",
     "a_label_value_cannot_break_the_pushed_body": "--bin eink-review",
     "the_webhook_metric_counts_what_actually_happened": "--test api_edge_test",
@@ -237,6 +248,111 @@ def whiten_a_scope(doc, saved):
 
 
 CASES = [
+    (
+        "the voice guard believes whatever the cleaner says",
+        text_edit(
+            VOICE_CLEAN,
+            """    content_words(cleaned)
+        .iter()
+        .all(|word| allowed.contains(word))
+}""",
+            """    let _ = (cleaned, allowed);
+    true
+}""",
+        ),
+        "the_guard_refuses_an_invented_word_and_allows_a_reorder",
+    ),
+    (
+        "the audio route serves any file name it is given",
+        text_edit(
+            VOICE_CAPTURE,
+            """    if !is_capture_id(capture) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let dir = {""",
+            """    let dir = {""",
+        ),
+        "discard_throws_the_audio_away_and_a_name_cannot_leave_the_session",
+    ),
+    (
+        "a second voice capture on a session is let in",
+        text_edit(
+            VOICE_CAPTURE,
+            """        let claimed = captures.lock().unwrap().insert(id.to_string());""",
+            """        let claimed = captures.lock().unwrap().insert(id.to_string()) || true;""",
+        ),
+        "one_capture_per_session_and_none_on_a_finished_or_unknown_one",
+    ),
+    (
+        "silence is sent to the recogniser and comes back as a note",
+        text_edit(
+            VOICE_CAPTURE,
+            """    if !gate.heard_speech() {
+        return Err("nothing was heard".into());
+    }
+    let transcript""",
+            """    let transcript""",
+        ),
+        "nothing_heard_is_an_error_not_an_empty_note",
+    ),
+    (
+        "a pen click counts as speech and the first pause ends the note",
+        text_edit(
+            VOICE_CAPTURE,
+            """        self.loud_bytes >= MIN_SPEECH_BYTES""",
+            """        self.loud_bytes > 0""",
+        ),
+        "the_gate_closes_after_speech_then_silence_and_not_before",
+    ),
+    (
+        "the screenshot route serves any file name it is given",
+        text_edit(
+            APPI,
+            """    Path((id, request_id)): Path<(String, String)>,
+) -> Response {
+    if !is_request_id(&request_id) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let dir = {""",
+            """    Path((id, request_id)): Path<(String, String)>,
+) -> Response {
+    let dir = {""",
+        ),
+        "a_request_id_cannot_name_a_file_outside_the_session",
+    ),
+    (
+        "a screenshot nobody asked for is stored",
+        text_edit(
+            APPI,
+            """        if pending.get(&id).map(|request| request.id.as_str()) != Some(request_id.as_str()) {
+            return (""",
+            """        if pending.get(&id).map(|request| request.id.as_str()) != Some(request_id.as_str()) && false {
+            return (""",
+        ),
+        "an_answer_to_a_request_nobody_made_is_refused",
+    ),
+    (
+        "a screenshot request counts the agent's observer as a tablet",
+        text_edit(
+            APPI,
+            "    let delivered = state.tablets_listening(&id) > 0;\n",
+            "    let delivered = state.ws_senders.read().await.contains_key(&id) || true;\n",
+        ),
+        "asking_names_a_request_the_tablet_can_answer",
+    ),
+    (
+        "an answered screenshot request is handed out again",
+        text_edit(
+            APPI,
+            """    if pending.get(&id).is_some_and(|request| request.id == request_id) {
+        pending.remove(&id);
+    }""",
+            """    if pending.get(&id).is_some_and(|request| request.id == request_id) && false {
+        pending.remove(&id);
+    }""",
+        ),
+        "an_ask_after_the_answer_is_a_new_picture",
+    ),
     (
         "the snippet wrapper clips its contents again",
         text_edit(
@@ -783,6 +899,18 @@ CASES = [
     true""",
         ),
         "health_says_what_is_actually_wrong",
+    ),
+    (
+        "a lasso whose UP was lost stays armed under the next stroke",
+        text_edit(
+            PENOVERLAY,
+            """        dragClusterIdx = null
+        bindHandler.cancel()
+        strokeView?.setBindPath(null)""",
+            """        dragClusterIdx = null
+        strokeView?.setBindPath(null)""",
+        ),
+        "gradle:PenOverlayTest",
     ),
     (
         "a stroke far from every paragraph is bound anyway",

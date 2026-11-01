@@ -1711,3 +1711,159 @@ async fn a_file_that_is_not_an_image_is_refused_before_it_reaches_the_tablet() {
     assert!(stderr.contains("bytes are something else"), "{stderr}");
     handle.abort();
 }
+
+// --- `eink-review screenshot` -----------------------------------------------------------
+
+/// What the Boox does when asked: connect as a tablet and answer the request with a PNG,
+/// or, when `reason` is given, with why it could not.
+async fn fake_tablet(
+    server: &str,
+    id: &str,
+    reason: Option<&'static str>,
+) -> tokio::task::JoinHandle<()> {
+    use futures_util::StreamExt;
+    let ws_url = format!(
+        "{}/ws/{id}?client=tablet",
+        server.replacen("http://", "ws://", 1)
+    );
+    let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+    let server = server.to_string();
+    let id = id.to_string();
+    tokio::spawn(async move {
+        while let Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) = ws.next().await {
+            let msg: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+            if msg["type"] != "screenshot_requested" {
+                continue;
+            }
+            let url = format!(
+                "{server}/api/sessions/{id}/screenshot/{}",
+                msg["request_id"].as_str().unwrap()
+            );
+            let request = match reason {
+                Some(reason) => reqwest::Client::new()
+                    .put(&url)
+                    .header("content-type", "application/json")
+                    .body(serde_json::json!({"error": reason}).to_string()),
+                None => reqwest::Client::new()
+                    .put(&url)
+                    .header("content-type", "image/png")
+                    .body(tablet_png()),
+            };
+            request.send().await.unwrap();
+        }
+    })
+}
+
+fn tablet_png() -> Vec<u8> {
+    let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+    bytes.extend_from_slice(b"the page, as the reader has it");
+    bytes
+}
+
+async fn create_session_for_screenshot(server: &str) -> String {
+    reqwest::Client::new()
+        .post(format!("{server}/api/sessions"))
+        .body("# A page worth photographing")
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+async fn run_screenshot(server: &str, id: &str, out: &std::path::Path) -> std::process::Output {
+    tokio::process::Command::new(env!("CARGO_BIN_EXE_eink-review"))
+        .args([
+            "--server",
+            server,
+            "screenshot",
+            id,
+            "--out",
+            out.to_str().unwrap(),
+            "--timeout",
+            "10",
+        ])
+        .output()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_screenshot_comes_back_from_the_tablet_as_a_file() {
+    let (server, _handle) = start_server().await;
+    let id = create_session_for_screenshot(&server).await;
+    let tablet = fake_tablet(&server, &id, None).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("page.png");
+
+    let output = run_screenshot(&server, &id, &out).await;
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        out.to_str().unwrap()
+    );
+    assert_eq!(std::fs::read(&out).unwrap(), tablet_png(), "byte for byte");
+    tablet.abort();
+}
+
+#[tokio::test]
+async fn asking_with_no_tablet_on_the_session_says_so_at_once() {
+    use futures_util::SinkExt;
+    let (server, _handle) = start_server().await;
+    let id = create_session_for_screenshot(&server).await;
+    // Only the agent's own observer is connected: the case the old `delivered` got wrong.
+    let ws_url = format!("{}/ws/{id}", server.replacen("http://", "ws://", 1));
+    let (mut observer, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+    observer
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            r#"{"type":"subscribe"}"#.into(),
+        ))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let dir = tempfile::tempdir().unwrap();
+
+    let started = std::time::Instant::now();
+    let output = run_screenshot(&server, &id, &dir.path().join("page.png")).await;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("no tablet is listening"), "{stderr}");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "a missing tablet is said, not waited for: {:?}",
+        started.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn a_capture_the_tablet_could_not_take_fails_with_its_reason() {
+    let (server, _handle) = start_server().await;
+    let id = create_session_for_screenshot(&server).await;
+    let tablet = fake_tablet(&server, &id, Some("the page has not drawn yet")).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let dir = tempfile::tempdir().unwrap();
+
+    let started = std::time::Instant::now();
+    let output = run_screenshot(&server, &id, &dir.path().join("page.png")).await;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("the page has not drawn yet"), "{stderr}");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    tablet.abort();
+}

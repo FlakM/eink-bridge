@@ -37,6 +37,7 @@ import java.util.concurrent.TimeUnit
 private const val TAG = "EinkMain"
 private const val INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000L
 private const val NOTIFICATION_ID_UPDATE = 1001
+private const val REQUEST_MICROPHONE = 1002
 // Channel importance is immutable on Android; use a new ID to quiet existing installs too.
 internal const val NOTIFICATION_CHANNEL_ID = "eink_updates_quiet"
 /** The stroke sizes the toolbar offers, in the pen's units. */
@@ -311,6 +312,8 @@ class MainActivity : AppCompatActivity() {
     private val sizeDots = mutableListOf<View>()
     private lateinit var btnAnnotations: ImageButton
     private lateinit var btnSelect: ImageButton
+    private lateinit var btnSpeak: ImageButton
+    internal lateinit var voiceTray: VoiceTrayController
     private var selectedStyleIndex = 0
     internal var toolMode: ToolMode = ToolMode.DRAW
         private set
@@ -356,6 +359,20 @@ class MainActivity : AppCompatActivity() {
         btnColor.setOnClickListener { togglePopover(colorDrawer, btnColor) }
         btnAnnotations = findViewById(R.id.btnAnnotations)
         btnSelect = findViewById(R.id.btnSelect)
+        btnSpeak = findViewById(R.id.btnSpeak)
+        voiceTray = VoiceTrayController(
+            tray = findViewById(R.id.voiceTray),
+            client = client,
+            serverUrl = { serverUrl },
+            token = { sessionRepo.token() },
+            onAccepted = { groupId, text, severity, note -> penOverlay?.setVoiceNote(groupId, text, severity, note) },
+            onDiscarded = { groupId -> penOverlay?.removeBindGroup(groupId) },
+            onFinished = { if (toolMode == ToolMode.VOICE) setToolMode(ToolMode.DRAW) },
+            onStatus = { showRoutineStatus(it) },
+        )
+        btnSpeak.setOnClickListener {
+            if (toolMode == ToolMode.VOICE) setToolMode(ToolMode.DRAW) else requestVoiceMode()
+        }
 
         val btnEraser = findViewById<ImageButton>(R.id.btnEraser)
         styleButtons.addAll(listOf(btnPencil, btnBrush, btnEraser))
@@ -445,10 +462,14 @@ class MainActivity : AppCompatActivity() {
             penOverlay?.setMode(mode)
             return
         }
+        val wasVoice = toolMode == ToolMode.VOICE
         toolMode = mode
         hidePopovers()
         setModeButtonActive(btnLink, mode == ToolMode.TAG)
         setModeButtonActive(btnSelect, mode == ToolMode.MOVE)
+        setModeButtonActive(btnSpeak, mode == ToolMode.VOICE)
+        if (wasVoice && mode != ToolMode.VOICE) voiceTray.leave()
+        if (mode == ToolMode.VOICE) currentSessionId?.let { voiceTray.showAiming(it) }
         val drawMode = mode == ToolMode.DRAW
         drawControls.visibility = if (drawMode) View.VISIBLE else View.GONE
         contextBar.visibility = View.GONE
@@ -464,6 +485,25 @@ class MainActivity : AppCompatActivity() {
                 { setToolMode(ToolMode.DRAW) }
             } else null
             overlay.setMode(mode)
+        }
+    }
+
+    /** Speak needs the microphone; the first press asks, every later press just goes. */
+    private fun requestVoiceMode() {
+        if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            setToolMode(ToolMode.VOICE)
+        } else {
+            requestPermissions(arrayOf(android.Manifest.permission.RECORD_AUDIO), REQUEST_MICROPHONE)
+        }
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != REQUEST_MICROPHONE) return
+        if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED && currentSessionId != null) {
+            setToolMode(ToolMode.VOICE)
+        } else {
+            showRoutineStatus("Microphone permission is needed to speak")
         }
     }
 
@@ -649,9 +689,11 @@ class MainActivity : AppCompatActivity() {
         currentContextGroupId = null
         contextBar.visibility = View.GONE
         // Force the UI back to draw mode. setToolMode is a no-op if already DRAW.
+        voiceTray.leave()
         toolMode = ToolMode.DRAW
         setModeButtonActive(btnLink, false)
         setModeButtonActive(btnSelect, false)
+        setModeButtonActive(btnSpeak, false)
         drawControls.visibility = View.VISIBLE
         styleButtons.forEach { it.isEnabled = true }
         selectStyle(selectedStyleIndex)
@@ -720,6 +762,8 @@ class MainActivity : AppCompatActivity() {
             }
         }
         overlay.onSelectModeExitRequested = { runOnUiThread { if (selectModeActive) exitSelectMode() } }
+        overlay.onVoiceTarget = { group -> runOnUiThread { if (toolMode == ToolMode.VOICE) voiceTray.startCapture(group) } }
+        overlay.onVoiceTargetMissed = { runOnUiThread { showRoutineStatus("Nothing to talk about there; tap a block") } }
         val savedBindGroups = sessionRepo.loadBindGroups(sessionId)
         if (savedBindGroups.isNotEmpty()) overlay.loadBindGroups(savedBindGroups)
         val savedOcrResults = sessionRepo.loadOcrResults(sessionId)
@@ -779,9 +823,11 @@ class MainActivity : AppCompatActivity() {
         wsInSleep = false
         currentContextGroupId = null
         hidePopovers()
+        voiceTray.leave()
         toolMode = ToolMode.DRAW
         setModeButtonActive(btnLink, false)
         setModeButtonActive(btnSelect, false)
+        setModeButtonActive(btnSpeak, false)
         drawControls.visibility = View.VISIBLE
         contextBar.visibility = View.GONE
         styleButtons.forEach { it.isEnabled = true }
@@ -1041,8 +1087,28 @@ class MainActivity : AppCompatActivity() {
                 wsClient?.connect()
             }
             resetInactivityTimer()
+            // The pen landing on the page is seen here before any view can swallow it, so
+            // the watchdog is armed even when the page's own router never hears the DOWN.
+            if (stylusOverPage(event)) penOverlay?.onStylusDown()
         }
         return super.dispatchTouchEvent(event)
+    }
+
+    private fun stylusOverPage(event: MotionEvent): Boolean {
+        if (toolMode != ToolMode.DRAW || webView.visibility != View.VISIBLE) return false
+        val stylus = (0 until event.pointerCount).any {
+            val t = event.getToolType(it)
+            t == MotionEvent.TOOL_TYPE_STYLUS || t == MotionEvent.TOOL_TYPE_ERASER
+        }
+        return stylus && event.y < penToolbar.top
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        // A dialog, a permission prompt or the system UI took the window and gave it back;
+        // whatever touch state was in flight is gone, and the raw reader may not have
+        // noticed. Rearm rather than wait for a stroke to go missing.
+        if (hasFocus && currentSessionId != null) penOverlay?.rearm("window focus regained")
     }
 
     override fun onResume() {
@@ -1091,6 +1157,37 @@ class MainActivity : AppCompatActivity() {
             text = message
             visibility = View.VISIBLE
             postDelayed(hideRoutineStatus, 4000)
+        }
+    }
+
+    /**
+     * Answer a screenshot request with the page as it is now.
+     *
+     * The reader asked for this through their own agent, so it is sent without a second
+     * confirmation; it is announced afterwards instead, because a page that silently
+     * leaves the tablet is worse than one that says so.
+     */
+    private fun sendScreenshot(requestId: String) {
+        val sessionId = currentSessionId ?: return
+        val bitmap = captureShowing(webView, penOverlay?.exportToPng())
+        scope.launch {
+            val code = withContext(Dispatchers.IO) {
+                runCatching {
+                    if (bitmap == null) {
+                        reportScreenshotFailure(client, serverUrl, sessionId, requestId, "the page has not drawn yet")
+                    } else {
+                        uploadScreenshot(client, serverUrl, sessionId, requestId, bitmap.toPng())
+                    }
+                }.getOrNull()
+            }
+            when {
+                bitmap == null -> showRoutineStatus("Could not capture the page")
+                code != null && code in 200..299 -> showRoutineStatus("Screenshot sent")
+                else -> {
+                    Log.w(TAG, "screenshot request=$requestId failed code=$code")
+                    showRoutineStatus("Could not send the screenshot")
+                }
+            }
         }
     }
 
@@ -1176,6 +1273,10 @@ class MainActivity : AppCompatActivity() {
                     findViewById<ProgressBar>(R.id.agentProgress).visibility = View.GONE
                     findViewById<Button>(R.id.btnRequestUpdate).text = "Waiting for agent…"
                     showRoutineStatus("Feedback saved · awaiting reply")
+                }
+                "screenshot_requested" -> {
+                    val requestId = json.optString("request_id")
+                    if (requestId.isNotEmpty()) sendScreenshot(requestId)
                 }
                 "error" -> {
                     val errMsg = json.optString("message", "Unknown error")

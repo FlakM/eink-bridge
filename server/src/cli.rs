@@ -117,6 +117,20 @@ enum Command {
         #[arg(long, default_value = "6")]
         context: usize,
     },
+    /// Ask the tablet for a picture of what it is showing right now
+    ///
+    /// Scroll position, zoom and ink are only on the device; this is how the agent sees
+    /// the layout as the reader actually has it. Waits for the tablet to answer.
+    Screenshot {
+        /// Session ID
+        id: String,
+        /// Where to write the PNG (default: /tmp/eink-<id>-<request>.png)
+        #[arg(long, short)]
+        out: Option<String>,
+        /// Seconds to wait for the tablet to answer
+        #[arg(long, default_value = "20")]
+        timeout: u64,
+    },
     /// Report what the agent is doing while it rewrites (shown on the tablet)
     Progress {
         /// Session ID
@@ -183,6 +197,7 @@ async fn main() {
         Command::Content { .. } => "content",
         Command::Progress { .. } => "progress",
         Command::Source { .. } => "source",
+        Command::Screenshot { .. } => "screenshot",
         Command::Update { .. } => "update",
         Command::Watch { .. } => "watch",
         Command::Result { .. } => "result",
@@ -257,6 +272,9 @@ async fn main() {
             reference,
             context,
         } => cmd_source(&client, &cli.server, &id, &reference, context).await,
+        Command::Screenshot { id, out, timeout } => {
+            cmd_screenshot(&client, &cli.server, &id, out, timeout).await
+        }
         Command::Watch { id, timeout } => cmd_push_interactive(&cli.server, &id, timeout).await,
         Command::Result { id, json } => cmd_result(&client, &cli.server, &id, json).await,
         Command::Cancel { id } => cmd_cancel(&client, &cli.server, &id).await,
@@ -968,6 +986,83 @@ async fn cmd_progress(
     }
 }
 
+async fn cmd_screenshot(
+    client: &Client,
+    server: &str,
+    id: &str,
+    out: Option<String>,
+    timeout: u64,
+) -> anyhow::Result<()> {
+    let asked = client
+        .post(format!("{server}/api/sessions/{id}/screenshot"))
+        .send()
+        .await?;
+    match asked.status().as_u16() {
+        202 => {}
+        404 => anyhow::bail!("no session {id}"),
+        409 => anyhow::bail!("session {id} is no longer active; nothing is on the tablet"),
+        s => anyhow::bail!("unexpected status asking for a screenshot: {s}"),
+    }
+    let body: serde_json::Value = asked.json().await?;
+    let request_id = body["id"].as_str().unwrap_or_default().to_string();
+    let url = body["url"].as_str().unwrap_or_default().to_string();
+    if body["delivered"] == serde_json::Value::Bool(false) {
+        // Say it before waiting: a tablet that is not connected will not answer, and a
+        // silent timeout looks like a broken server.
+        anyhow::bail!("no tablet is listening on session {id}; open it there and try again");
+    }
+
+    let started = std::time::Instant::now();
+    let deadline = started + std::time::Duration::from_secs(timeout);
+    // The request rides the session socket, so a tablet that reconnected right after the
+    // ask never heard it. One more ask partway through reuses the same id and re-broadcasts
+    // it; the tablet reconnects within a couple of seconds, so a third of the wait is late
+    // enough to matter and early enough to leave time for the answer.
+    let reask_at = started + std::time::Duration::from_secs(timeout / 3);
+    let mut reasked = false;
+    loop {
+        let resp = client.get(format!("{server}{url}")).send().await?;
+        match resp.status().as_u16() {
+            200 => {
+                let bytes = resp.bytes().await?;
+                let path = out.unwrap_or_else(|| screenshot_path(id, &request_id));
+                std::fs::write(&path, &bytes)?;
+                println!("{path}");
+                return Ok(());
+            }
+            404 => {}
+            410 => {
+                let reason = resp.text().await.unwrap_or_default();
+                anyhow::bail!("{reason} (session {id}, request {request_id})");
+            }
+            s => anyhow::bail!("unexpected status fetching the screenshot: {s}"),
+        }
+        if std::time::Instant::now() > deadline {
+            anyhow::bail!(
+                "the tablet did not answer within {timeout}s (session {id}, request {request_id})"
+            );
+        }
+        if !reasked && std::time::Instant::now() > reask_at {
+            reasked = true;
+            let _ = client
+                .post(format!("{server}/api/sessions/{id}/screenshot"))
+                .send()
+                .await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    }
+}
+
+/// Where a screenshot lands when the caller did not say: short enough to read back in a
+/// log line, distinct per request so two pictures of one session never overwrite each other.
+fn screenshot_path(id: &str, request_id: &str) -> String {
+    format!(
+        "/tmp/eink-{}-{}.png",
+        &id[..id.len().min(8)],
+        &request_id[..request_id.len().min(8)]
+    )
+}
+
 async fn cmd_source(
     client: &Client,
     server: &str,
@@ -1151,6 +1246,25 @@ fn verdict_exit_code(body: &serde_json::Value) -> i32 {
 /// How many characters of an anchored element to show before eliding.
 const ELEMENT_PREVIEW_CHARS: usize = 60;
 
+/// What an agent needs to know about a note that was spoken rather than written: that it
+/// was, how sure the recogniser was, and what was heard when the cleaned text was refused
+/// or reads oddly. A low confidence is the cue to ask for a screenshot or a question.
+fn spoken_note_line(voice: &serde_json::Value) -> String {
+    let confidence = voice["confidence"].as_f64().unwrap_or(0.0);
+    let mut line = format!("  (spoken, confidence {confidence:.2}");
+    if voice["severity"] == "blocker" {
+        line.push_str(", blocker");
+    }
+    line.push(')');
+    if confidence < 0.6
+        && let Some(raw) = voice["raw"].as_str()
+    {
+        line.push_str(&format!("\n  heard: {raw}"));
+    }
+    line.push('\n');
+    line
+}
+
 fn format_result(id: &str, body: &serde_json::Value) -> String {
     let mut out = String::new();
     out.push_str(&format!("--- review notes (session {id}) ---\n\n"));
@@ -1188,6 +1302,9 @@ fn format_result(id: &str, body: &serde_json::Value) -> String {
                 && !text.is_empty()
             {
                 out.push_str(&format!("> {text}\n"));
+            }
+            if ann["source"] == "voice" {
+                out.push_str(&spoken_note_line(&ann["voice"]));
             }
             out.push('\n');
         }

@@ -123,6 +123,25 @@ pub static OCR_IMAGE_PIXELS: LazyLock<Histogram> = LazyLock::new(|| {
 });
 
 // WebSocket
+// Voice
+pub static VOICE_CAPTURES: LazyLock<IntCounterVec> = LazyLock::new(
+    || reg!(counter_vec "eink_voice_captures_total", "Spoken notes by how the capture ended", &["result"]),
+);
+pub static VOICE_GUARD: LazyLock<IntCounterVec> = LazyLock::new(
+    || reg!(counter_vec "eink_voice_guard_total", "Cleaned transcripts the content-word guard passed or refused", &["result"]),
+);
+pub static ASR_REQUESTS: LazyLock<IntCounterVec> = LazyLock::new(
+    || reg!(counter_vec "eink_asr_requests_total", "Speech recognition calls per provider", &["provider", "result"]),
+);
+pub static ASR_DURATION: LazyLock<HistogramVec> = LazyLock::new(|| {
+    reg!(
+        histogram_vec "eink_asr_duration_seconds",
+        "Speech recognition wall-clock duration per provider",
+        &["provider"],
+        vec![0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0]
+    )
+});
+
 pub static WS_CONNECTIONS_ACTIVE: LazyLock<IntGauge> =
     LazyLock::new(|| reg!(gauge "eink_ws_connections_active", "Active WebSocket connections"));
 
@@ -179,6 +198,10 @@ pub fn init() {
     let _ = &*OCR_PROVIDER_WINS;
     let _ = &*OCR_PROVIDER_TOKENS;
     let _ = &*OCR_IMAGE_PIXELS;
+    let _ = &*VOICE_CAPTURES;
+    let _ = &*VOICE_GUARD;
+    let _ = &*ASR_REQUESTS;
+    let _ = &*ASR_DURATION;
     let _ = &*WS_CONNECTIONS_ACTIVE;
     let _ = &*LONG_POLL_TOTAL;
     let _ = &*WEBHOOK_TOTAL;
@@ -190,6 +213,8 @@ pub fn init() {
 
 /// The OCR providers the race can pick between.
 pub const PROVIDERS: [&str; 2] = ["local", "openai"];
+/// How a voice capture can end.
+pub const VOICE_OUTCOMES: [&str; 4] = ["done", "discarded", "failed", "abandoned"];
 /// How a provider attempt can end, as recorded by the race.
 pub const PROVIDER_RESULTS: [&str; 3] = ["ok", "error", "cancelled"];
 
@@ -212,6 +237,20 @@ fn seed_label_vocabularies() {
     }
     for result in ["accepted", "rejected", "cleared"] {
         AGENT_PROGRESS_TOTAL.with_label_values(&[result]).inc_by(0);
+    }
+    for result in VOICE_OUTCOMES {
+        VOICE_CAPTURES.with_label_values(&[result]).inc_by(0);
+    }
+    for result in ["passed", "refused"] {
+        VOICE_GUARD.with_label_values(&[result]).inc_by(0);
+    }
+    for provider in PROVIDERS {
+        for result in ["ok", "error"] {
+            ASR_REQUESTS
+                .with_label_values(&[provider, result])
+                .inc_by(0);
+        }
+        let _ = ASR_DURATION.with_label_values(&[provider]);
     }
     for provider in PROVIDERS {
         OCR_PROVIDER_WINS.with_label_values(&[provider]).inc_by(0);

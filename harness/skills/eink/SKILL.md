@@ -193,7 +193,13 @@ JSON body structure:
 ```
 
 Key fields:
-- `annotations[].recognized_text` — OCR'd handwriting
+- `annotations[].recognized_text` — OCR'd handwriting, or a spoken note cleaned up
+- `annotations[].source` — `pen`, `tap` or `voice` (absent means pen). A spoken "two" may
+  be the word and a written "2" the numeral; read a voice note as prose.
+- `annotations[].voice` — only with `source: voice`: `raw` (exactly what was heard; read
+  it when the text seems off), `confidence` (worst segment, 0..1; below about 0.6 ask a
+  question or request a screenshot before acting), `severity` (`blocker` means the reader
+  said so), `repairs` (identifiers rewritten to the document's spelling), `audio` (route)
 - `annotations[].anchor.elements[]` — nearby document elements (use to locate sections)
 - `anchor: null` — unanchored; treat as general comment
 
@@ -283,6 +289,41 @@ there is no next round after submission, cancellation, or expiry.
 Tell the user the session was cancelled.
 
 ---
+
+## Seeing what the reader sees
+
+The element map and the markdown say what is *on* the page. They do not say where the
+reader has scrolled, how far in they are zoomed, or what is currently drawn over the text.
+When that decides what you do next, ask the tablet for a picture:
+
+```bash
+eink-review screenshot <session-id>                     # prints the PNG path
+eink-review screenshot <session-id> --out /tmp/page.png --timeout 30
+```
+
+Ask when the answer changes the next action, not as a routine check:
+
+- **"This looks broken"** — you need to see the clipping, the overflow, the missing glyph,
+  not the HTML that should have produced them.
+- **A note you cannot place** — the ink is in a margin beside something, and the anchor
+  text alone does not say which line.
+- **Proving a layout fix** — the next screenshot is the evidence; a green test is not.
+- **Before a rewrite in a marked-up section** — where the reader's ink already sits tells
+  you how much room an edit has.
+
+Not for checking whether the tablet is awake, and not when the anchor and text already
+answer the question. A screenshot is cheap for you and not free for the reader: they see
+"Screenshot sent" and a page leaving the device.
+
+The tablet answers in a second or two. The command fails at once, with the reason, in the
+two cases where waiting would be pointless: no tablet has this session open (the agent's
+own observer does not count), or the tablet could not capture the page. A timeout names
+the request id; asking again while that request is unanswered reuses it, so retrying is
+safe, and asking again after a picture arrived takes a fresh one.
+
+Use this rather than `adb shell screencap`: on this device a `screencap` taken while the
+app owns the e-ink drawing surface comes back as a zero-byte file, and the in-app capture
+composites the ink over the page, which is the part you usually need.
 
 ## When the watch fallback returns (continue sessions)
 

@@ -36,6 +36,11 @@ internal class BindGestureHandler(
 
     fun currentPoints(): List<Pair<Float, Float>>? = bindPoints?.toList()
 
+    /** Forget a gesture whose UP was lost. */
+    fun cancel() {
+        bindPoints = null
+    }
+
     private fun complete(pts: List<Pair<Float, Float>>, endpoint: Pair<Float, Float>) {
         val t = getTransform()
         val docPolygon = pts.map { t.screenToDocX(it.first) to t.screenToDocY(it.second) }

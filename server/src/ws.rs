@@ -1,12 +1,14 @@
 use axum::{
     extract::{
-        Path, State,
+        Path, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::StatusCode,
     response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use tracing::{info, warn};
 
 use crate::api::SessionResultResponse;
@@ -47,11 +49,28 @@ pub enum ServerMessage {
     Error {
         message: String,
     },
+    /// The agent asked to see the page as the reader currently has it: scroll, zoom,
+    /// whatever is drawn on it. The tablet answers by PUTting a PNG to
+    /// `/api/sessions/{id}/screenshot/{request_id}`.
+    ScreenshotRequested {
+        request_id: String,
+    },
+}
+
+/// `?client=tablet` is how the reader's device tells itself apart from an observer. The
+/// CLI and the channel subscribe to the same socket, so "someone is listening" says
+/// nothing about whether a screenshot request can be answered; "a tablet is listening"
+/// does.
+#[derive(Debug, Default, Deserialize)]
+pub struct WsQuery {
+    #[serde(default)]
+    pub client: Option<String>,
 }
 
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
     Path(id): Path<String>,
+    Query(query): Query<WsQuery>,
     State(state): State<AppState>,
 ) -> Response {
     {
@@ -60,7 +79,38 @@ pub async fn ws_handler(
             return StatusCode::NOT_FOUND.into_response();
         }
     }
-    ws.on_upgrade(move |socket| handle_ws(socket, id, state))
+    let is_tablet = query.client.as_deref() == Some("tablet");
+    ws.on_upgrade(move |socket| handle_ws(socket, id, state, is_tablet))
+}
+
+/// One tablet on one session, counted for as long as its socket lives. Dropped on every
+/// exit from the handler, so a tablet that goes away is not reported as listening.
+struct TabletPresence {
+    tablets: Arc<Mutex<HashMap<String, usize>>>,
+    id: String,
+}
+
+impl TabletPresence {
+    fn arrive(state: &AppState, id: &str) -> Self {
+        let tablets = state.tablets.clone();
+        *tablets.lock().unwrap().entry(id.to_string()).or_default() += 1;
+        Self {
+            tablets,
+            id: id.to_string(),
+        }
+    }
+}
+
+impl Drop for TabletPresence {
+    fn drop(&mut self) {
+        let mut tablets = self.tablets.lock().unwrap();
+        if let Some(count) = tablets.get_mut(&self.id) {
+            *count -= 1;
+            if *count == 0 {
+                tablets.remove(&self.id);
+            }
+        }
+    }
 }
 
 /// How a review ended, as the message the live path would have sent at the time.
@@ -125,9 +175,10 @@ async fn send_snapshot(socket: &mut WebSocket, state: &AppState, id: &str) -> Re
     Ok(())
 }
 
-async fn handle_ws(mut socket: WebSocket, id: String, state: AppState) {
-    info!(session_id = %id, "ws connected");
+async fn handle_ws(mut socket: WebSocket, id: String, state: AppState, is_tablet: bool) {
+    info!(session_id = %id, is_tablet, "ws connected");
     crate::metrics::WS_CONNECTIONS_ACTIVE.inc();
+    let _presence = is_tablet.then(|| TabletPresence::arrive(&state, &id));
     // Subscribe before reading the durable snapshot: an update cannot fall between
     // snapshot and subscription. Duplicates are possible; losing feedback is not.
     let mut rx = state.ws_subscribe(&id).await;

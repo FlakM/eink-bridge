@@ -36,6 +36,30 @@ class MainActivityTest {
         scenario.close()
     }
 
+    // ── The voice tray ─────────────────────────────────────────────────────────
+
+    @Test fun theVoiceTrayIsHiddenUntilSpeakIsPressedAndGoesWhenTheModeIsLeft() {
+        scenario.onActivity { activity ->
+            val tray = activity.findViewById<View>(R.id.voiceTray)
+            assertEquals(View.GONE, tray.visibility)
+            activity.voiceTray.showAiming("abc")
+            assertEquals(View.VISIBLE, tray.visibility)
+            assertEquals("Tap the block you want to talk about",
+                activity.findViewById<android.widget.TextView>(R.id.voiceState).text.toString())
+            assertEquals("the edit words wait for a transcript", View.GONE, activity.findViewById<View>(R.id.voiceEdits).visibility)
+            activity.voiceTray.leave()
+            assertEquals(View.GONE, tray.visibility)
+        }
+    }
+
+    @Test fun theSpeakButtonIsAWordlessIconWithASpokenName() {
+        scenario.onActivity { activity ->
+            val speak = activity.findViewById<android.widget.ImageButton>(R.id.btnSpeak)
+            assertEquals("Speak a note", speak.contentDescription.toString())
+            assertEquals(View.GONE, activity.findViewById<View>(R.id.voiceTray).visibility)
+        }
+    }
+
     // ── Session list screen ────────────────────────────────────────────────────
 
     @Test fun documentUpdatesUseSilentLowImportanceChannel() {

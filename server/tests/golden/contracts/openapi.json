@@ -639,6 +639,114 @@
         "summary": "Poll session result"
       }
     },
+    "/api/sessions/{id}/screenshot": {
+      "post": {
+        "description": "Broadcasts a screenshot_requested message on the session WebSocket. The tablet answers by PUTting a PNG to /api/sessions/{id}/screenshot/{request_id}. A repeat ask while that request is unanswered (up to 20 seconds) reuses its id; an answered or failed request is never reused. `delivered` is false when no tablet (a WebSocket client that connected with ?client=tablet) has the session open, which is worth saying instead of waiting.",
+        "responses": {
+          "202": {
+            "description": "{id, url, delivered}"
+          },
+          "404": {
+            "description": "Session not found"
+          },
+          "409": {
+            "description": "Session no longer active"
+          }
+        },
+        "summary": "Ask the tablet to send a picture of what it is showing"
+      }
+    },
+    "/api/sessions/{id}/screenshot/{request_id}": {
+      "get": {
+        "description": "404 until the tablet has answered, which is what a caller polls for. Served as image/png with nosniff and no-store.",
+        "responses": {
+          "200": {
+            "description": "The PNG"
+          },
+          "404": {
+            "description": "Not sent yet, or no such request"
+          },
+          "410": {
+            "description": "The tablet could not take the picture; the body says why"
+          }
+        },
+        "summary": "Fetch a screenshot the tablet sent"
+      },
+      "put": {
+        "description": "Raw PNG bytes, or `{\"error\": \"...\"}` as application/json when the tablet could not take the picture. The request id must be the one the server is waiting on.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "error": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "image/png": {
+              "schema": {
+                "format": "binary",
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Stored, or the failure recorded"
+          },
+          "400": {
+            "description": "Empty body, malformed id, or bytes that are not a PNG"
+          },
+          "404": {
+            "description": "Session not found, or no request with that id is being waited for"
+          }
+        },
+        "summary": "Send the screenshot the agent asked for"
+      }
+    },
+    "/api/sessions/{id}/speech": {
+      "post": {
+        "description": "Synthesises `text` (at most 2000 characters) with the server's one voice and answers with WAV bytes. Nothing is stored.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "text"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "audio/wav"
+          },
+          "400": {
+            "description": "Empty or too long"
+          },
+          "404": {
+            "description": "Session not found"
+          },
+          "503": {
+            "description": "No voice configured"
+          }
+        },
+        "summary": "Read a note aloud"
+      }
+    },
     "/api/sessions/{id}/star": {
       "put": {
         "description": "Starred sessions are pinned: they survive purge, expire_stale, and are reloaded from disk in any state.",
@@ -710,6 +818,40 @@
           }
         },
         "summary": "Submit review"
+      }
+    },
+    "/api/sessions/{id}/voice": {
+      "get": {
+        "description": "Upgrade to a WebSocket. Binary frames up are 16 kHz mono signed 16-bit PCM; text frames down carry `seq` and are `ready`, `partial`, `final` (raw, text, seconds, confidence, repairs, guarded, audio), `edit`, `done` (the VoiceNote to put under `voice` in an annotation) or `error`. The capture closes itself after 1.5 s of silence following speech, on `{\"type\":\"stop\"}`, and at 300 s or 4 MB. After `final` the client may send `edit` with an instruction (closed verbs apply at once; anything else goes through the cleaner and the content-word guard), `undo`, `done` or `discard`.",
+        "responses": {
+          "101": {
+            "description": "Switching to WebSocket"
+          },
+          "404": {
+            "description": "Session not found"
+          },
+          "409": {
+            "description": "The session is over, or a capture is already open on it"
+          },
+          "503": {
+            "description": "No speech recogniser configured"
+          }
+        },
+        "summary": "Speak a note: a WebSocket the tablet streams audio on"
+      }
+    },
+    "/api/sessions/{id}/voice/{capture}.wav": {
+      "get": {
+        "description": "What the reader said, as 16 kHz mono WAV, kept with the session and removed with it. The name is the capture id from the `final` frame; anything else is a 404.",
+        "responses": {
+          "200": {
+            "description": "audio/wav, nosniff, no-store"
+          },
+          "404": {
+            "description": "Session or capture not found"
+          }
+        },
+        "summary": "The audio of a spoken note"
       }
     }
   }

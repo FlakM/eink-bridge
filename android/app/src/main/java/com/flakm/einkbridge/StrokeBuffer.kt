@@ -76,6 +76,10 @@ internal data class StrokeGroup(
     val strokes: List<Stroke>,
     val recognizedText: String? = null,
     val color: String? = null,
+    /** `pen` | `tap` | `voice`; absent means pen. */
+    val source: String? = null,
+    /** The server's VoiceNote, verbatim, when [source] is voice. */
+    val voice: String? = null,
 )
 
 internal data class FoundElement(val i: Int, val tag: String, val id: String?, val section: String?, val text: String, val cx: Float = 0f, val cy: Float = 0f)
@@ -91,7 +95,12 @@ internal data class BindGroup(
     val strokeDocCenters: List<Pair<Float, Float>> = emptyList(),
     val elementDocCenters: List<Pair<Float, Float>> = emptyList(),
     val recognizedText: String? = null,
-)
+    val source: String? = null,
+    val voiceJson: String? = null,
+    val severity: String? = null,
+) {
+    val isVoice get() = source == "voice"
+}
 
 /**
  * WebView transform state used to convert between screen and document coordinates.
@@ -533,6 +542,8 @@ internal fun annotationsToJson(groups: List<StrokeGroup>, unanchored: List<Strok
         }
         group.recognizedText?.let { obj.put("recognized_text", it) }
         group.color?.let { obj.put("color", it) }
+        group.source?.let { obj.put("source", it) }
+        group.voice?.let { obj.put("voice", runCatching { JSONObject(it) }.getOrElse { JSONObject() }) }
         arr.put(obj)
     }
     if (unanchored.isNotEmpty()) {
@@ -559,6 +570,8 @@ internal fun bindGroupsToAnnotations(
             strokes = groupStrokes,
             recognizedText = bg.recognizedText,
             color = "#%06X".format(bg.color and 0xFFFFFF),
+            source = bg.source,
+            voice = bg.voiceJson,
         )
     }
     val unanchored = strokes.filterIndexed { idx, _ -> idx !in usedIndices }
@@ -599,6 +612,9 @@ internal fun bindGroupsToJson(groups: List<BindGroup>): String {
         obj.put("strokeDocCenters", pairsToJson(g.strokeDocCenters))
         obj.put("elementDocCenters", pairsToJson(g.elementDocCenters))
         g.recognizedText?.let { obj.put("recognizedText", it) }
+        g.source?.let { obj.put("source", it) }
+        g.voiceJson?.let { obj.put("voiceJson", it) }
+        g.severity?.let { obj.put("severity", it) }
         arr.put(obj)
     }
     return arr.toString()
@@ -631,6 +647,9 @@ internal fun bindGroupsFromJson(json: String): List<BindGroup> {
             strokeDocCenters = pairsFromJson(obj.optJSONArray("strokeDocCenters") ?: JSONArray()),
             elementDocCenters = pairsFromJson(obj.optJSONArray("elementDocCenters") ?: JSONArray()),
             recognizedText = obj.optString("recognizedText", null).takeIf { !it.isNullOrEmpty() },
+            source = obj.optString("source", null).takeIf { !it.isNullOrEmpty() },
+            voiceJson = obj.optString("voiceJson", null).takeIf { !it.isNullOrEmpty() },
+            severity = obj.optString("severity", null).takeIf { !it.isNullOrEmpty() },
         )
     }
 }

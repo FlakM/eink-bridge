@@ -61,6 +61,24 @@
         <item name="android:stateListAnimator">@null</item>
     </style>
 
+    <!-- A word in the voice tray. Paper white, a black rule, no elevation, no caps. -->
+    <style name="Widget.VoiceButton" parent="Widget.AppCompat.Button.Borderless">
+        <item name="android:layout_width">wrap_content</item>
+        <item name="android:layout_height">44dp</item>
+        <item name="android:minWidth">0dp</item>
+        <item name="android:minHeight">44dp</item>
+        <item name="android:paddingStart">14dp</item>
+        <item name="android:paddingEnd">14dp</item>
+        <item name="android:layout_marginStart">6dp</item>
+        <item name="android:textSize">16sp</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="android:fontFamily">serif</item>
+        <item name="android:textColor">#111111</item>
+        <item name="android:background">@drawable/action_button_background</item>
+        <item name="android:backgroundTint">@null</item>
+        <item name="android:stateListAnimator">@null</item>
+    </style>
+
     <style name="Widget.ActionButton.Primary">
         <item name="android:textColor">#FFFFFF</item>
         <item name="android:background">@drawable/action_button_primary_background</item>

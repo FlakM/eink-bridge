@@ -117,20 +117,7 @@ impl OpenAi {
         if !enabled(std::env::var("EINK_OCR_OPENAI_ENABLED").ok().as_deref()) {
             return None;
         }
-        let key = if let Ok(path) = std::env::var("EINK_OPENAI_API_KEY_FILE") {
-            match std::fs::read_to_string(path) {
-                Ok(key) => Some(key),
-                Err(_) => {
-                    tracing::warn!("OpenAI OCR disabled: cannot read API key file");
-                    return None;
-                }
-            }
-        } else {
-            std::env::var("EINK_OPENAI_API_KEY")
-                .or_else(|_| std::env::var("OPENAI_API_KEY"))
-                .ok()
-        };
-        let Some(key) = key.filter(|key| !key.trim().is_empty()) else {
+        let Some(key) = openai_key() else {
             tracing::warn!(
                 "OpenAI OCR was requested but no API key is configured; using local OCR only"
             );
@@ -139,7 +126,7 @@ impl OpenAi {
         let model = std::env::var("EINK_OPENAI_MODEL").unwrap_or_else(|_| "gpt-4.1-mini".into());
         let seconds = timeout_seconds(std::env::var("EINK_OPENAI_TIMEOUT_SECONDS").ok().as_deref());
         match Self::new(
-            key.trim(),
+            &key,
             model,
             Duration::from_secs(seconds),
             "https://api.openai.com/v1/responses".into(),
@@ -210,13 +197,33 @@ impl OpenAi {
     }
 }
 
-fn enabled(value: Option<&str>) -> bool {
+pub(crate) fn enabled(value: Option<&str>) -> bool {
     matches!(value, Some("1" | "true"))
+}
+
+/// The OpenAI key, from the file the service points at or the environment. Shared by OCR
+/// and speech so one `EINK_OPENAI_API_KEY_FILE` serves both.
+pub(crate) fn openai_key() -> Option<String> {
+    let key = if let Ok(path) = std::env::var("EINK_OPENAI_API_KEY_FILE") {
+        match std::fs::read_to_string(path) {
+            Ok(key) => Some(key),
+            Err(_) => {
+                tracing::warn!("OpenAI disabled: cannot read API key file");
+                return None;
+            }
+        }
+    } else {
+        std::env::var("EINK_OPENAI_API_KEY")
+            .or_else(|_| std::env::var("OPENAI_API_KEY"))
+            .ok()
+    };
+    key.map(|key| key.trim().to_string())
+        .filter(|key| !key.is_empty())
 }
 
 /// A timeout from the environment, bounded to something usable. A zero would time out
 /// every request before it was sent, which reads as "the provider never answers".
-pub(super) fn bounded_seconds(value: Option<&str>, default: u64, max: u64) -> u64 {
+pub(crate) fn bounded_seconds(value: Option<&str>, default: u64, max: u64) -> u64 {
     value
         .and_then(|v| v.trim().parse::<u64>().ok())
         .filter(|v| (1..=max).contains(v))

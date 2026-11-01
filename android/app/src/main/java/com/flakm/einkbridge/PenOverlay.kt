@@ -22,10 +22,10 @@ import java.io.ByteArrayOutputStream
 /**
  * The high-level user-facing tool mode.
  *
- * Pen drawing is enabled only in [DRAW]; [TAG] and [MOVE] are gesture-driven modes
+ * Pen drawing is enabled only in [DRAW]; [TAG], [MOVE] and [VOICE] are gesture-driven modes
  * that consume finger events and must keep the Onyx SDK disabled to avoid accidental strokes.
  */
-enum class ToolMode { DRAW, TAG, MOVE }
+enum class ToolMode { DRAW, TAG, MOVE, VOICE }
 
 /**
  * Pure function — no Android framework dependency beyond integer constants.
@@ -55,6 +55,32 @@ internal fun rawDrawingAction(
         actionUp, actionCancel -> true
         else -> null
     }
+}
+
+/** What to do with a stylus DOWN that produced no raw callback. */
+internal enum class PenRecovery { NONE, ARM, RESET, RECREATE }
+
+/** A recovery is escalated when the previous one is younger than this. */
+internal const val RAW_WATCHDOG_ESCALATE_MS = 5000L
+
+/**
+ * The stylus watchdog's decision, pure so every path is a table row.
+ *
+ * Nothing is done while the pen is legitimately off (a gesture mode, a load) or when the
+ * reader answered. Otherwise: if the SDK itself says input is off, turn it back on; if it
+ * says on and still gave nothing, close and reopen its raw layer; and if that was tried a
+ * moment ago, rebuild the helper.
+ */
+internal fun penRecovery(
+    rawCallbackSinceDown: Boolean,
+    shouldDraw: Boolean,
+    sdkEnabled: Boolean?,
+    msSinceLastRecovery: Long,
+): PenRecovery = when {
+    !shouldDraw || rawCallbackSinceDown -> PenRecovery.NONE
+    msSinceLastRecovery in 0 until RAW_WATCHDOG_ESCALATE_MS -> PenRecovery.RECREATE
+    sdkEnabled == false -> PenRecovery.ARM
+    else -> PenRecovery.RESET
 }
 
 /**
@@ -93,7 +119,7 @@ internal class OnyxPenController(
     private var pendingIdleRefresh: Runnable? = null
 
     /** Monotonic ms timestamp of the last Onyx raw callback we saw (begin/move/end). */
-    @Volatile internal var lastRawCallbackMs: Long = 0L
+    @Volatile override var lastRawCallbackMs: Long = 0L
 
     private fun inkTarget(): View? = inkView() ?: penViewRef?.get()
 
@@ -221,6 +247,11 @@ internal class OnyxPenController(
         Log.d(DRAW_TAG, "setEnabled($enabled)")
         touchHelper?.setRawDrawingEnabled(enabled)
     }
+    override fun isEnabled(): Boolean? = runCatching { touchHelper?.isRawDrawingInputEnabled() }.getOrNull()
+    override fun rearm() {
+        Log.w(DRAW_TAG, "rearm: forcing raw input back on")
+        runCatching { touchHelper?.forceSetRawDrawingEnabled(true) }
+    }
     override fun setStrokeWidth(width: Float) {
         pendingWidth = width
         currentWidth = width
@@ -256,9 +287,9 @@ internal class OnyxPenController(
      * Used when the ordinary close+reopen dance in [resetRenderBuffer] is not enough to revive
      * Onyx's native raw input reader — observed after focus/surface churn around OCR overlays.
      */
-    internal fun recreateHelper() {
+    override fun recreate() {
         val view = penViewRef?.get() ?: return
-        Log.w(DRAW_TAG, "recreateHelper: nuclear reset of TouchHelper", Throwable("recreate stacktrace"))
+        Log.w(DRAW_TAG, "recreate: nuclear reset of TouchHelper", Throwable("recreate stacktrace"))
         touchHelper?.let { old ->
             runCatching { old.setRawDrawingEnabled(false) }
             runCatching { old.closeRawDrawing() }
@@ -343,7 +374,7 @@ internal class PenOverlay(
             tryAbsorbStrokeIntoGroup(newIdx)
             notifyStrokeView()
             onStrokesChanged?.invoke()
-            webView.post { refreshStrokeLinks() }
+            webView.post { refreshStrokeLinks(); maybeStrikeVoiceSentence(newIdx) }
             scheduleOcr()
         })
         if (c is OnyxPenController && c.onStrokeProgress == null) {
@@ -463,7 +494,7 @@ internal class PenOverlay(
                     "oldBounds=($oldLeft,$oldTop,$oldRight,$oldBottom) boundsChanged=$boundsChanged initialized=$initialized",
             )
             if (!initialized) maybeInit()
-            else if (isExclude && boundsChanged) refreshExcludeRects()
+            else if (boundsChanged) refreshLimitRect()
         }
     }
 
@@ -493,14 +524,15 @@ internal class PenOverlay(
             )
             applyDrawingState()
             notifyStrokeView()
-            isBindMode || isSelectMode  // consume finger events to prevent WebView scroll
+            isBindMode || isSelectMode || isVoiceMode  // consume finger events to prevent WebView scroll
         } else {
-            lastStylusSeenMs = System.currentTimeMillis()
             // Stylus/eraser event — consume it so the WebView doesn't scroll.
             val hasPen = (0 until event.pointerCount).any {
                 val t = event.getToolType(it)
                 t == MotionEvent.TOOL_TYPE_STYLUS || t == MotionEvent.TOOL_TYPE_ERASER
             }
+            if (hasPen && event.actionMasked == MotionEvent.ACTION_DOWN) onStylusDown()
+            else lastStylusSeenMs = System.currentTimeMillis()
             if (event.actionMasked == MotionEvent.ACTION_DOWN || event.actionMasked == MotionEvent.ACTION_UP) {
                 Log.d(
                     "EinkDraw",
@@ -516,44 +548,80 @@ internal class PenOverlay(
                 fingerDown = false
                 applyDrawingState()
             }
-            // Watchdog: on a stylus DOWN, schedule a short-delayed check. If Onyx's raw input
-            // reader does not fire a callback within the window, the raw layer is stuck (seen
-            // after OCR overlay visibility changes and annotation toggles — likely Onyx SDK
-            // focus/surface glitch).
-            //
-            // First time: try [resetRenderBuffer] (close+reopen same TouchHelper).
-            // If that didn't revive the reader and the watchdog fires again within
-            // [RAW_WATCHDOG_ESCALATE_MS], escalate to [recreateHelper] (destroy + build new
-            // TouchHelper). Some Boox firmware wedges the native reader in a way that only a
-            // full recreate can unstick.
-            if (hasPen && event.actionMasked == MotionEvent.ACTION_DOWN) {
-                (controller as? OnyxPenController)?.let { ctrl ->
-                    val lastAtDown = ctrl.lastRawCallbackMs
-                    webView.postDelayed({
-                        if (initialized && shouldDraw() && ctrl.lastRawCallbackMs <= lastAtDown) {
-                            val now = System.currentTimeMillis()
-                            val softResetStillFailing =
-                                now - lastRawWatchdogResetMs < RAW_WATCHDOG_ESCALATE_MS
-                            if (softResetStillFailing) {
-                                Log.w(
-                                    "EinkDraw",
-                                    "watchdog: soft reset didn't help — recreating TouchHelper",
-                                )
-                                ctrl.recreateHelper()
-                            } else {
-                                Log.w(
-                                    "EinkDraw",
-                                    "watchdog: raw reader silent ${RAW_WATCHDOG_MS}ms after stylus DOWN — resetting",
-                                )
-                                ctrl.resetRenderBuffer()
-                            }
-                            lastRawWatchdogResetMs = now
-                        }
-                    }, RAW_WATCHDOG_MS)
-                }
-            }
             hasPen
         }
+    }
+
+    private var lastWatchdogArmedMs = 0L
+    /** Timers go on the main looper, not on the view: a view that is not attached queues
+     * its posts until it is, which is never for a page the reader has left. */
+    private val timers = android.os.Handler(android.os.Looper.getMainLooper())
+
+    /**
+     * A stylus touched the glass. Seen by the page's touch router and, before it, by the
+     * activity, so a DOWN that never reaches the page (a view on top of it, a wedged reader
+     * that swallows the event downstream) still arms the check. One check per DOWN.
+     *
+     * If no raw callback follows within [RAW_WATCHDOG_MS] the reader is stuck: first the
+     * SDK is told to take input again, then its raw layer is closed and reopened, and if
+     * that did not help within [RAW_WATCHDOG_ESCALATE_MS] the helper is rebuilt. Some Boox
+     * firmware wedges the native reader in a way only a full recreate unsticks.
+     */
+    internal fun onStylusDown(now: Long = System.currentTimeMillis()) {
+        lastStylusSeenMs = now
+        if (fingerDown) {
+            Log.w("EinkDraw", "stylus down: clearing a finger nobody lifted")
+            fingerDown = false
+            applyDrawingState()
+        }
+        if (now - lastWatchdogArmedMs < RAW_WATCHDOG_MS) return
+        lastWatchdogArmedMs = now
+        val lastAtDown = controller.lastRawCallbackMs
+        timers.postDelayed({ runWatchdog(lastAtDown) }, RAW_WATCHDOG_MS)
+    }
+
+    private fun runWatchdog(lastAtDown: Long) {
+        if (!initialized) return
+        val now = System.currentTimeMillis()
+        val recovery = penRecovery(
+            rawCallbackSinceDown = controller.lastRawCallbackMs > lastAtDown,
+            shouldDraw = shouldDraw(),
+            sdkEnabled = controller.isEnabled(),
+            msSinceLastRecovery = now - lastRawWatchdogResetMs,
+        )
+        if (recovery == PenRecovery.NONE) return
+        Log.w("EinkDraw", "watchdog: raw reader silent ${RAW_WATCHDOG_MS}ms after stylus DOWN: $recovery")
+        when (recovery) {
+            PenRecovery.ARM -> controller.rearm()
+            PenRecovery.RESET -> controller.resetRenderBuffer()
+            PenRecovery.RECREATE -> controller.recreate()
+            PenRecovery.NONE -> {}
+        }
+        lastRawWatchdogResetMs = now
+    }
+
+    /** Whether some touch state is still waiting for an UP that may never come. */
+    private fun gestureArmed(): Boolean =
+        dragLabel != null || dragGroupId != null || dragClusterIdx != null || bindHandler.currentPoints() != null
+
+    /**
+     * Put the pen back into the state the current mode asks for, from scratch.
+     *
+     * Idempotent, and called after every event that can leave touch state behind: a window
+     * that lost focus to a dialog or a permission prompt, a resize, a resume, a page that
+     * came back. Nothing can be in flight across any of those, so whatever is still armed
+     * is stale by definition.
+     */
+    fun rearm(reason: String) {
+        if (fingerDown || palmGesture || gestureArmed()) {
+            Log.i("EinkDraw", "rearm ($reason): fingerDown=$fingerDown palm=$palmGesture gesture=${gestureArmed()}")
+        }
+        fingerDown = false
+        palmGesture = false
+        lastStylusSeenMs = Long.MIN_VALUE
+        abandonArmedGesture()
+        refreshLimitRect()
+        applyDrawingState()
     }
 
     private val scrollListener = object : View.OnScrollChangeListener {
@@ -632,6 +700,14 @@ internal class PenOverlay(
 
         @SuppressLint("ClickableViewAccessibility")
         val wrappedListener = View.OnTouchListener { v, event ->
+            // A DOWN cannot arrive while a one-pointer gesture is in flight, so whatever is
+            // still armed lost its UP: a dialog took it, or the system cancelled it without
+            // telling this view. Unwind it before the new gesture starts, or the stale drag
+            // swallows this tap and the stale lasso keeps the page highlighted.
+            if (event.actionMasked == MotionEvent.ACTION_DOWN && gestureArmed()) {
+                Log.w("EinkDraw", "a new DOWN found a gesture still armed; abandoning it")
+                abandonArmedGesture()
+            }
             val result = origListener.onTouch(v, event)
 
             when {
@@ -738,6 +814,11 @@ internal class PenOverlay(
                         bindHandler.onUp(event.x, event.y, event.actionMasked == MotionEvent.ACTION_CANCEL)
                     }
                 }
+                isVoiceMode && event.pointerCount == 1 -> when (event.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> { voiceDownX = event.x; voiceDownY = event.y }
+                    MotionEvent.ACTION_UP ->
+                        if (isTap(voiceDownX, voiceDownY, event.x, event.y)) pickVoiceTarget(event.x, event.y)
+                }
                 !isBindMode && !isSelectMode && event.actionMasked == MotionEvent.ACTION_UP -> {
                     if (!showOcrPopupNear(event.x, event.y)) flashMarkerNear(event.x, event.y)
                 }
@@ -745,9 +826,9 @@ internal class PenOverlay(
                     strokeView?.updateTransform(currentTransform())
             }
             // Block scroll briefly after a stroke ends to absorb residual touch events.
-            val scrollBlocked = !isBindMode && !isSelectMode &&
+            val scrollBlocked = !isBindMode && !isSelectMode && !isVoiceMode &&
                 System.currentTimeMillis() - lastStrokeEndMs < SCROLL_BLOCK_MS
-            result || scrollBlocked || (isSelectMode && event.pointerCount == 1)
+            result || scrollBlocked || isVoiceMode || (isSelectMode && event.pointerCount == 1)
         }
         webView.setOnTouchListener(wrappedListener)
     }
@@ -772,12 +853,15 @@ internal class PenOverlay(
         applyDrawingState()
     }
 
-    private fun refreshExcludeRects() {
+    /** The draw zone follows the views: a rotation that only resized the page used to leave
+     * the pen limited to the old portrait rectangle. */
+    private fun refreshLimitRect() {
+        if (!initialized) return
         val limit = visibleRect() ?: return
         val excludes = buildExcludeRects(limit)
         Log.d(
             "EinkDraw",
-            "refreshExcludeRects limit=$limit excludes=$excludes excludeViewH=${excludeView?.height}",
+            "refreshLimitRect limit=$limit excludes=$excludes excludeViewH=${excludeView?.height}",
         )
         controller.updateLimitRect(limit, excludes)
     }
@@ -802,14 +886,7 @@ internal class PenOverlay(
      * An orientation change cancels in-flight gestures, so any recorded finger is stale by
      * definition; leaving it set disables drawing for the rest of the session.
      */
-    fun onViewResized() {
-        if (fingerDown) {
-            Log.i("EinkDraw", "onViewResized: clearing a finger that the resize cancelled")
-        }
-        fingerDown = false
-        abandonArmedGesture()
-        applyDrawingState()
-    }
+    fun onViewResized() = rearm("resize")
 
     /**
      * Drop any gesture the system interrupted.
@@ -830,6 +907,7 @@ internal class PenOverlay(
         dragLabel = null
         dragGroupId = null
         dragClusterIdx = null
+        bindHandler.cancel()
         strokeView?.setBindPath(null)
         strokeView?.bindDrawingActive = false
         strokeView?.invalidate()
@@ -855,6 +933,7 @@ internal class PenOverlay(
         // Nothing may be in flight across a pause: a drag target or a lasso left armed
         // would be applied to whatever happens after the resume.
         fingerDown = false
+        palmGesture = false
         abandonArmedGesture()
         applyDrawingState()
     }
@@ -879,13 +958,13 @@ internal class PenOverlay(
         Log.d(
             "EinkDraw",
             "applyDrawingState shouldDraw=$shouldDraw contentReady=$contentReady " +
-                "isBindMode=$isBindMode isSelectMode=$isSelectMode fingerDown=$fingerDown paused=$paused " +
-                "bufSize=${buf.size}"
+                "isBindMode=$isBindMode isSelectMode=$isSelectMode isVoiceMode=$isVoiceMode " +
+                "fingerDown=$fingerDown paused=$paused bufSize=${buf.size}"
         )
         // The one term that is not a mode: a page load sets `contentReady` false, and if
         // nothing ever sets it back the pen is dead while every other signal says draw.
         // Say so, once, in words -- the log above buried it among five trues.
-        if (!shouldDraw && !isBindMode && !isSelectMode && !fingerDown && !paused && !contentReady) {
+        if (!shouldDraw && !isBindMode && !isSelectMode && !isVoiceMode && !fingerDown && !paused && !contentReady) {
             Log.w("EinkDraw", "the pen is off because the page has not reported ready")
         }
         controller.setEnabled(shouldDraw)
@@ -893,7 +972,7 @@ internal class PenOverlay(
 
     /** The one rule for the pen; the stylus watchdog and [applyDrawingState] both read it. */
     internal fun shouldDraw(): Boolean =
-        contentReady && !isBindMode && !isSelectMode && !fingerDown && !paused
+        contentReady && !isBindMode && !isSelectMode && !isVoiceMode && !fingerDown && !paused
 
     fun setStrokeWidth(width: Float) { controller.setStrokeWidth(width) }
     fun setStrokeColor(color: Int) { buf.setColor(color) }
@@ -967,6 +1046,7 @@ internal class PenOverlay(
         val wasSelect = isSelectMode
         isBindMode = (mode == ToolMode.TAG)
         isSelectMode = (mode == ToolMode.MOVE)
+        isVoiceMode = (mode == ToolMode.VOICE)
         if (wasBind && !isBindMode) {
             strokeView?.setBindPath(null)
         }
@@ -1266,6 +1346,81 @@ internal class PenOverlay(
         bridge.flashGroup(group.elementIndices, group.color)
     }
 
+    private fun pickVoiceTarget(screenX: Float, screenY: Float) {
+        val t = currentTransform()
+        val docX = t.screenToDocX(screenX)
+        val docY = t.screenToDocY(screenY)
+        bridge.findNearestElement(docX, docY) { raw ->
+            val elements = parseFoundElements(raw)
+            if (elements.isEmpty() || !isVoiceMode) {
+                onVoiceTargetMissed?.invoke()
+                return@findNearestElement
+            }
+            val target = elements.first()
+            val group = BindGroup(
+                id = nextGroupId++,
+                color = nextGroupColor(),
+                strokeIndices = emptySet(),
+                elementIndices = listOf(target.i),
+                elementRefs = listOf(ElementRef(target.section ?: target.id, target.tag, target.text)),
+                markerDocX = target.cx,
+                markerDocY = target.cy,
+                elementDocCenters = listOf(target.cx to target.cy),
+                source = "voice",
+            )
+            _bindGroups.add(group)
+            undoStack.add(UndoAction.BindGroupAdded(group.id))
+            notifyStrokeView()
+            syncBindGroupsToWebView()
+            onBindGroupsChanged?.invoke()
+            onVoiceTarget?.invoke(group)
+        }
+    }
+
+    /** The server accepted the note: the words land on the group and the page draws the card. */
+    fun setVoiceNote(groupId: Int, text: String, severity: String, noteJson: String) {
+        val idx = _bindGroups.indexOfFirst { it.id == groupId }
+        if (idx < 0) return
+        _bindGroups[idx] = _bindGroups[idx].copy(recognizedText = text, severity = severity, voiceJson = noteJson, source = "voice")
+        notifyStrokeView()
+        syncBindGroupsToWebView()
+        onBindGroupsChanged?.invoke()
+    }
+
+    /** A pen strike through one sentence of a spoken note deletes it, with no round trip. */
+    private fun maybeStrikeVoiceSentence(strokeIdx: Int) {
+        if (_bindGroups.none { it.isVoice && it.recognizedText != null }) return
+        val stroke = buf.strokes.getOrNull(strokeIdx) ?: return
+        if (!isStrike(stroke.points)) return
+        val midX = (stroke.points.minOf { it.first } + stroke.points.maxOf { it.first }) / 2f
+        val midY = (stroke.points.minOf { it.second } + stroke.points.maxOf { it.second }) / 2f
+        bridge.voiceSentenceAt(midX, midY) { n, s ->
+            val group = voiceCards().getOrNull(n - 1)?.first ?: return@voiceSentenceAt
+            val before = group.recognizedText ?: return@voiceSentenceAt
+            val after = dropSentence(before, s)
+            if (after == before) return@voiceSentenceAt
+            val idx = _bindGroups.indexOfFirst { it.id == group.id }
+            if (idx < 0) return@voiceSentenceAt
+            _bindGroups[idx] = group.copy(
+                recognizedText = after,
+                voiceJson = noteWithEdit(group.voiceJson ?: "{}", "strike ${s + 1}", before, after),
+            )
+            if (strokeIdx == buf.size - 1 && buf.strokes.getOrNull(strokeIdx) === stroke) {
+                buf.undo()
+                undoStack.removeAll { it is UndoAction.StrokeAdded && it.strokeIndex == strokeIdx }
+                controller.resetRenderBuffer()
+                onStrokesChanged?.invoke()
+            }
+            notifyStrokeView()
+            syncBindGroupsToWebView()
+            onBindGroupsChanged?.invoke()
+        }
+    }
+
+    private fun voiceCards(): List<Pair<BindGroup, VoiceCard>> =
+        _bindGroups.filter { it.isVoice && it.recognizedText != null && it.elementIndices.isNotEmpty() }
+            .mapIndexed { i, g -> g to voiceCard(i + 1, g) }
+
     fun removeBindGroup(groupId: Int) {
         _bindGroups.removeAll { it.id == groupId }
         undoStack.removeAll { it is UndoAction.BindGroupAdded && it.groupId == groupId }
@@ -1290,6 +1445,13 @@ internal class PenOverlay(
     val bindGroups: List<BindGroup> get() = _bindGroups
     private val undoStack = mutableListOf<UndoAction>()
     private var isBindMode = false
+    private var isVoiceMode = false
+    private var voiceDownX = 0f
+    private var voiceDownY = 0f
+    /** The block a note will be spoken at was tapped; the group has no strokes yet. */
+    var onVoiceTarget: ((BindGroup) -> Unit)? = null
+    /** The tap landed on nothing a note can bind to. */
+    var onVoiceTargetMissed: (() -> Unit)? = null
     private var nextGroupId = 0
     var onBindComplete: (() -> Unit)? = null
     var onBindGroupsChanged: (() -> Unit)? = null
@@ -1315,6 +1477,8 @@ internal class PenOverlay(
     private var dragBaseDocY = 0f
 
     /** Which drag, if any, is armed right now. For tests of the transition paths. */
+    internal fun debugGestureArmed(): Boolean = gestureArmed()
+
     internal fun debugDragTarget(): String? = when {
         dragLabel != null -> "label"
         dragGroupId != null -> "group"
@@ -1348,15 +1512,26 @@ internal class PenOverlay(
     }
 
     private var contentReady = true
+    private val pageLoadGrace = Runnable {
+        if (contentReady) return@Runnable
+        Log.w("EinkDraw", "the page has not reported ready for ${PAGE_LOAD_GRACE_MS}ms; giving the pen back anyway")
+        setInputEnabled(true)
+    }
 
     /**
      * A page load starts by taking the pen away and hiding the ink; the page finishing
      * loading gives both back. The ink view and the pen move together: a stroke the SDK
      * records into an invisible view is "drawing that does not happen".
+     *
+     * A load that never finishes (the server restarting mid-deploy, a request that hangs)
+     * must not keep the pen for good: after [PAGE_LOAD_GRACE_MS] it is given back, ink
+     * mapping or not, because a dead pen is the worse of the two.
      */
     fun setInputEnabled(enabled: Boolean) {
         contentReady = enabled
         strokeView?.visibility = if (enabled) View.VISIBLE else View.INVISIBLE
+        timers.removeCallbacks(pageLoadGrace)
+        if (!enabled) timers.postDelayed(pageLoadGrace, PAGE_LOAD_GRACE_MS)
         applyDrawingState()
     }
 
@@ -1373,6 +1548,9 @@ internal class PenOverlay(
             Log.i("EinkDraw", "onPageReady: the page loaded, giving the pen back")
         }
         setInputEnabled(true)
+        // A reload (a new version, a reconnect) starts from a bare page: the outlines and
+        // the spoken cards live here, not in the page, so they are drawn again.
+        if (_bindGroups.isNotEmpty()) syncBindGroupsToWebView()
     }
 
     fun consumeStrokes(consumed: org.json.JSONArray?) {
@@ -1422,6 +1600,7 @@ internal class PenOverlay(
 
     private fun syncBindGroupsToWebView() {
         bridge.applyBindGroups(_bindGroups)
+        bridge.applyVoiceNotes(voiceCards().map { it.second })
     }
 
     fun exportToPng(): ByteArray? {
@@ -1464,6 +1643,7 @@ internal class PenOverlay(
         webView.setOnHoverListener(null)
         webView.setOnScrollChangeListener(null as View.OnScrollChangeListener?)
         webView.viewTreeObserver.removeOnPreDrawListener(scrollPreDrawListener)
+        timers.removeCallbacksAndMessages(null)
         strokeView?.transformProvider = null
         controller.close()
         initialized = false
@@ -1473,10 +1653,10 @@ internal class PenOverlay(
         private const val SCROLL_BLOCK_MS = 500L
         private const val MERGE_THRESHOLD_DOC = 200f
         private const val ERASER_BIND_RADIUS = 40f
-        /** Watchdog: if Onyx raw callbacks don't fire within this window after a stylus DOWN, reset. */
-        private const val RAW_WATCHDOG_MS = 150L
-        /** Escalate from soft reset to full TouchHelper recreate if this long since the last reset. */
-        private const val RAW_WATCHDOG_ESCALATE_MS = 5000L
+        /** Watchdog: if Onyx raw callbacks don't fire within this window after a stylus DOWN, recover. */
+        internal const val RAW_WATCHDOG_MS = 300L
+        /** A page load that has not finished by then gives the pen back anyway. */
+        internal const val PAGE_LOAD_GRACE_MS = 10_000L
         private val GROUP_PALETTE = intArrayOf(
             0xFFe74c3c.toInt(), 0xFF2196f3.toInt(), 0xFF4caf50.toInt(),
             0xFFff9800.toInt(), 0xFF9c27b0.toInt(), 0xFF009688.toInt(),
@@ -1527,4 +1707,28 @@ internal fun renderStrokesToPng(
     bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
     bitmap.recycle()
     return out.toByteArray()
+}
+
+/** The card the page draws for a spoken note, from what the group holds. */
+internal fun voiceCard(n: Int, group: BindGroup): VoiceCard {
+    val note = runCatching { JSONObject(group.voiceJson ?: "{}") }.getOrElse { JSONObject() }
+    val guarded = note.optBoolean("guarded", false)
+    val seconds = note.optDouble("seconds", 0.0)
+    val severity = group.severity ?: note.optString("severity", "note")
+    val elapsed = "%.0fs".format(seconds)
+    val state = when {
+        guarded -> "heard, not cleaned \u00b7 $elapsed"
+        severity == "blocker" -> "blocker \u00b7 $elapsed"
+        else -> "spoken \u00b7 $elapsed"
+    }
+    return VoiceCard(
+        n = n,
+        elementIndex = group.elementIndices.first(),
+        text = group.recognizedText.orEmpty(),
+        raw = note.optString("raw", ""),
+        severity = severity,
+        color = group.color,
+        state = state,
+        guarded = guarded,
+    )
 }

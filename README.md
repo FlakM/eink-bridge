@@ -44,6 +44,9 @@ Hack on an idea, plan, or codebase in an AI tool or vim. Send it to an e-ink tab
   the brief (`image/<name>`) and is served from the session that owns it, so no other host
   has to stay up
 - [x] use of colors for emphasis and organization (e.g. red for warnings, green for good parts, blue for questions)
+- [x] voice comments: tap a block, speak, and the words arrive at the agent as a cleaned
+  note with what was heard, the recogniser's confidence and the audio beside it; the
+  tablet can read a note back (`docs/voice-comments.md`)
 
 ## Usage
 
@@ -71,7 +74,11 @@ eink-review push --async brief.md --image shot.png
 # add one to a review that is already running; prints the markdown to paste
 eink-review image <session-id> sketch.png --alt "whiteboard sketch"
 
-# check result
+# see the page as the reader has it: scroll, zoom and ink; prints the PNG path
+eink-review screenshot <session-id>
+
+# a note the reader spoke at a block arrives like any other: recognized_text, plus
+# source "voice", the raw transcript, the recogniser's confidence and the audio route
 eink-review result <session-id>
 
 # manage

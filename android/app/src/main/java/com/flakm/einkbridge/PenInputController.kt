@@ -29,5 +29,13 @@ interface PenInputController {
      * [StrokeView] then provides the correct visual via its own Android canvas.
      */
     fun resetRenderBuffer()
+    /** Monotonic ms of the last raw callback, 0 before any. The stylus watchdog reads it. */
+    val lastRawCallbackMs: Long
+    /** What the SDK itself says about raw input, or null when it cannot say. */
+    fun isEnabled(): Boolean?
+    /** Make the SDK take input again without tearing anything down. */
+    fun rearm()
+    /** Destroy the native reader and build a new one: the last resort when a reset did not help. */
+    fun recreate()
     fun close()
 }

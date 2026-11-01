@@ -3,8 +3,8 @@
     <!-- The pen toolbar: one button size, one gap inside a group, one gap around a rule. -->
     <dimen name="toolbar_height">72dp</dimen>
     <dimen name="toolbar_padding">8dp</dimen>
-    <dimen name="tool_button_size">56dp</dimen>
-    <dimen name="tool_icon_padding">18dp</dimen>
+    <dimen name="tool_button_size">52dp</dimen>
+    <dimen name="tool_icon_padding">16dp</dimen>
     <dimen name="toolbar_gap">4dp</dimen>
     <dimen name="toolbar_group_gap">6dp</dimen>
     <dimen name="toolbar_rule_width">2dp</dimen>

@@ -97,6 +97,35 @@ The OCR engine renders strokes as **black on white** before sending to Ollama. T
 fixtures were converted to greyscale for the same reason — Ollama's vision model returns
 empty output for brightly coloured (e.g. pink) handwriting.
 
+## Voice setup
+
+Spoken notes use **whisper.cpp** for speech to text and **piper** to read a note back.
+Both run on this machine; the hosted recogniser is an opt-in fallback.
+
+```bash
+nix profile add nixpkgs#whisper-cpp nixpkgs#piper-tts
+mkdir -p ~/.local/share/eink-bridge/models && cd ~/.local/share/eink-bridge/models
+curl -LO https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin
+curl -LO https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx
+curl -LO https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json
+systemctl --user enable --now whisper-asr   # ~/.config/systemd/user/whisper-asr.service, port 8090
+```
+
+| Env var | Default | Description |
+|---|---|---|
+| `EINK_ASR_URL` | `http://127.0.0.1:8090` | whisper-server; empty disables voice |
+| `EINK_ASR_MODEL` | `small.en` | Label recorded in the note's provenance |
+| `EINK_ASR_TIMEOUT_SECONDS` | `30` (max 120) | Bound on one transcription |
+| `EINK_ASR_OPENAI_ENABLED` | unset | `1` adds OpenAI `whisper-1` as the fallback (same key as OCR) |
+| `EINK_VOICE_LLM_URL` / `EINK_VOICE_LLM_MODEL` | the OCR Ollama | The cleaner for free-form edits; `EINK_VOICE_LLM_ENABLED=0` turns it off |
+| `EINK_PIPER_VOICE` | unset | An `.onnx` voice; set it to enable `POST .../speech` |
+| `EINK_PIPER_BIN` | `piper` | The binary, when it is not on the service's PATH |
+
+The service gets the piper variables from
+`~/.config/systemd/user/eink-serve.service.d/voice.conf`. `small.en` is deliberate: the
+measurements in `docs/voice-comments.md` show accuracy saturates from tiny to medium and
+the errors are lexical, which the document vocabulary repairs deterministically.
+
 ## Security notes
 
 The server binds to `0.0.0.0:3333` by default with no authentication.
@@ -112,6 +141,18 @@ narrows that further. `callback_url` must be http or https and may not point at 
 link-local address. Raw HTML in a brief is sanitised before it reaches the page, and
 diagram payloads cannot close their own `<script>`, so a brief cannot run code in the
 page's origin.
+
+A LAN caller can also ask the tablet for a picture of what it is showing
+(`POST /api/sessions/{id}/screenshot`) and read it back: with no token that is the same
+exposure as reading the session, and worth knowing before pointing a tablet at a shared
+server. Only the one request the server is waiting on can be answered, and only with a
+PNG, so a caller cannot fill a session with files.
+
+A LAN caller can open a voice capture on a session and stream audio into it; what comes
+back is a transcript of what it sent, kept under that session as `voice/<capture>.wav`,
+bounded at 300 s / 4 MB and one capture per session. The audio route only serves a 32-hex
+capture name. `POST .../speech` runs piper on the caller's text (at most 2000 characters);
+it stores nothing.
 
 A picture in a brief is uploaded as bytes, never as a path for the server to open, and it
 lands under that session's `images/` directory. The name must be one path segment with a
@@ -269,6 +310,8 @@ be exercised in a unit test without racing every other test in the binary.
 | Annotation / highlighting / tap behaviour | `just test-render` then `just test-mutations` |
 | Snippet, diff, steps or fence handling | `cargo test render::tests::parse_chunks` / `a_snippet` / `a_line_mark` |
 | Document images (`image/` refs, `--image`, upload) | `cargo test images::` then `cargo test --test api_edge_test` and `--test cli_integration_test` |
+| Screenshots of the tablet (`eink-review screenshot`) | `cargo test --test screenshot_test` then `cargo test --test cli_integration_test screenshot`; `just test-android` for the capture |
+| Spoken notes (`voice/`, the tray, the card) | `cargo test voice::` then `cargo test --test voice_test`; `just test-render` for the card; `just test-android` for the tray |
 | Relocating notes after an edit | `cargo test reanchor::tests` |
 | HTTP edge cases (remove, purge, ack, limits) | `cargo test --test api_edge_test` |
 | CLI commands end to end | `cargo test --test cli_integration_test` |
@@ -334,6 +377,61 @@ each has a test:
 
 Everything a reader sees in a block comes from a pasted brief, so caption, language badge
 and step text are escaped: `tests::review_text_in_a_snippet_or_step_block_is_escaped`.
+
+### Seeing the tablet (`screenshot_test.rs`)
+
+The agent can ask the tablet for a picture of what it is showing, which is the only way
+to see scroll, zoom and ink as the reader has them. Each quiet failure has a test:
+
+- **`delivered` lies.** The agent's own observer subscribes to the same WebSocket as the
+  tablet, so "someone is listening" is not "a tablet is listening". The tablet connects
+  with `?client=tablet`, the server counts those, and
+  `delivered_means_a_tablet_heard_it_not_the_agents_own_observer` pins it with real
+  sockets; the CLI test proves a missing tablet is said in under five seconds, not waited
+  out for twenty.
+- **A stale picture answers a new question.** A retry while the tablet is still working
+  reuses the request, but once answered it is gone: `an_ask_after_the_answer_is_a_new_picture`.
+- **The tablet could not capture and nobody hears.** A JSON `{"error"}` under the request
+  turns the `GET` into a 410 with the reason, and the CLI fails fast with it.
+- **The id is a path.** A request id is 32 lowercase hex characters, checked on both the
+  `PUT` and the `GET`; the test plants a file one directory up and proves `..%2Fescape`
+  neither writes nor reads it. Only the pending request may be answered, so an unasked id
+  stores nothing.
+
+The capture itself is `Screenshot.kt` on the tablet: the page and the pen overlay are
+composited on the main thread, encoded off it, and a blank page (a WebView that has not
+drawn yet) is reported as a failure rather than sent as an empty document.
+
+### Hearing the reader (`voice_test.rs`, `src/voice/`)
+
+A spoken note is an instruction to an agent, and the quiet failures are the ones where
+the agent acts on something the reader did not say. Each has a test:
+
+- **The cleaner invents a word.** `clean::guard` requires every content word of the cleaned
+  note to appear in the raw (modulo the repairs and stop words); when it does not, the raw
+  wins and the card says so. `the_guard_refuses_an_invented_word_and_allows_a_reorder`
+  pins it from the library, `a_cleaner_that_invents_a_word_is_refused_and_the_readers_words_win`
+  from the socket, and the mutation harness switches the guard to always-accept.
+- **An identifier is "repaired" into prose, or prose into an identifier.** The vocabulary
+  is the document's terms of art only (an underscore, an extension, a case change inside
+  the word), and a span is rewritten only when the spoken words, with "dot" and
+  "underscore" removed, are exactly one of them. "cash column" stays wrong rather than
+  guessed into "cache column": `rule_5_is_narrow_prose_is_left_alone`.
+- **The vocabulary is handed to whisper as a prompt.** It drops the first clause of the
+  clip when it is: "So um, reanchor.rs should refuse this. The index is enough." came back
+  as "The index is enough." (measured on the live server, 2026-10-30). The recogniser gets
+  the audio and nothing else; the repair pass spells identifiers afterwards.
+- **Silence becomes a note.** Whisper hallucinates on silence; the gate only lets audio
+  reach it after 200 ms of speech, and a capture with none is an error:
+  `nothing_heard_is_an_error_not_an_empty_note`.
+- **Two captures on one session.** A second upgrade is a 409, and the slot is released with
+  the socket: `one_capture_per_session_and_none_on_a_finished_or_unknown_one`.
+- **The capture name is a path.** 32 lowercase hex and `.wav`, nothing else is served:
+  `discard_throws_the_audio_away_and_a_name_cannot_leave_the_session`.
+
+The seven cleanup rules in `docs/voice-comments.md` are fixtures in `voice::clean::tests`,
+one test per rule. The closed verbs are deterministic; only `shorter`, `make it a
+question` and a free instruction reach the model, and only through the guard.
 
 ### Pictures in a document (`images.rs`)
 
