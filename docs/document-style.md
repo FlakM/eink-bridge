@@ -3,38 +3,72 @@
 How documents produced for e-ink review should look and feel.
 
 This is the reference for the `/eink` skill and any skill that generates
-content destined for the Boox tablet.
+content destined for the Boox tablet. The executable version of the shape lives in
+`harness/skills/eink/references/review-document.md`; this file is the short form, and
+the reasoning behind it.
 
 ## Principles
 
-1. **Dense but scannable** — pack information tightly, but use headings and whitespace to create visual rhythm. No filler prose.
-2. **Diagrams over prose** — if a relationship can be shown, show it. A 6-node mermaid diagram replaces 3 paragraphs of "A depends on B which calls C".
-3. **Concrete before abstract** — lead with the specific example, then generalize. Show the code first, explain the pattern second.
-4. **Color is semantic** — red means danger/risk, green means done/safe, blue means information/todo, amber means needs-attention/review.
+1. **The answer comes first.** Verdict, then evidence. A reader who trusts the author can
+   stop after one line; a reader who does not has the rest of the page to argue with.
+2. **Comprehension before defects.** In a study of professional reviews, finding defects
+   was only the fourth most frequent kind of comment (14%). Understanding the change is the
+   hard part, so the page spends its words on the shape of the change and the one thing
+   that decides it — not on a tour of the diff.
+3. **Size decides value.** Under 200 changed lines is the target, 400 the ceiling, 300
+   lines an hour the fastest rate that still finds defects, 60–90 minutes a session. A page
+   that cannot fit that budget is telling you to split the change; say so as a finding.
+4. **Silence must be visible.** Name what you checked, where you stopped, and what you
+   examined and cleared. An oversight and a considered non-issue look identical otherwise.
+5. **Concrete before abstract** — lead with the specific example, then generalise. Show the
+   code first, explain the pattern second.
+6. **Colour is semantic** — red means danger/risk, green means done/safe, blue means
+   information/todo, amber means needs-attention/review. On a greyscale panel it is a
+   bonus, never the only signal.
 
 ## Document Structure
 
-Every review document should follow this skeleton, omitting sections that don't apply:
+Three shapes; pick by what the reader has to do. Full skeletons are in the skill
+reference above.
+
+| Shape | The reader's job | Use for |
+|---|---|---|
+| **decide** | judge a change or a choice | a diff, a PR, a design with options |
+| **understand** | build a model they will reuse | a concept, an architecture, a plan |
+| **round** | see what happened to their notes | round two and later of a live review |
+
+The review (`decide`) page, in order:
 
 ```
-# Title (what is this about, 5 words max)
+# The change, in the reader's words
+**Ready?** <Yes | No | With fixes> — why.
+<files · ±lines · minutes · lines to judge, mechanical>
 
-## Context
-Why does this exist? 2-3 sentences max. Link to the ticket/issue if relevant.
+**What changed** — one sentence.
+**Why** — quoted, or "not stated".
+**Wider system** — what else this touches.
+**The question** — the one thing the reader must answer.
 
-## The Actual Content
-The thing being reviewed — code explanation, architecture proposal,
-implementation plan, blog draft, etc.
+## Read these first      <- 3-6 findings, ranked, labelled, path:line on the line
+## What I checked        <- checkboxes, including what you did not reach
+## Set aside             <- what you examined and cleared, one line each
+## Change surface        <- only when contracts move
+## If you only read one thing
 
-## Diagram (if applicable)
-One diagram that captures the core structure or flow.
-Prefer: mindmap for plans, mermaid sequence for API flows,
-mermaid flowchart for decision logic, graph for architecture.
-
-## Tradeoffs / Open Questions
-Bullet list. What was considered and rejected? What's still unclear?
-This is where the pen annotations are most valuable.
+Write on the page, or reply LGTM / CHANGES.
 ```
+
+Rules that carry the shape:
+
+- **Findings are ranked, labelled and placed.** A label from the review vocabulary
+  (`issue (blocking)`, `suggestion`, `question`, `praise`, `nitpick`) is the skim layer;
+  the `path:line` on the same line is what makes it tappable. No legend at the bottom.
+- **Headings state the claim**, not the topic. "Expiry clears the notifier map but not the
+  socket map" beats "Notifications".
+- **One mode per section** — explaining and enumerating are different jobs; a section that
+  does both does neither well.
+- No "Summary" + "TL;DR" stacking. No restatement of the title. The first sentence is the
+  answer.
 
 ## Diagram Preferences
 
@@ -112,18 +146,23 @@ eink-review push brief.md --image error-page.png
 
 ## Typography and Layout
 
-The renderer uses Georgia serif at 28px on a 2800px-wide canvas.
-Documents should be written assuming:
+The renderer uses Georgia serif on a 992px column. Documents should be written assuming:
 
 - Headings are large and bold — use them for navigation, not decoration
-- Inline code (`backticks`) has a visible border — use it for identifiers, not emphasis
+- Inline code (`backticks`) has a visible border — use it for identifiers, not emphasis,
+  and it is what a finding's label is rendered in, so a label reads as a chip
 - Tables render well — prefer tables over bullet-list comparisons
-- Diff blocks are syntax-highlighted — use them when showing before/after changes
+- `diff` blocks are coloured — use them for the contract being judged, nothing else
+- `<details>` keeps background out of the way until it is wanted
 
 ## What NOT to do
 
+- Don't show a diff the reader already has in the editor. The page owes judgement; the
+  editor has the code. One diff is allowed, and only when the contract is the subject.
 - Don't produce documents longer than ~800 lines — the tablet scrolls poorly beyond that
 - Don't use nested bullet lists deeper than 2 levels — they're hard to read on e-ink
-- Don't use pictures as decoration — one or two per document, and only when the artefact itself is the point (see above)
-- Don't add "Summary" sections at the end — the reviewer will write their own summary with the pen
+- Don't use pictures as decoration — one or two per document, and only when the artefact
+  itself is the point (see above); `snippet` beats a screenshot of code every time
+- Don't add "Summary" sections at the end — the reviewer will write their own with the pen
 - Don't use emoji — they render inconsistently on e-ink displays
+- Don't put a URL where a `path:line` would do — the reader cannot type a link from e-ink

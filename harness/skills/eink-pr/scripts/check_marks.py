@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Check that every mark in a review brief resolves to a real line in a checkout.
 
-A brief's Marks section is a list like `- A → src/lib.rs:120`. The renderer turns each
+A finding carries its place at the end of its line (`- **A** `issue` ... src/lib.rs:120`)
+and older briefs carry a Marks legend (`- A → src/lib.rs:120`). The renderer turns each
 `path:line` into a tappable reference, so a wrong path, a line past the end of the file, or
 a stale worktree produces a pill that shows no code. Run this before delivering; it is
 cheap, and it catches the class rather than the instance.
@@ -13,11 +14,15 @@ import re
 import sys
 from pathlib import Path
 
-MARK = re.compile(r"^\s*[-*]?\s*([A-F])\s*(?:→|->)\s*(\S+?):(\d+)\s*$", re.M)
+# The finding line: `- **A** `label` claim. action. path:line`
+INLINE = re.compile(r"^\s*[-*]\s+\*\*([A-F])\*\*.*?(\S+?):(\d+)\s*$", re.M)
+# The older legend line: `- A → path:line`
+LEGACY = re.compile(r"^\s*[-*]?\s*([A-F])\s*(?:→|->)\s*(\S+?):(\d+)\s*$", re.M)
 
 
 def marks(brief: str) -> list[tuple[str, str, int]]:
-    return [(letter, ref, int(line)) for letter, ref, line in MARK.findall(brief)]
+    found = INLINE.findall(brief) or LEGACY.findall(brief)
+    return [(letter, ref, int(line)) for letter, ref, line in found]
 
 
 def check(brief: str, roots: list[str]) -> list[tuple[str, str, int, str | None]]:

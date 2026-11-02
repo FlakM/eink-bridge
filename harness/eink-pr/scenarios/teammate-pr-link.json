@@ -28,6 +28,20 @@
         "name": "cargo test",
         "status": "pass"
       }
+    ],
+    "additions": 92,
+    "deletions": 18,
+    "judgement_lines": 88,
+    "mechanical": 4,
+    "question": "Approve the contract change, or ask for a compat field first?",
+    "not_checked": [
+      "the Java client — it is not in this repository"
+    ],
+    "set_aside": [
+      {
+        "what": "The bump of the shared lint config",
+        "why": "pre-existing"
+      }
     ]
   },
   "findings": [

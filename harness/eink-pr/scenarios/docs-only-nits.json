@@ -21,6 +21,16 @@
         "name": "link check",
         "status": "pass"
       }
+    ],
+    "additions": 24,
+    "deletions": 6,
+    "judgement_lines": 24,
+    "question": "None — wording only.",
+    "set_aside": [
+      {
+        "what": "The example rewrite",
+        "why": "clearer, no meaning changed"
+      }
     ]
   },
   "findings": [

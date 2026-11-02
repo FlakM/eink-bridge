@@ -26,6 +26,17 @@
         "name": "clippy",
         "status": "pass"
       }
+    ],
+    "additions": 180,
+    "deletions": 40,
+    "judgement_lines": 140,
+    "mechanical": 40,
+    "question": "Is the guard where it belongs, or one layer up?",
+    "set_aside": [
+      {
+        "what": "Formatting churn in the fixture",
+        "why": "generated"
+      }
     ]
   },
   "findings": [

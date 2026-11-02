@@ -225,15 +225,16 @@ is being asked to agree with. Show it, ahead of the implementation:
 - Find the interface diff: `git diff` for `.proto`/`.avsc`/`.thrift`/`.graphql`/OpenAPI
   files in this change, and any linked companion PR (the PR body usually names it). Read
   it from the sibling worktree, or fetch that PR's diff if it is not checked out.
-- Present it as its own `## Interfaces` section: the messages, fields, methods, defaults,
-  and what breaks or stays compatible. A short `snippet` with a `diff` block is the right
-  form -- it is the contract, so it earns the space.
+- Present it in `## Change surface`: a table of surface -> effect for a caller that has not
+  changed yet (messages, fields, methods, defaults, what stays compatible), with the
+  contract's own `diff` or `snippet` under it. It is the contract, so it earns the space.
 - Keep the implementation to one line per change. The reader can read code later; they
   cannot un-agree with an interface.
 
 `review.py filter --changed-file <path>` (repeatable, or `--changed-files-from <list>`)
 ranks findings on contract files first, and `review.py lint --changed-file <path>` **fails a
-brief that touches a contract and has no `## Interfaces` section**.
+brief that touches a contract and has neither a `## Change surface` table nor an
+`## Interfaces` section**.
 
 ## 5c. Verify before filtering
 
@@ -429,9 +430,9 @@ in parallel (they can span PRs in one turn), filter per PR. Then aggregate befor
 - **one brief and one e-ink session for the batch**, with one observer and one handshake.
   Do not create a note per PR; the reader answers once, in one place.
 - one section per PR, in the order the reviewer pasted them;
-- **one `## Interfaces` section** covering every contract change across the batch, naming
-  the repository for each;
-- one `## Checks` section covering all the PRs.
+- **one `## Change surface` table** covering every contract change across the batch,
+  naming the repository in each row;
+- one `## What I checked` section covering all the PRs.
 
 Tags for the session: `prs=<n,n>` and `batch=<count>`; do not label a batch with one `pr=`.
 

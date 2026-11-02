@@ -31,6 +31,24 @@
         "name": "cargo test",
         "status": "pass"
       }
+    ],
+    "additions": 340,
+    "deletions": 96,
+    "judgement_lines": 310,
+    "mechanical": 30,
+    "question": "Split the writer migration out of this PR?",
+    "not_checked": [
+      "the plugin reload path — no test reaches it"
+    ],
+    "set_aside": [
+      {
+        "what": "The rename in f3.rs",
+        "why": "mechanical, no behaviour"
+      },
+      {
+        "what": "Retry backoff in f4.rs",
+        "why": "matches the gateway's, deliberately"
+      }
     ]
   },
   "findings": [

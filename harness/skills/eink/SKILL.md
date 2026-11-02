@@ -82,9 +82,14 @@ wants from the review before sending it. For “current context”, clarify whic
 and why instead of exporting an arbitrary summary.
 
 If the prompt already supplies the contract, briefly reflect it and proceed without
-a redundant interview. Offer a concise, bullet-led layout as a default; ask about a
-diagram only when the topic needs one. Do not make the user choose a formatting menu
-before understanding their goal.
+a redundant interview. Do not make the user choose a formatting menu before
+understanding their goal.
+
+**The purpose picks the shape** — `decide`, `understand` or `round`, per
+`references/review-document.md`. Say which one you are writing in the same breath as the
+scope, because the shape is what the reader gets: "a four-minute review of the expiry fix,
+decide-shaped, with one question about the migration". Infer it; let the user correct you
+rather than choosing from a menu.
 
 Once agreed, prepare a focused document from the supplied file or context. Preserve
 the original file unless the user authorized editing it. Before sending, state the
@@ -336,30 +341,74 @@ If `eink-review push` fails: `systemctl --user start eink-serve`
 
 ---
 
-## Authoring Review Documents
+## The shape of the page
 
-**Be minimalistic.** The reader is on an e-ink tablet — they want to scan, not read essays.
+Three shapes, chosen by the reader's job:
 
-Structure every document like this:
-1. **Brief overview** — 1–3 sentences or bullets stating what this is and why it matters.
-2. **Body** — short bulleted points, not paragraphs. Break prose into bullets whenever possible.
-3. **At most one diagram or picture per document**, and only when structure or appearance genuinely cannot be expressed in bullets.
+| Shape | The reader's job | Use for |
+|---|---|---|
+| **decide** | judge a change or a choice | a diff, a PR, a design with options |
+| **understand** | build a model they will reuse | a concept, an architecture, a plan |
+| **round** | see what happened to their notes | round two and later of a live review |
 
-Hard limits:
-- Prefer bullets over prose. If a paragraph is more than ~3 lines, split it into bullets.
-- **Maximum one diagram or picture per document.** Two only if they show fundamentally different things (e.g. an architecture graph and a state machine). Never use a diagram or a picture as decoration.
-- Skip the diagram entirely if a bulleted list communicates the same information.
-- No "executive summary" + "summary" + "TL;DR" stacking — one overview, then content.
+Every shape opens with the answer in one line and closes with what to do next.
 
-The renderer supports normal Markdown plus the diagram blocks below. Use them sparingly:
+**Read `references/review-document.md` before writing anything** — it holds the skeleton
+for each shape, what belongs in each slot, the budget, and the evidence behind the rules.
+Do not improvise the shape from memory: the slot order is the part that makes the page
+worth reading, and `eink-pr` renders the same skeleton mechanically.
 
-- `mermaid` for flowcharts, sequence diagrams, state machines — when ordering or interaction matters
-- `mindmap` for plans or decompositions — when a flat bulleted list would obscure hierarchy
-- `graph` for architecture maps — when relationships between components are the point
+The review page, in short:
 
-If you find yourself reaching for a second diagram, replace it with bullets.
+```markdown
+# <the change, in the reader's words>
+
+**Ready?** <Yes | No | With fixes> — <why, one clause>.
+<12 files · +340 −96 · 4 min · 310 lines to judge, 30 mechanical>
+
+**What changed** — <one sentence>.
+
+**Why** — <quoted, or "not stated">.
+
+**Wider system** — <what else this touches>.
+
+**The question** — <the one thing the reader must answer>.
+
+## Read these first      <- 3-6 findings, ranked, labelled, with path:line
+## What I checked        <- checkboxes, including what you did NOT reach
+## Set aside             <- what you looked at and deliberately did not raise
+## Change surface        <- only when contracts move
+## If you only read one thing
+
+Write on the page, or reply **LGTM** / **CHANGES**.
+```
+
+Each answer is its own paragraph (a blank line between them). Consecutive lines join into
+one block, and one block is one anchor: the pen cannot land on *Why* without catching
+*What changed*, and `review.py lint` rejects a merged open.
+
+Two rules earn the page its keep, and neither is optional:
+
+- **`What I checked` includes the gap.** Where you stopped reading is the most useful
+  sentence on the page: the reader aims there instead of re-deriving your coverage.
+- **`Set aside` makes silence visible.** A considered non-issue and an oversight look
+  identical without it.
+
+### Syntax the renderer will bite you on
+
+Normal Markdown, plus these fences. Syntax detail for diagrams is below; the *choice* of
+form is in the reference.
+
+- `snippet` — `LANG REF | CAPTION #L12,15` on the first line, code under it. Use it
+  instead of a screenshot of code, always.
+- `diff` — coloured lines. Only for a contract being judged, never for "here is the
+  change".
+- `steps` — an ordered list where a tap advances the emphasis. 3–6 steps.
+- `mermaid`, `mindmap`, `graph` — diagrams. One per page, and only when a bulleted list
+  would lose the relationship.
 
 ### When a picture says it better
+
 
 A diagram shows structure; a picture shows the artefact. Send a screenshot, a photo of a
 whiteboard, a sketch, or the rendered page itself when appearance is what the reader has to
@@ -455,10 +504,13 @@ exact token that clashed. To reproduce locally, open `/eink-webview` and call
 
 ## Guidance
 
-- Push to the Boox whenever the user needs to review a plan, architecture, or diff.
-- Lead with a 1–3 sentence/bullet overview so the reader gets the gist without scrolling.
-- Use bullets, not paragraphs. Use at most one diagram per document.
-- When you do use a diagram, color every node intentionally — but ask yourself first whether bullets would suffice.
+- Push to the Boox whenever the user needs to read something properly: a diff, a plan, an
+  architecture, a decision. Answer first, evidence second.
+- Pick the shape from the reader's job (`decide`, `understand`, `round`), then follow
+  `references/review-document.md`. A page that opens with the answer can be trusted in one
+  line and argued with in the next ten.
+- Colour every diagram node intentionally — but ask first whether a bulleted list says it
+  faster.
 - The `eink-serve` systemd service must be running. Connection refused → `systemctl --user start eink-serve`.
 - Channel notifications are Claude-specific; the portable background watcher works in both harnesses.
 - You are not blocked while waiting; wait for the harness's background completion notification.

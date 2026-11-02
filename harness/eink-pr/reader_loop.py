@@ -28,15 +28,12 @@ spec.loader.exec_module(review)
 
 BRIEF = """# PR 88: Add pagination to list sessions
 
-## Important pieces
+**Ready?** With fixes — the new field breaks clients that have not changed yet.
 
-- **A** — The new field is required and breaks old clients. Mark it optional.
-- **B** — The pagination path has no test. Cover the empty and last page.
+## Read these first
 
-## Marks
-
-- A → proto/api.proto:12
-- B → server/tests/health_test.rs:40
+- **A** `issue (blocking)` The new field is required and breaks old clients. Mark it optional. proto/api.proto:12
+- **B** `suggestion` The pagination path has no test. Cover the empty and last page. server/tests/health_test.rs:40
 """
 MARKS = {"A": "proto/api.proto:12", "B": "server/tests/health_test.rs:40"}
 

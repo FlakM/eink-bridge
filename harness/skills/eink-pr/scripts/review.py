@@ -294,22 +294,16 @@ def opening_text(pr, key):
 
 
 def render_opening(pr):
-    return [f"**{label}** — {opening_text(pr, key)}" for label, key in OPENING]
+    """The three opening questions, one paragraph each.
 
-
-def render_checks(pr):
-    """Background checks are evidence: report failures, and say so briefly when clean."""
-    checks = pr.get("checks") or []
-    if not checks:
-        return ["## Checks", "", "- Not run — say so rather than implying the change is tested."]
-    interesting = [c for c in checks if str(c.get("status", "")).lower() not in ("pass", "passed", "green", "ok")]
-    if not interesting:
-        names = ", ".join(str(c.get("name")) for c in checks[:4])
-        return ["## Checks", "", f"- All green: {names}."]
-    lines = ["## Checks", ""]
-    for check in interesting[:4]:
-        detail = str(check.get("detail", "")).strip()
-        lines.append(f"- **{check.get('name')}** {check.get('status')}." + (f" {ensure_sentence(detail)}" if detail else ""))
+    Consecutive lines of markdown join into one wall of text, and one wall is one anchor:
+    the reader cannot put a note on "Why" without catching "What changed" too. Separate
+    paragraphs also let the pen land on the line it is actually about.
+    """
+    lines = []
+    for label, key in OPENING:
+        lines.append(f"**{label}** — {opening_text(pr, key)}")
+        lines.append("")
     return lines
 
 
@@ -327,6 +321,187 @@ def ensure_sentence(text):
 # re-derive from the diff.
 OPENING = (("What changed", "what"), ("Why", "why"), ("Wider system", "wider"))
 
+# The label vocabulary a review already has (Conventional Comments), used as the skim
+# layer: a reader can find every blocking issue without reading prose.
+LABELS = ("issue (blocking)", "issue", "suggestion", "question", "praise", "nitpick")
+
+# Which label a filtered finding earns when the writer did not name one. Severity is what
+# the lenses already agreed on; the label is the same judgement in the reader's words.
+DERIVED_LABEL = {
+    "critical": "issue (blocking)",
+    "major": "issue (blocking)",
+    "minor": "suggestion",
+    "nit": "nitpick",
+}
+
+
+def render_verdict(pr, findings):
+    """The answer before the evidence.
+
+    A reader who trusts the author stops after one line; a reader who does not has the
+    whole page to argue with. Deriving it from severity keeps the two from disagreeing:
+    a brief that says "Yes" above a blocking finding is the failure this prevents.
+    """
+    stated = str(pr.get("verdict") or "").strip().lower()
+    reason = str(pr.get("verdict_reason") or "").strip()
+    if stated in ("yes", "lgtm", "approve"):
+        verdict = "Yes"
+    elif stated in ("no", "refuse", "reject"):
+        verdict = "No"
+    elif stated in ("with fixes", "fixes", "changes"):
+        verdict = "With fixes"
+    elif any(f.get("severity") in ("critical", "major") for f in findings):
+        verdict = "No" if any(f.get("severity") == "critical" for f in findings) else "With fixes"
+    elif findings:
+        verdict = "With fixes"
+    else:
+        verdict = "Yes"
+    if not reason:
+        # Point at the finding that decides it rather than inventing a rationale.
+        reason = "**A** is the one that matters." if findings else "nothing actionable found."
+    reason = ensure_sentence(reason).rstrip(".")
+    return f"**Ready?** {verdict} — {reason}."
+
+
+def render_budget(pr):
+    """Files, size, minutes, and how much of the diff actually needs judgement.
+
+    The split is the most useful number on the page: 900 changed lines that are 850
+    mechanical is a 50-line review, and saying so is the difference between a reader who
+    starts and one who closes the tablet.
+    """
+    parts = []
+    files = pr.get("files") or pr.get("changed_files")
+    if files:
+        parts.append(f"{files} file{'s' if int(files) != 1 else ''}")
+    if pr.get("additions") is not None or pr.get("deletions") is not None:
+        parts.append(f"+{int(pr.get('additions') or 0)} −{int(pr.get('deletions') or 0)}")
+    judgement = pr.get("judgement_lines")
+    if judgement:
+        judged = f"{int(judgement)} lines to judge"
+        if pr.get("mechanical"):
+            judged += f", {int(pr['mechanical'])} mechanical"
+        parts.append(judged)
+        # 300 changed lines an hour is the fastest rate that still finds defects.
+        minutes = pr.get("minutes") or max(1, round(int(judgement) / 300 * 60))
+        parts.append(f"{int(minutes)} min")
+    elif pr.get("minutes"):
+        parts.append(f"{int(pr['minutes'])} min")
+    return " · ".join(parts)
+
+
+def render_question(pr):
+    question = str(pr.get("question") or "").strip()
+    if not question:
+        return []
+    return [f"**The question** — {ensure_sentence(question)}"]
+
+
+def render_findings(findings, links=None):
+    """One line per finding: label, claim, action, and where it is.
+
+    The place goes on the line rather than in a legend at the bottom: the reader should
+    not have to scroll to a second list to find out where the thing they just read is.
+    """
+    links = links or {}
+    lines = []
+    marks = {}
+    for index, finding in enumerate(findings):
+        letter = MARK_LETTERS[index]
+        spot = f"{finding['file']}:{finding['line']}"
+        marks[letter] = spot
+        label = str(finding.get("label") or "").strip()
+        if label not in LABELS:
+            label = DERIVED_LABEL.get(str(finding.get("severity")), "issue")
+        claim = ensure_sentence(finding["claim"]).rstrip(".")
+        action = ensure_sentence(finding["action"])
+        lines.append(f"- **{letter}** `{label}` {claim}. {action} {spot}")
+    return lines, marks
+
+
+def render_checked(pr):
+    """What ran, what was read, and — the valuable half — what was not reached.
+
+    A reader who knows where the author stopped can aim their own attention there instead
+    of re-deriving the coverage. Implying green for something that did not run is the
+    fastest way to lose them.
+    """
+    lines = []
+    checks = pr.get("checks") or []
+    interesting = [
+        c for c in checks
+        if str(c.get("status", "")).lower() not in ("pass", "passed", "green", "ok")
+    ]
+    if checks and not interesting:
+        names = ", ".join(str(c.get("name")) for c in checks[:4])
+        lines.append(f"- [x] All green: {names}.")
+    for check in interesting[:4]:
+        detail = str(check.get("detail", "")).strip()
+        # Bold rather than red: a failing check must not be skimmed past, and weight
+        # survives a greyscale panel where a colour does not.
+        lines.append(
+            f"- **{check.get('name')}** {check.get('status')}."
+            + (f" {ensure_sentence(detail)}" if detail else "")
+        )
+    for item in pr.get("checked") or []:
+        lines.append(f"- [x] {ensure_sentence(str(item))}")
+    for item in pr.get("not_checked") or []:
+        # Not sentence-cased: the value follows a label, so "Not checked: the Lua path."
+        # reads as one line rather than two clauses bolted together.
+        lines.append(f"- [ ] Not checked: {str(item).strip().rstrip('.')}.")
+    if not lines:
+        lines.append("- [ ] Not run — say so rather than implying the change is tested.")
+    return lines
+
+
+def render_set_aside(pr):
+    """What was examined and deliberately not raised.
+
+    Silence is otherwise indistinguishable from oversight: every omitted nit sits in the
+    reader's head as a doubt. Naming the non-issues is what makes the rest trustworthy.
+    """
+    items = pr.get("set_aside") or []
+    lines = []
+    for item in items:
+        if isinstance(item, dict):
+            what = str(item.get("what", "")).strip()
+            why = str(item.get("why", "")).strip()
+            lines.append(f"- {ensure_sentence(what).rstrip('.')} — {why.rstrip('.')}.")
+        else:
+            lines.append(f"- {ensure_sentence(str(item))}")
+    return lines
+
+
+def render_surface(pr):
+    """The compatibility question, as a table.
+
+    Only when a caller that has not changed yet can be hurt by this. The table is what a
+    reviewer actually worries about, and it is the one place a diff earns the page when
+    the contract itself is the thing being agreed to.
+    """
+    rows = pr.get("surface") or []
+    if not rows:
+        return [], False
+    lines = ["| surface | effect |", "|---|---|"]
+    for row in rows:
+        if isinstance(row, dict):
+            lines.append(f"| {row.get('surface', '')} | {row.get('effect', '')} |")
+        else:
+            lines.append(f"| {row} | |")
+    return lines, True
+
+
+def render_bottom_line(pr):
+    """The one paragraph for a reader who scrolled past everything.
+
+    Not a summary of the summary: the single argument that decides it, so a reader who
+    reads only this can still approve or refuse.
+    """
+    text = str(pr.get("bottom_line") or "").strip()
+    if not text:
+        return []
+    return [ensure_sentence(text)]
+
 
 def render_brief(pr, findings, links=None, title_prefix="PR"):
     """Return (markdown, marks). links maps "file:line" -> permalink."""
@@ -336,33 +511,54 @@ def render_brief(pr, findings, links=None, title_prefix="PR"):
     heading = f"{title_prefix} {number}: {title}" if number else f"{title_prefix}: {title}"
 
     lines = [f"# {heading}", ""]
+    lines.append(render_verdict(pr, findings))
+    lines.append("")
+    budget = render_budget(pr)
+    if budget:
+        lines.append(budget)
+        lines.append("")
     lines += render_opening(pr)
-    lines.append("")
-    lines += render_checks(pr)
-    lines.append("")
+    question = render_question(pr)
+    if question:
+        lines += question
+        lines.append("")
 
     marks = {}
     if findings:
-        lines.append("## Important pieces")
+        lines.append("## Read these first")
         lines.append("")
-        for index, finding in enumerate(findings):
-            letter = MARK_LETTERS[index]
-            spot = f"{finding['file']}:{finding['line']}"
-            marks[letter] = spot
-            claim = ensure_sentence(finding["claim"]).rstrip(".")
-            action = ensure_sentence(finding["action"])
-            lines.append(f"- **{letter}** — {claim}. {action}")
+        finding_lines, marks = render_findings(findings, links)
+        lines += finding_lines
         lines.append("")
 
+    lines.append("## What I checked")
+    lines.append("")
+    lines += render_checked(pr)
+    lines.append("")
 
-    if marks:
-        lines.append("## Marks")
+    set_aside = render_set_aside(pr)
+    if set_aside:
+        lines.append("## Set aside")
         lines.append("")
-        for letter, spot in marks.items():
-            # Short references only: the reader navigates by pressing the letter in the
-            # editor, so a full permalink is noise. Long links belong in the PR comment.
-            lines.append(f"- {letter} → {spot}")
+        lines += set_aside
         lines.append("")
+
+    surface, _ = render_surface(pr)
+    if surface:
+        lines.append("## Change surface")
+        lines.append("")
+        lines += surface
+        lines.append("")
+
+    bottom = render_bottom_line(pr)
+    if bottom:
+        lines.append("## If you only read one thing")
+        lines.append("")
+        lines += bottom
+        lines.append("")
+
+    lines.append("Write on the page, or reply **LGTM** / **CHANGES**.")
+    lines.append("")
 
     return "\n".join(lines).rstrip() + "\n", marks
 
@@ -377,6 +573,19 @@ def lint_brief(markdown, max_words=420, max_bullet_words=30, max_sentence_words=
     headings = []
     in_diff_fence = False
     total_words = 0
+    previous = ""
+
+    for number, raw in enumerate(body_lines, start=1):
+        line = raw.rstrip()
+        stripped = line.strip()
+        # Two opening lines with no blank line between them join into one paragraph, which
+        # is one anchor: the pen cannot land on "Why" without catching "What changed".
+        for label, _key in OPENING:
+            if stripped.startswith(f"**{label}**") and previous.strip():
+                problems.append((number, "merged-opening",
+                                 f"'{label}' runs into the line above; leave a blank line "
+                                 "so each answer is its own paragraph"))
+        previous = line
 
     for number, raw in enumerate(body_lines, start=1):
         line = raw.rstrip()
@@ -430,19 +639,40 @@ def lint_brief(markdown, max_words=420, max_bullet_words=30, max_sentence_words=
                     phrase in lowered for phrase in NECESSITY)
                 if not actionable:
                     problems.append((number, "not-actionable", "important piece has no action verb"))
+                label = mark_label(stripped)
+                if label is None:
+                    problems.append((number, "unlabelled",
+                                     "give the finding a label: " + ", ".join(LABELS)))
+                elif label not in LABELS:
+                    problems.append((number, "unknown-label",
+                                     f"{label!r} is not one of: " + ", ".join(LABELS)))
 
     if markdown.strip():
         for label, _key in OPENING:
             if f"**{label}**" not in markdown:
                 problems.append((0, "missing-opening", f"brief must state '{label}' before findings"))
-        if "## Checks" not in markdown:
-            problems.append((0, "missing-checks", "brief must say what was checked in the background"))
-        if interfaces and "## Interfaces" not in markdown:
+        if "**Ready?**" not in markdown:
+            problems.append((0, "missing-verdict",
+                             "open with the answer: '**Ready?** Yes|No|With fixes — why'"))
+        if "**The question**" not in markdown:
+            problems.append((0, "missing-question",
+                             "name the one thing the reader must answer, or say 'none' "
+                             "and why this is safe"))
+        if "## What I checked" not in markdown:
+            problems.append((0, "missing-checks",
+                             "say what ran, what you read, and what you did not reach"))
+        has_findings = "## Read these first" in markdown
+        if has_findings and "## Set aside" not in markdown:
+            problems.append((0, "missing-set-aside",
+                             "name what you looked at and deliberately did not raise, "
+                             "or silence is indistinguishable from oversight"))
+        if interfaces and "## Change surface" not in markdown and "## Interfaces" not in markdown:
             names = ", ".join(interfaces[:3])
             problems.append((0, "missing-interfaces",
-                             f"this change touches a contract ({names}); show the interface "
-                             "diff in an '## Interfaces' section -- the implementation "
-                             "matters less than what callers have to agree with"))
+                             f"this change touches a contract ({names}); show what a caller "
+                             "that has not changed yet has to agree with -- a '## Change "
+                             "surface' table, and the interface diff under it when the "
+                             "contract is the thing being judged"))
     for heading in headings:
         if heading in SUMMARY_HEADINGS:
             problems.append((0, "summary-stack", f"'{heading}' heading duplicates the overview"))
@@ -454,6 +684,16 @@ def lint_brief(markdown, max_words=420, max_bullet_words=30, max_sentence_words=
 def mark_bullet(line):
     """True for the '**A** — ...' important-piece bullets."""
     return re.match(r"^-\s+\*\*[A-Z]\*\*\s", line) is not None
+
+
+def mark_label(line):
+    """The backticked label on a finding line, or None when it has none.
+
+    A label is rendered as a chip (`issue (blocking)`), so a reader can find every
+    blocking item without reading prose -- but only if there is one on every line.
+    """
+    found = re.match(r"^-\s+\*\*[A-Z]\*\*\s+`([^`]+)`", line)
+    return found.group(1).strip() if found else None
 
 
 def resolve_reference(marks, text):

@@ -20,6 +20,16 @@
         "name": "cargo fmt --check",
         "status": "pass"
       }
+    ],
+    "additions": 12,
+    "deletions": 12,
+    "judgement_lines": 0,
+    "question": "None — formatting only, nothing to decide.",
+    "set_aside": [
+      {
+        "what": "Every changed line",
+        "why": "whitespace; behaviour is identical"
+      }
     ]
   },
   "findings": [],

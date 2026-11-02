@@ -11,8 +11,11 @@
       "long-bullet",
       "missing-checks",
       "missing-opening",
+      "missing-question",
+      "missing-verdict",
       "not-actionable",
-      "summary-stack"
+      "summary-stack",
+      "unlabelled"
     ]
   }
 }

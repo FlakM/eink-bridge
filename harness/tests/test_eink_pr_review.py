@@ -155,46 +155,112 @@ class RenderTests(unittest.TestCase):
                                               links={"server/src/app.rs:10": "https://example/perm"})
         self.assertEqual(marks, {"A": "server/src/app.rs:10", "B": "server/src/app.rs:20"})
         self.assertIn("# PR 42: Quiet notifications", markdown)
-        self.assertIn("- **A** — ", markdown)
-        self.assertNotIn("http", markdown, "the legend must stay short, not carry permalinks")
-        self.assertIn("- B → server/src/app.rs:20", markdown)
+        self.assertIn("- **A** `issue (blocking)` ", markdown)
+        self.assertNotIn("http", markdown, "the page must stay short, not carry permalinks")
+        # The place sits on the finding, not in a legend the reader has to scroll to.
+        self.assertIn("server/src/app.rs:10", markdown)
+        self.assertNotIn("## Marks", markdown)
 
-    def test_no_findings_still_produces_the_opening_without_a_marks_section(self):
+    def test_the_verdict_opens_the_page_and_agrees_with_severity(self):
+        blocking = review.render_brief({"title": "t"}, [finding(severity="major")])[0]
+        self.assertIn("**Ready?** With fixes — ", blocking)
+        critical = review.render_brief({"title": "t"}, [finding(severity="critical")])[0]
+        self.assertIn("**Ready?** No — ", critical)
+        clean = review.render_brief({"title": "t"}, [])[0]
+        self.assertIn("**Ready?** Yes — ", clean)
+
+    def test_a_stated_verdict_is_kept_and_gets_its_reason(self):
+        markdown, _ = review.render_brief(
+            {"title": "t", "verdict": "with fixes", "verdict_reason": "the leak is real"}, [])
+        self.assertIn("**Ready?** With fixes — The leak is real.", markdown)
+
+    def test_the_budget_line_states_what_needs_judgement(self):
+        markdown, _ = review.render_brief(
+            {"title": "t", "files": 12, "additions": 340, "deletions": 96,
+             "judgement_lines": 310, "mechanical": 30}, [])
+        self.assertIn("12 files · +340 −96 · 310 lines to judge, 30 mechanical · 62 min", markdown)
+
+    def test_the_question_is_the_point_and_an_absent_one_is_flagged(self):
+        markdown, _ = review.render_brief({"title": "t", "question": "split the migration out?"}, [])
+        self.assertIn("**The question** — Split the migration out?", markdown)
+        problems = review.lint_brief(markdown)
+        self.assertNotIn("missing-question", {rule for _, rule, _ in problems})
+
+    def test_no_findings_still_produces_the_opening_without_a_findings_section(self):
         markdown, marks = review.render_brief({"number": 7, "title": "Docs only"}, [])
         self.assertEqual(marks, {})
         self.assertIn("# PR 7: Docs only", markdown)
         self.assertIn("**What changed**", markdown)
+        self.assertNotIn("## Read these first", markdown)
         self.assertNotIn("## Marks", markdown)
-        self.assertNotIn("## Important pieces", markdown)
 
     def test_local_review_uses_a_prefix_instead_of_a_number(self):
         markdown, _ = review.render_brief({"title": "Session expiry fix"}, [finding()], title_prefix="Changes")
         self.assertIn("# Changes: Session expiry fix", markdown)
 
 
-OPENING = (
-    "**What changed** — Expiry clears the notifier map.\n"
-    "**Why** — Notifier entries leaked for every expired session.\n"
+PAGE_HEAD = (
+    "# PR 1: thing\n\n"
+    "**Ready?** With fixes — the guard is the problem.\n\n"
+    "**What changed** — Expiry clears the notifier map.\n\n"
+    "**Why** — Notifier entries leaked for every expired session.\n\n"
     "**Wider system** — The expiry loop also drives metrics.\n\n"
-    "## Checks\n\n- All green: cargo test.\n"
+    "**The question** — Should the socket map clear on the same timer?\n\n"
 )
+
+CHECKS = "## What I checked\n\n- [x] All green: cargo test.\n"
+
+SET_ASIDE = "## Set aside\n\n- The rename in `session.rs` — mechanical, no behaviour.\n"
 
 
 class LintTests(unittest.TestCase):
-    def brief(self, body, opening=True):
-        head = "# PR 1: thing\n\n" + (OPENING if opening else "")
-        return f"{head}\n{body}\n"
+    def brief(self, body, head=True, checks=True, set_aside=True):
+        parts = [PAGE_HEAD if head else "# PR 1: thing\n\n", body + "\n"]
+        if checks:
+            parts.append(CHECKS)
+        if set_aside:
+            parts.append(SET_ASIDE)
+        return "\n".join(parts)
+
+    def rules(self, body, **kwargs):
+        return {rule for _, rule, _ in review.lint_brief(self.brief(body, **kwargs))}
 
     def test_context_opening_is_mandatory(self):
-        problems = review.lint_brief(self.brief("- **A** — Check the guard.", opening=False))
-        rules = {rule for _, rule, _ in problems}
+        rules = self.rules("- **A** `issue` Check the guard. app.rs:1\n",
+                           head=False, checks=False, set_aside=False)
         self.assertIn("missing-opening", rules)
         self.assertIn("missing-checks", rules)
+
+    def test_the_answer_comes_before_the_evidence(self):
+        without = self.brief("", head=False)
+        without = without.replace("**Ready?** With fixes — the guard is the problem.\n\n", "")
+        self.assertIn("missing-verdict", {rule for _, rule, _ in review.lint_brief(without)})
+
+    def test_a_finding_must_say_what_kind_of_finding_it_is(self):
+        self.assertIn("unlabelled", self.rules("- **A** Expiry skips cleanup. Clear it. app.rs:1\n"))
+        self.assertIn("unknown-label",
+                      self.rules("- **A** `blocker` Expiry skips cleanup. Clear it. app.rs:1\n"))
+        self.assertEqual(self.rules("- **A** `issue (blocking)` Expiry skips cleanup. Clear it. app.rs:1\n"), set())
+
+    def test_findings_without_a_set_aside_section_are_rejected(self):
+        self.assertIn("missing-set-aside",
+                      self.rules("## Read these first\n\n- **A** `issue` Check the guard. app.rs:1\n",
+                                 set_aside=False))
+
+    def test_answers_on_consecutive_lines_are_flagged(self):
+        """Three lines of markdown join into one paragraph, and one paragraph is one anchor."""
+        merged = (
+            "# PR 1: thing\n\n"
+            "**What changed** — Expiry clears the map.\n"
+            "**Why** — It leaked.\n\n"
+            "## What I checked\n\n- [x] All green.\n"
+        )
+        self.assertIn("merged-opening", {rule for _, rule, _ in review.lint_brief(merged)})
 
     def test_a_long_opening_line_is_rejected(self):
         problems = review.lint_brief(self.brief(
             "**What changed** — " + " ".join(["clause"] * 40) + ".\n"
-            "**Why** — Reason.\n**Wider system** — Callers.\n\n## Checks\n\n- All green.\n"))
+            "**Why** — Reason.\n**Wider system** — Callers.\n"))
         self.assertIn("long-opening", {rule for _, rule, _ in problems})
 
     def test_checks_report_a_failure_rather_than_claiming_green(self):
@@ -202,7 +268,7 @@ class LintTests(unittest.TestCase):
             {"number": 1, "title": "t", "what": "w", "why": "y", "wider": "x",
              "checks": [{"name": "cargo test", "status": "pass"},
                         {"name": "CI", "status": "fail", "detail": "proto lint"}]}, [])
-        self.assertIn("## Checks", markdown)
+        self.assertIn("## What I checked", markdown)
         self.assertIn("**CI** fail", markdown)
         self.assertNotIn("All green", markdown)
 
@@ -210,7 +276,31 @@ class LintTests(unittest.TestCase):
         markdown, _ = review.render_brief(
             {"number": 1, "title": "t", "what": "w", "why": "y", "wider": "x",
              "checks": [{"name": "cargo test", "status": "pass"}, {"name": "clippy", "status": "pass"}]}, [])
-        self.assertIn("- All green: cargo test, clippy.", markdown)
+        self.assertIn("- [x] All green: cargo test, clippy.", markdown)
+
+    def test_what_was_not_checked_is_a_line_of_its_own(self):
+        markdown, _ = review.render_brief(
+            {"number": 1, "title": "t",
+             "checked": ["Every caller of `expire()` (4)."],
+             "not_checked": ["the Lua plugin path"]}, [])
+        self.assertIn("- [x] Every caller of `expire()` (4).", markdown)
+        self.assertIn("- [ ] Not checked: the Lua plugin path.", markdown)
+
+    def test_set_aside_reaches_the_page(self):
+        markdown, _ = review.render_brief(
+            {"number": 1, "title": "t",
+             "set_aside": [{"what": "The rename in session.rs", "why": "mechanical"}]}, [])
+        self.assertIn("## Set aside", markdown)
+        self.assertIn("- The rename in session.rs — mechanical.", markdown)
+
+    def test_the_change_surface_is_a_table_of_surfaces(self):
+        markdown, _ = review.render_brief(
+            {"number": 1, "title": "t",
+             "surface": [{"surface": "HTTP API", "effect": "none"},
+                         {"surface": "`session.json`", "effect": "one additive field"}]}, [])
+        self.assertIn("## Change surface", markdown)
+        self.assertIn("| surface | effect |", markdown)
+        self.assertIn("| `session.json` | one additive field |", markdown)
 
     def test_an_unstated_why_is_admitted_not_invented(self):
         markdown, _ = review.render_brief({"number": 1, "title": "t"}, [])
@@ -218,77 +308,69 @@ class LintTests(unittest.TestCase):
 
     def test_a_tight_actionable_brief_passes(self):
         problems = review.lint_brief(self.brief(
-            "## Important pieces\n\n"
-            "- **A** — Expiry skips notifier cleanup. Clear it when a session expires.\n"
-            "- **B** — Version check trusts the client. Verify the version before accept.\n"))
+            "## Read these first\n\n"
+            "- **A** `issue (blocking)` Expiry skips notifier cleanup. Clear it when a session expires. app.rs:170\n"
+            "- **B** `suggestion` Version check trusts the client. Verify the version before accept. session.rs:118\n"))
         self.assertEqual(problems, [], problems)
 
     def test_a_long_url_is_rejected(self):
-        problems = review.lint_brief(self.brief(
-            "- **A** — See https://github.com/acme/repo/blob/deadbeef1234567890/server/src/app.rs#L170-L176 for the context. Check it.\n"))
-        self.assertIn("long-link", {rule for _, rule, _ in problems})
+        self.assertIn("long-link", self.rules(
+            "- **A** `issue` See https://github.com/acme/repo/blob/deadbeef1234567890/server/src/app.rs#L170-L176 for the context. Check it. app.rs:1\n"))
 
     def test_a_short_reference_is_fine(self):
         problems = review.lint_brief(self.brief(
-            "- **A** — See server/src/app.rs:170. Check the guard.\n"))
+            "- **A** `issue` See server/src/app.rs:170. Check the guard.\n"))
         self.assertEqual(problems, [], problems)
 
     def test_common_words_are_not_mistaken_for_filler(self):
         """"every" must not trip the "very" rule, "adjust" must not trip "just"."""
         problems = review.lint_brief(self.brief(
-            "## Important pieces\n\n"
-            "- **A** — Every session adjusts the map. Verify the guard.\n"))
+            "## Read these first\n\n"
+            "- **A** `issue` Every session adjusts the map. Verify the guard. app.rs:1\n"))
         self.assertEqual(problems, [], problems)
 
     def test_accepts_natural_imperative_phrasing(self):
         """A real agent wrote this shape; the gate must not reject good reviews."""
         problems = review.lint_brief(self.brief(
-            "## Important pieces\n\n"
-            "- **A** New pagination field is required, which breaks old clients. Make it optional or version the message.\n"
-            "- **B** Last-page path has no test. Cover the empty page and the last page.\n"))
+            "## Read these first\n\n"
+            "- **A** `issue (blocking)` New pagination field is required, which breaks old clients. Make it optional or version the message. api.proto:9\n"
+            "- **B** `suggestion` Last-page path has no test. Cover the empty page and the last page. pager.rs:44\n"))
         self.assertEqual(problems, [], problems)
 
     def test_necessity_phrasing_counts_as_an_action(self):
         problems = review.lint_brief(self.brief(
-            "- **A** The cursor is never validated and the server must reject it.\n"))
+            "- **A** `issue` The cursor is never validated and the server must reject it. cache.rs:12\n"))
         self.assertEqual(problems, [], problems)
 
     def test_filler_and_hedges_are_rejected(self):
-        problems = review.lint_brief(self.brief(
-            "- **A** — This basically works. Maybe check the lock.\n"))
-        rules = {rule for _, rule, _ in problems}
+        rules = self.rules("- **A** `issue` This basically works. Maybe check the lock. app.rs:1\n")
         self.assertIn("filler", rules)
         self.assertIn("hedge", rules)
 
     def test_long_bullet_is_rejected(self):
         long_words = " ".join(["word"] * 40)
-        problems = review.lint_brief(self.brief(f"- **A** — {long_words} check it.\n"))
-        self.assertIn("long-bullet", {rule for _, rule, _ in problems})
+        self.assertIn("long-bullet", self.rules(f"- **A** `issue` {long_words} check it. app.rs:1\n"))
 
     def test_long_sentence_is_rejected(self):
         long_sentence = " ".join(["clause"] * 30) + " verify it."
-        problems = review.lint_brief(self.brief(f"## Impact\n\n- {long_sentence}\n"))
-        self.assertIn("long-sentence", {rule for _, rule, _ in problems})
+        self.assertIn("long-sentence", self.rules(f"## Impact\n\n- {long_sentence}\n"))
 
     def test_trailing_summary_heading_is_rejected(self):
-        problems = review.lint_brief(self.brief("## Summary\n\n- **A** — Check the guard.\n"))
-        self.assertIn("summary-stack", {rule for _, rule, _ in problems})
+        self.assertIn("summary-stack", self.rules("## Summary\n\n- **A** `issue` Check the guard. app.rs:1\n"))
 
     def test_diff_dumps_are_rejected(self):
-        problems = review.lint_brief(self.brief(
+        self.assertIn("diff-dump", self.rules(
             "```diff\n- old\n+ new\n```\n\n@@ -1,3 +1,4 @@\n"))
-        self.assertIn("diff-dump", {rule for _, rule, _ in problems})
 
-    def test_important_piece_without_an_action_is_rejected(self):
-        problems = review.lint_brief(self.brief(
-            "- **A** — The session handler diverges from the older behaviour.\n"))
-        self.assertIn("not-actionable", {rule for _, rule, _ in problems})
+    def test_finding_without_an_action_is_rejected(self):
+        self.assertIn("not-actionable", self.rules(
+            "- **A** `issue` The session handler diverges from the older behaviour. session.rs:9\n"))
 
     def test_overall_word_budget_is_enforced(self):
         bullets = "\n".join(
-            f"- **{review.MARK_LETTERS[i]}** — Check clause {i} and confirm the guard.\n"
+            f"- **{review.MARK_LETTERS[i]}** `issue` Check clause {i} and confirm the guard. app.rs:{i}\n"
             for i in range(20))
-        problems = review.lint_brief(self.brief("## Important pieces\n\n" + bullets), max_words=100)
+        problems = review.lint_brief(self.brief("## Read these first\n\n" + bullets), max_words=100)
         self.assertIn("too-long", {rule for _, rule, _ in problems})
 
 
@@ -312,7 +394,49 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class InterfaceChangesTest(unittest.TestCase):
+class ShapeTests(unittest.TestCase):
+    """The written recipe and the renderer must describe the same page.
+
+    `references/review-document.md` is what a human (or an agent) reads to learn the
+    shape; `render_brief` is what actually reaches the tablet. Two sources of truth drift,
+    so the skeleton in the document is parsed and held against a fully populated render:
+    rename a section in one place and this fails.
+    """
+
+    REFERENCE = (Path(__file__).resolve().parents[1]
+                 / "skills/eink/references/review-document.md")
+
+    def skeleton_headings(self):
+        text = self.REFERENCE.read_text()
+        fence = text.split("```markdown", 1)[1].split("```", 1)[0]
+        return [line.lstrip("# ").strip() for line in fence.splitlines()
+                if line.startswith("## ")]
+
+    def full_brief(self):
+        pr = {
+            "number": 1, "title": "t",
+            "what": "w", "why": "y", "wider": "x",
+            "question": "q?", "files": 2, "additions": 10, "deletions": 3,
+            "judgement_lines": 9, "checked": ["read the callers"],
+            "not_checked": ["the plugin"],
+            "set_aside": [{"what": "a rename", "why": "mechanical"}],
+            "surface": [{"surface": "HTTP", "effect": "none"}],
+            "bottom_line": "The guard belongs one layer down; nothing else here is risky.",
+        }
+        return review.render_brief(pr, [finding()])[0]
+
+    def test_every_section_in_the_recipe_is_rendered(self):
+        brief = self.full_brief()
+        headings = self.skeleton_headings()
+        self.assertGreaterEqual(len(headings), 5, "the recipe lost its skeleton")
+        for heading in headings:
+            self.assertIn(f"## {heading}", brief, f"the recipe names '{heading}' but the page does not have it")
+
+    def test_the_labels_in_the_recipe_are_the_labels_the_linter_accepts(self):
+        text = self.REFERENCE.read_text()
+        for label in review.LABELS:
+            self.assertIn(label, text, f"label {label!r} is accepted but not documented")
+
     """A change to a contract is what the reviewer has to agree with.
 
     The implementation can be read later; a proto, schema or OpenAPI change is the thing
@@ -326,7 +450,7 @@ class InterfaceChangesTest(unittest.TestCase):
 
 **Wider system** - identity-service mints it, the workspace API consumes it
 
-## Checks
+## What I checked
 
 - not run
 """
@@ -355,10 +479,10 @@ class InterfaceChangesTest(unittest.TestCase):
         problems = review.lint_brief(self.BRIEF, interfaces=["proto/session.proto"])
         rules = {rule: message for _line, rule, message in problems}
         self.assertIn("missing-interfaces", rules)
-        self.assertIn("matters less", rules["missing-interfaces"])
+        self.assertIn("Change surface", rules["missing-interfaces"])
 
     def test_the_section_is_enough_to_satisfy_it(self):
-        brief = self.BRIEF.replace("## Checks", "## Interfaces\n\n- `Session.scope: string` is new; old clients ignore it.\n\n## Checks")
+        brief = self.BRIEF.replace("## What I checked", "## Interfaces\n\n- `Session.scope: string` is new; old clients ignore it.\n\n## What I checked")
         rules = [rule for _line, rule, _message in review.lint_brief(brief, interfaces=["proto/session.proto"])]
         self.assertNotIn("missing-interfaces", rules)
 

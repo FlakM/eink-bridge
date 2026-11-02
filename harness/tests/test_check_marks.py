@@ -17,8 +17,24 @@ BRIEF = """## Marks
 - C → missing.rs:1
 """
 
+INLINE_BRIEF = """## Read these first
+
+- **A** `issue (blocking)` The field is required and breaks clients. Mark it optional. src/a.rs:3
+- **B** `suggestion` No test on the last page. Cover it. src/a.rs:11
+"""
+
 
 class MarkTests(unittest.TestCase):
+    def test_a_finding_carries_its_place_on_its_own_line(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / "src").mkdir()
+            (root / "src" / "a.rs").write_text("\n".join(f"line {i}" for i in range(1, 11)))
+            results = check_marks.check(INLINE_BRIEF, [directory])
+            by_letter = {letter: (ref, reason) for letter, ref, _, reason in results}
+            self.assertEqual(by_letter["A"], ("src/a.rs", None))
+            self.assertIn("has 10 lines", by_letter["B"][1])
+
     def test_a_mark_past_the_end_and_a_missing_file_are_reported(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
