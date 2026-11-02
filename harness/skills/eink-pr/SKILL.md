@@ -119,7 +119,7 @@ git worktree add --detach "~/programming/<org>/worktrees/pr-<n>/<repo>" FETCH_HE
 ## 3. The diff is already open — do not start a second editor
 
 When the widget launched this review it created the reading workspace, started
-`nvim --listen <socket> -c "DiffviewOpen <merge-base>..HEAD"`, and recorded `socket`,
+`nvim --listen <socket> -c "DiffviewOpen <merge-base>"`, and recorded `socket`,
 `pane_id` and `sha` in the registry. A PR with a registry entry needs **nothing** in this
 step. `EINK_PR_SOCKET` is also in the reading workspace's environment.
 
@@ -129,8 +129,12 @@ Only when you had to create the workspace yourself, start the editor in a **shel
 export EINK_PR_SOCKET=/run/user/$(id -u)/jump-pr-<n>-<repo>.sock
 herdr workspace create --cwd "<worktree-dir>" --label "💻 <repo-short> PR <n>: <short title>" --focus
 # -> .result.root_pane.pane_id
-herdr pane run <root_pane.pane_id> "nvim --listen $EINK_PR_SOCKET -c 'DiffviewOpen <merge-base>..HEAD'"
+direnv allow "<worktree-dir>"   # same-repo branches only, never a fork's .envrc
+herdr pane run <root_pane.pane_id> "nvim --listen $EINK_PR_SOCKET -c 'DiffviewOpen <merge-base>'"
 ```
+
+- **`DiffviewOpen <merge-base>`, not `<merge-base>..HEAD`**: the worktree is clean at the
+  head, so the diff is the same, but the right side is the real file and the LSP attaches.
 
 - **Never send `nvim ...` into a pane that already runs Neovim or an agent.** `pane run`
   delivers the command to the pane's foreground process, so it lands in the buffer as
