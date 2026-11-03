@@ -78,7 +78,11 @@ jobs:
           key: emulator-${{ hashFiles('android/**/*.gradle*', 'android/gradle/wrapper/gradle-wrapper.properties') }}
           restore-keys: emulator-
       - name: Instrumented suite
-        run: nix develop -c just test-emulator
+        # Straight into the emulator shell: `just test-emulator` would enter it from the
+        # default shell, which builds the server package and its tests first -- seven
+        # minutes of work the server job has already done, in a job that only needs a
+        # server binary and an emulator.
+        run: nix develop .#emulator -c ./android/scripts/emulator-test.sh
       - name: Keep the reports when it fails
         if: failure()
         uses: actions/upload-artifact@v4
