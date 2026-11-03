@@ -21,6 +21,12 @@ if [ -z "$SDK" ] || [ ! -d "$SDK" ]; then
     echo "error: ANDROID_HOME is not set; run this inside the dev shell (direnv, or nix develop)" >&2
     exit 1
 fi
+# The default shell's SDK deliberately has no emulator (it is a gigabyte the other jobs
+# do not need), so say which shell does instead of failing on a missing binary.
+if [ ! -x "$SDK/emulator/emulator" ]; then
+    echo "error: this SDK has no emulator; run 'nix develop .#emulator', or just test-emulator" >&2
+    exit 1
+fi
 
 if [ ! -e /dev/kvm ]; then
     echo "error: /dev/kvm is missing, so the emulator would crawl. Add the user to the kvm group." >&2
@@ -83,11 +89,11 @@ if ! curl -sf "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1; then
 fi
 
 # ── the emulator ─────────────────────────────────────────────────────────────
-# Every adb call below names the device: the tablet is often plugged in at the same time,
-# and an unqualified `adb shell` is "more than one device".
-# The emulator this run owns, by port. Picking "the first emulator adb lists" instead
-# once chose a serial that never answered while a healthy emulator booted on another port,
-# and the whole run waited four minutes for a device that was not there.
+# The emulator this run owns, by port, and every adb call below names it: the reader's
+# tablet is often plugged in at the same time, and an unqualified `adb shell` is "more
+# than one device". Picking "the first emulator adb lists" instead once chose a serial
+# that never answered while a healthy emulator booted on another port, and the whole run
+# waited four minutes for a device that was not there.
 EMULATOR_PORT="${EINK_EMULATOR_PORT:-5556}"
 SERIAL="emulator-$EMULATOR_PORT"
 
@@ -148,7 +154,7 @@ for _ in $(seq 1 120); do
 done
 if [ "$("$ADB" -s "$SERIAL" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" != "1" ]; then
     echo "error: $SERIAL never finished booting; the emulator's log:" >&2
-    tail -30 "$TMP/emulator.log" 2>/dev/null >&2
+    tail -30 "$TMP/emulator.log" >&2 2>/dev/null
     exit 1
 fi
 
