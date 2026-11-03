@@ -105,7 +105,9 @@ Both run on this machine; the hosted recogniser is an opt-in fallback.
 ```bash
 nix profile add nixpkgs#whisper-cpp nixpkgs#piper-tts
 mkdir -p ~/.local/share/eink-bridge/models && cd ~/.local/share/eink-bridge/models
-curl -LO https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin
+curl -LO https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin   # multilingual
+curl -LO https://huggingface.co/rhasspy/piper-voices/resolve/main/pl/pl_PL/darkman/medium/pl_PL-darkman-medium.onnx
+curl -LO https://huggingface.co/rhasspy/piper-voices/resolve/main/pl/pl_PL/darkman/medium/pl_PL-darkman-medium.onnx.json
 curl -LO https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx
 curl -LO https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json
 systemctl --user enable --now whisper-asr   # ~/.config/systemd/user/whisper-asr.service, port 8090
@@ -114,7 +116,8 @@ systemctl --user enable --now whisper-asr   # ~/.config/systemd/user/whisper-asr
 | Env var | Default | Description |
 |---|---|---|
 | `EINK_ASR_URL` | `http://127.0.0.1:8090` | whisper-server; empty disables voice |
-| `EINK_ASR_MODEL` | `small.en` | Label recorded in the note's provenance |
+| `EINK_ASR_MODEL` | `small` | Label recorded in the note's provenance |
+| `EINK_ASR_LANGUAGE` | `auto` | `auto` detects per capture and pins the first answer; `pl`, `en` or `pl,en` pins the first of the list |
 | `EINK_ASR_TIMEOUT_SECONDS` | `30` (max 120) | Bound on one transcription |
 | `EINK_ASR_OPENAI_ENABLED` | unset | `1` adds OpenAI `whisper-1` as the fallback (same key as OCR) |
 | `EINK_VOICE_LLM_URL` / `EINK_VOICE_LLM_MODEL` | the OCR Ollama | The cleaner for free-form edits; `EINK_VOICE_LLM_ENABLED=0` turns it off |
@@ -122,9 +125,17 @@ systemctl --user enable --now whisper-asr   # ~/.config/systemd/user/whisper-asr
 | `EINK_PIPER_BIN` | `piper` | The binary, when it is not on the service's PATH |
 
 The service gets the piper variables from
-`~/.config/systemd/user/eink-serve.service.d/voice.conf`. `small.en` is deliberate: the
-measurements in `docs/voice-comments.md` show accuracy saturates from tiny to medium and
-the errors are lexical, which the document vocabulary repairs deterministically.
+`~/.config/systemd/user/eink-serve.service.d/voice.conf`. The model is the **multilingual**
+`small`, not `small.en`: the same tablet is used in Polish and English, and an English-only
+model cannot be asked for anything else. Accuracy against English still saturates from tiny
+to medium and the errors that remain are lexical, which the document vocabulary repairs
+deterministically — see `docs/voice-comments.md`.
+
+Partials are transcribed off the websocket's receive loop, one at a time, and stop after
+20 s of audio; transcribing inline used to stop the audio being read for the length of the
+call, which is what made the tray look frozen. Expect the first words about 2 s after the
+reader starts talking: whisper encodes a 30 s window whatever the clip length, so ~1.5 s is
+the floor per answer on this CPU.
 
 ## Security notes
 

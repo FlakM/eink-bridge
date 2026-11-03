@@ -374,14 +374,15 @@
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
                 android:fontFamily="serif"
-                android:textSize="18sp"
-                android:textColor="#111111"
+                android:textSize="19sp"
+                android:textStyle="bold"
+                android:textColor="#000000"
                 android:maxLines="1"
                 android:ellipsize="end" />
 
             <Button
                 android:id="@+id/voiceDone"
-                style="@style/Widget.VoiceButton"
+                style="@style/Widget.VoiceButton.Primary"
                 android:text="Done" />
 
             <Button

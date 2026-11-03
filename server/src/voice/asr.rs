@@ -24,6 +24,61 @@ pub struct Asr {
     local: Option<Local>,
     cloud: Option<Cloud>,
     timeout: Duration,
+    /// What to ask for when the caller has no opinion. `auto` lets the recogniser decide
+    /// per clip, which is what makes one tablet usable by someone who thinks in two
+    /// languages; a fixed code pins every clip and skips the detection pass.
+    language: Language,
+}
+
+/// The language asked of the recogniser.
+///
+/// Auto is the default because the reader is not asked which language they are about to
+/// think in. A fixed code exists for the case where detection keeps flipping on short
+/// clips: `EINK_ASR_LANGUAGE=pl` pins every capture, and the capture itself pins the first
+/// language it detects so a note cannot change language halfway through.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Language {
+    Auto,
+    Fixed(String),
+}
+
+impl Language {
+    fn from_env() -> Self {
+        match std::env::var("EINK_ASR_LANGUAGE") {
+            Ok(value) => Self::parse(&value),
+            Err(_) => Self::Auto,
+        }
+    }
+
+    fn from_env_value(value: Option<&str>) -> Self {
+        value.map(Self::parse).unwrap_or(Self::Auto)
+    }
+
+    pub fn parse(value: &str) -> Self {
+        let trimmed = value.trim().to_ascii_lowercase();
+        if trimmed.is_empty() || trimmed == "auto" || trimmed == "detect" {
+            Self::Auto
+        } else {
+            // `pl,en` names a preference list; whisper takes one code per request, so the
+            // first is the pinned language and detection never runs.
+            Self::Fixed(trimmed.split(',').next().unwrap_or("pl").trim().to_string())
+        }
+    }
+
+    /// The form value to send, or None to let the server's own default stand.
+    fn request_value(&self) -> Option<&str> {
+        match self {
+            Self::Auto => None,
+            Self::Fixed(code) => Some(code.as_str()),
+        }
+    }
+
+    pub fn label(&self) -> String {
+        match self {
+            Self::Auto => "auto".into(),
+            Self::Fixed(code) => code.clone(),
+        }
+    }
 }
 
 struct Local {
@@ -50,7 +105,9 @@ impl Asr {
         }
         .map(|url| Local {
             url,
-            model: std::env::var("EINK_ASR_MODEL").unwrap_or_else(|_| "small.en".into()),
+            // Multilingual by default: the same server answers Polish and English, and an
+            // English-only model cannot be asked for anything else.
+            model: std::env::var("EINK_ASR_MODEL").unwrap_or_else(|_| "small".into()),
         });
         let cloud = enabled(std::env::var("EINK_ASR_OPENAI_ENABLED").ok().as_deref())
             .then(openai_key)
@@ -77,6 +134,7 @@ impl Asr {
         if let Some(local) = &local {
             tracing::info!(url = %local.url, model = %local.model, "voice: local recogniser");
         }
+        tracing::info!(language = %Language::from_env().label(), "voice: language");
         if cloud.is_some() {
             tracing::info!("voice: hosted recogniser enabled as the fallback");
         }
@@ -105,6 +163,7 @@ impl Asr {
             local,
             cloud,
             timeout,
+            language: Language::from_env(),
         }
     }
 
@@ -114,30 +173,44 @@ impl Asr {
 
     /// Which recogniser will answer first, for the `ready` frame.
     pub fn provenance(&self) -> SttProvenance {
+        let language = self.language.label();
         match (&self.local, &self.cloud) {
             (Some(local), _) => SttProvenance {
                 provider: "whisper".into(),
                 model: local.model.clone(),
-                language: "en".into(),
+                language,
             },
             (None, Some(cloud)) => SttProvenance {
                 provider: "openai".into(),
                 model: cloud.model.clone(),
-                language: "en".into(),
+                language,
             },
             (None, None) => SttProvenance::default(),
         }
+    }
+
+    /// The language to ask for, given what this capture has already answered.
+    pub fn pinned(&self) -> Option<&str> {
+        self.language.request_value()
     }
 
     /// The transcript of a WAV clip. No initial prompt: feeding whisper the document's
     /// vocabulary made it drop the first clause of a clip ("So um, reanchor.rs should
     /// refuse this. The index is enough." came back as "The index is enough."), and the
     /// repair pass in `clean` spells identifiers the document's way without it.
-    pub async fn transcribe(&self, wav: Vec<u8>) -> Result<Transcript, String> {
+    /// `language` overrides the configured one: a capture pins the first language it
+    /// detects so the rest of the note stays in it, instead of a short clip flipping the
+    /// whole transcript between languages.
+    pub async fn transcribe(
+        &self,
+        wav: Vec<u8>,
+        language: Option<&str>,
+    ) -> Result<Transcript, String> {
+        let language = language.or_else(|| self.language.request_value());
         let started = std::time::Instant::now();
         let mut failure = None;
         if let Some(local) = &self.local {
-            match self.local_call(local, wav.clone()).await {
+            match self.local_call(local, wav.clone(), language).await {
                 Ok(transcript) => {
                     observe("local", "ok", started);
                     return Ok(transcript);
@@ -150,7 +223,7 @@ impl Asr {
             }
         }
         if let Some(cloud) = &self.cloud {
-            match self.cloud_call(cloud, wav).await {
+            match self.cloud_call(cloud, wav, language).await {
                 Ok(transcript) => {
                     observe("openai", "ok", started);
                     return Ok(transcript);
@@ -165,8 +238,13 @@ impl Asr {
         Err(failure.unwrap_or_else(|| "no speech recogniser configured".into()))
     }
 
-    async fn local_call(&self, local: &Local, wav: Vec<u8>) -> Result<Transcript, String> {
-        let form = Form::new()
+    async fn local_call(
+        &self,
+        local: &Local,
+        wav: Vec<u8>,
+        language: Option<&str>,
+    ) -> Result<Transcript, String> {
+        let mut form = Form::new()
             .part(
                 "file",
                 Part::bytes(wav)
@@ -176,6 +254,9 @@ impl Asr {
             )
             .text("response_format", "verbose_json")
             .text("temperature", "0");
+        if let Some(code) = language {
+            form = form.text("language", code.to_string());
+        }
         let response = self
             .client
             .post(format!("{}/inference", local.url.trim_end_matches('/')))
@@ -194,11 +275,16 @@ impl Asr {
             .json()
             .await
             .map_err(|e| transport_error("local", &e))?;
-        parse_verbose(&body, "whisper", &local.model)
+        parse_verbose(&body, "whisper", &local.model, language)
     }
 
-    async fn cloud_call(&self, cloud: &Cloud, wav: Vec<u8>) -> Result<Transcript, String> {
-        let form = Form::new()
+    async fn cloud_call(
+        &self,
+        cloud: &Cloud,
+        wav: Vec<u8>,
+        language: Option<&str>,
+    ) -> Result<Transcript, String> {
+        let mut form = Form::new()
             .part(
                 "file",
                 Part::bytes(wav)
@@ -208,8 +294,10 @@ impl Asr {
             )
             .text("model", cloud.model.clone())
             .text("response_format", "verbose_json")
-            .text("language", "en")
             .text("temperature", "0");
+        if let Some(code) = language {
+            form = form.text("language", code.to_string());
+        }
         let response = self
             .client
             .post(&cloud.endpoint)
@@ -230,7 +318,7 @@ impl Asr {
             .json()
             .await
             .map_err(|e| transport_error("openai", &e))?;
-        parse_verbose(&body, "openai", &cloud.model)
+        parse_verbose(&body, "openai", &cloud.model, language)
     }
 }
 
@@ -249,7 +337,12 @@ impl Cloud {
 
 /// The `verbose_json` shape both whisper.cpp and OpenAI produce: `text`, and `segments`
 /// with an `avg_logprob` each. The clip's confidence is its worst segment.
-fn parse_verbose(body: &Value, provider: &str, model: &str) -> Result<Transcript, String> {
+fn parse_verbose(
+    body: &Value,
+    provider: &str,
+    model: &str,
+    requested: Option<&str>,
+) -> Result<Transcript, String> {
     if let Some(error) = body.get("error").and_then(Value::as_str) {
         return Err(format!("{provider} recogniser failed: {error}"));
     }
@@ -270,16 +363,13 @@ fn parse_verbose(body: &Value, provider: &str, model: &str) -> Result<Transcript
                 .fold(1.0f32, f32::min)
         })
         .unwrap_or(1.0);
+    // What it says it heard, else what was asked for, else unknown. Reporting a
+    // confident "en" for a Polish clip would be the wrong kind of tidy.
     let language = body["language"]
         .as_str()
-        .map(|l| {
-            if l == "english" {
-                "en".to_string()
-            } else {
-                l.to_string()
-            }
-        })
-        .unwrap_or_else(|| "en".into());
+        .map(normalise_language)
+        .or_else(|| requested.map(normalise_language))
+        .unwrap_or_else(|| "unknown".into());
     Ok(Transcript {
         text,
         confidence,
@@ -289,6 +379,22 @@ fn parse_verbose(body: &Value, provider: &str, model: &str) -> Result<Transcript
             language,
         },
     })
+}
+
+/// whisper.cpp answers with a full name ("english", "polish") or a code; OpenAI with a
+/// code. The note records the short one either way.
+fn normalise_language(value: &str) -> String {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "english" | "en" => "en".into(),
+        "polish" | "pl" => "pl".into(),
+        "german" | "de" => "de".into(),
+        "spanish" | "es" => "es".into(),
+        "french" | "fr" => "fr".into(),
+        "italian" | "it" => "it".into(),
+        "dutch" | "nl" => "nl".into(),
+        "ukrainian" | "uk" => "uk".into(),
+        other => other.to_string(),
+    }
 }
 
 fn observe(provider: &str, result: &str, started: std::time::Instant) {
@@ -317,10 +423,36 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn a_language_is_either_detected_per_clip_or_pinned() {
+        // The default has to work for someone who thinks in two languages: nothing is
+        // asked of the reader, and the recogniser decides per clip.
+        assert_eq!(Language::from_env_value(None), Language::Auto);
+        assert_eq!(Language::parse(""), Language::Auto);
+        assert_eq!(Language::parse("auto"), Language::Auto);
+        assert_eq!(Language::parse("PL"), Language::Fixed("pl".into()));
+        // A preference list keeps the first: whisper takes one code per request.
+        assert_eq!(Language::parse("pl,en"), Language::Fixed("pl".into()));
+        assert_eq!(Language::Auto.request_value(), None, "auto asks for nothing");
+        assert_eq!(Language::Fixed("en".into()).request_value(), Some("en"));
+    }
+
+    #[test]
+    fn the_language_reported_is_the_one_that_was_used() {
+        let english = json!({"text":"hi","segments":[],"language":"english"});
+        assert_eq!(parse_verbose(&english, "whisper", "m", None).unwrap().stt.language, "en");
+        let polish = json!({"text":"cześć","segments":[],"language":"polish"});
+        assert_eq!(parse_verbose(&polish, "whisper", "m", None).unwrap().stt.language, "pl");
+        // Nothing claimed and nothing asked: say so rather than assume English.
+        let silent = json!({"text":"x","segments":[]});
+        assert_eq!(parse_verbose(&silent, "whisper", "m", None).unwrap().stt.language, "unknown");
+        assert_eq!(parse_verbose(&silent, "whisper", "m", Some("pl")).unwrap().stt.language, "pl");
+    }
+
+    #[test]
     fn confidence_is_the_worst_segment_not_the_average() {
         let body = json!({"text":" drop the cache column.\n the index is enough\n","language":"english",
             "segments":[{"avg_logprob":-0.1},{"avg_logprob":-1.2},{"avg_logprob":-0.3}]});
-        let t = parse_verbose(&body, "whisper", "small.en").unwrap();
+        let t = parse_verbose(&body, "whisper", "small.en", None).unwrap();
         assert_eq!(
             t.text, "drop the cache column. the index is enough",
             "segments joined on one line"
@@ -336,14 +468,16 @@ mod tests {
             parse_verbose(
                 &json!({"error":"FFmpeg conversion failed."}),
                 "whisper",
-                "m"
+                "m",
+                None
             )
             .is_err()
         );
-        assert!(parse_verbose(&json!({"segments":[]}), "whisper", "m").is_err());
-        let silent = parse_verbose(&json!({"text":"","segments":[]}), "whisper", "m").unwrap();
+        assert!(parse_verbose(&json!({"segments":[]}), "whisper", "m", None).is_err());
+        let silent = parse_verbose(&json!({"text":"","segments":[]}), "whisper", "m", None).unwrap();
         assert_eq!(silent.text, "");
         assert_eq!(silent.confidence, 1.0);
+        assert_eq!(silent.stt.language, "unknown");
     }
 
     #[test]

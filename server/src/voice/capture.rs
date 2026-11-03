@@ -23,6 +23,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::path::PathBuf;
+use tokio::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::{info, warn};
@@ -35,10 +36,27 @@ const SILENCE_GATE_BYTES: usize = BYTES_PER_SECOND * 3 / 2;
 /// Loud audio that has to accumulate before quiet counts as "stopped talking", so a
 /// pen click or the tap that started the capture does not end it.
 const MIN_SPEECH_BYTES: usize = BYTES_PER_SECOND / 5;
+/// How much new audio justifies another partial. One transcription runs at a time, so
+/// this is a floor, not a cadence: on this machine a partial takes about a second, and the
+/// tray updates as fast as that allows.
 const PARTIAL_EVERY_BYTES: usize = BYTES_PER_SECOND / 2;
-/// Past this, re-transcribing the whole buffer falls behind the speaker; the tray keeps
-/// saying "listening" and the final answers for everything.
-const PARTIAL_CEILING_BYTES: usize = BYTES_PER_SECOND * 30;
+/// The shortest clip worth transcribing at all, measured rather than guessed. Two Polish
+/// sentences cut into slices and asked three times each:
+///
+///   1 s   russian, russian, russian   /  english, english, english
+///   2 s   polish,  polish,  polish    /  polish,  polish,  polish
+///   3 s   polish,  polish,  polish    /  polish,  polish,  polish
+///
+/// A one-second window does not carry enough speech to place the language, and the tray
+/// would show a Polish speaker's own words back in the wrong alphabet. Two seconds does,
+/// on both clips, every time.
+const PARTIAL_FIRST_BYTES: usize = BYTES_PER_SECOND * 2;
+/// Past this, a re-transcription of the whole buffer costs more than the text it adds, so
+/// the tray stops updating and the final answers for everything. Measured on the house
+/// machine: the multilingual model spends about 1.5 s on any clip (the encoder always
+/// reads a 30 s window), so a partial is worth doing while the buffer is short, and stops
+/// being worth doing once the decode behind it starts to show.
+const PARTIAL_CEILING_BYTES: usize = BYTES_PER_SECOND * 20;
 /// RMS of 16-bit samples above which a chunk is speech rather than room.
 const SPEECH_RMS: f64 = 700.0;
 /// A tablet that sends nothing at all for this long has lost its microphone or its
@@ -262,22 +280,65 @@ async fn handle(
     let mut partial_at = 0usize;
     let mut note: Option<Note> = None;
     let audio_route = format!("/api/sessions/{id}/voice/{capture}.wav");
+    // The language this capture is in. Auto-detect on the first answer, then pin it: a
+    // short clip between two sentences can flip the whole transcript's language, and a
+    // note that changes language halfway through is worse than a wrong guess at the top.
+    let configured: Option<String> = voice.asr.pinned().map(str::to_string);
+    let mut partial_language: Option<String> = configured.clone();
+    // Partial transcripts are transcribed off this loop. Transcribing on it stopped the
+    // audio being read for the whole call, so the tablet's chunks queued behind a reply
+    // about words the reader had already moved past -- at two seconds of speech the
+    // partials were permanently behind and the tray looked frozen.
+    let (partial_tx, mut partial_rx) = mpsc::channel::<(String, SttProvenance)>(2);
+    let mut partial_in_flight = false;
 
     let outcome = loop {
-        let message = match tokio::time::timeout(IDLE, frames.socket.recv()).await {
-            Ok(Some(Ok(message))) => message,
-            Ok(Some(Err(error))) => {
-                warn!(session_id = %id, %error, "voice socket error");
-                break "abandoned";
-            }
-            Ok(None) => break "abandoned",
-            Err(_) => {
-                let _ = frames
-                    .send(
-                        json!({"type":"error","message":"no word from the tablet for 30 seconds"}),
-                    )
-                    .await;
-                break "abandoned";
+        let message = tokio::select! {
+            message = tokio::time::timeout(IDLE, frames.socket.recv()) => match message {
+                Ok(Some(Ok(message))) => message,
+                Ok(Some(Err(error))) => {
+                    warn!(session_id = %id, %error, "voice socket error");
+                    break "abandoned";
+                }
+                Ok(None) => break "abandoned",
+                Err(_) => {
+                    let _ = frames
+                        .send(
+                            json!({"type":"error","message":"no word from the tablet for 30 seconds"}),
+                        )
+                        .await;
+                    break "abandoned";
+                }
+            },
+            spoken = partial_rx.recv() => {
+                partial_in_flight = false;
+                // A partial that was still in flight when the final landed describes the
+                // audio *before* it. Sending it now would replace the finished note with an
+                // older reading of the same words.
+                if note.is_some() {
+                    continue;
+                }
+                if let Some((text, stt)) = spoken {
+                    // Partials keep the language of the first one that answered, so a
+                    // note does not change alphabet halfway through. The final re-detects
+                    // from the whole clip, so a wrong guess here costs a partial, not the
+                    // note.
+                    if partial_language.is_none()
+                        && stt.language.len() <= 5
+                        && stt.language != "unknown"
+                    {
+                        partial_language = Some(stt.language.clone());
+                    }
+                    if !text.is_empty()
+                        && frames
+                            .send(json!({"type":"partial","text":text,"stt":stt}))
+                            .await
+                            .is_err()
+                    {
+                        break "abandoned";
+                    }
+                }
+                continue;
             }
         };
         match message {
@@ -297,6 +358,7 @@ async fn handle(
                         &dir,
                         &capture,
                         &audio_route,
+                        configured.as_deref(),
                     )
                     .await
                     {
@@ -312,25 +374,28 @@ async fn handle(
                         }
                     }
                 } else if gate.heard_speech()
+                    && !partial_in_flight
+                    && pcm.len() >= PARTIAL_FIRST_BYTES
                     && pcm.len() - partial_at >= PARTIAL_EVERY_BYTES
                     && pcm.len() <= PARTIAL_CEILING_BYTES
                 {
                     partial_at = pcm.len();
-                    match voice.asr.transcribe(wav(&pcm, SAMPLE_RATE)).await {
-                        Ok(transcript) if !transcript.text.is_empty() => {
-                            if frames
-                                .send(json!({"type":"partial","text":transcript.text}))
-                                .await
-                                .is_err()
-                            {
-                                break "abandoned";
+                    partial_in_flight = true;
+                    let audio = wav(&pcm, SAMPLE_RATE);
+                    let asr = Arc::clone(&voice);
+                    let tx = partial_tx.clone();
+                    let spoken = partial_language.clone();
+                    tokio::spawn(async move {
+                        match asr.asr.transcribe(audio, spoken.as_deref()).await {
+                            Ok(transcript) => {
+                                let _ = tx.send((transcript.text, transcript.stt)).await;
+                            }
+                            Err(error) => {
+                                warn!(error = %error, "partial transcription failed");
+                                let _ = tx.send((String::new(), SttProvenance::default())).await;
                             }
                         }
-                        Ok(_) => {}
-                        Err(error) => {
-                            warn!(session_id = %id, error, "partial transcription failed")
-                        }
-                    }
+                    });
                 }
             }
             Message::Binary(_) => {}
@@ -352,6 +417,7 @@ async fn handle(
                             &dir,
                             &capture,
                             &audio_route,
+                            configured.as_deref(),
                         )
                         .await
                         {
@@ -447,13 +513,14 @@ async fn finalise(
     dir: &std::path::Path,
     capture: &str,
     audio_route: &str,
+    language: Option<&str>,
 ) -> Result<Note, String> {
     if !gate.heard_speech() {
         return Err("nothing was heard".into());
     }
     let transcript = voice
         .asr
-        .transcribe(wav(pcm, SAMPLE_RATE))
+        .transcribe(wav(pcm, SAMPLE_RATE), language)
         .await
         .map_err(|e| format!("the recogniser failed: {e}"))?;
     let raw = transcript.text;

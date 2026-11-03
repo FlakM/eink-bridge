@@ -61,6 +61,19 @@ other, and the largest model was *worse* than base because it "corrected" more
 aggressively (`EINK_TOKEN` became `INC_tokencheck`). A 30 s comment costs 5 s with
 small.en and 54 s with medium. The model is not the bottleneck.
 
+**The model is multilingual, and the language is detected.** `small.en` cannot be asked
+for Polish, and the reader is not going to be asked which language they are about to think
+in. The shipped model is `small` (multilingual) with `-l auto`; the same clips come back as
+`polish` and `english` respectively, and `EINK_ASR_LANGUAGE=pl` pins it when detection
+keeps flipping on short clips. Cost: about 1.5 s per clip whatever its length, because
+whisper encodes a 30 s window either way — that is the floor on how fast a partial can
+arrive, and the reason partials stop after 20 s of audio.
+
+Measured on the Polish side, two dictated notes through `small` multilingual:
+`Tak, ta kolumna cachą jest niepotrzebna, sam indyks wystarczy.` — the domain words are
+wrong exactly as they are in English ("cache", "indeks"), which is what the vocabulary pass
+is for; the sentence structure, punctuation and language were right.
+
 **The errors are lexical, and the same at every size.** What breaks is identifiers:
 `reanchor.rs` → "re-anchor.RS", `EINK_TOKEN` → "INK underscore token" or "EINC_ token",
 `lasso_bbox` → "Lasso B-Box", `WebSocket` → "web socket". Prose is nearly perfect. So the
@@ -76,8 +89,8 @@ the model keeps mangling, and record which provider answered in the payload.
 ```bash
 nix profile add nixpkgs#whisper-cpp
 mkdir -p ~/.local/share/eink-bridge/models
-curl -L -o ~/.local/share/eink-bridge/models/ggml-small.en.bin \
-  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin
+curl -L -o ~/.local/share/eink-bridge/models/ggml-small.bin \
+  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin
 ```
 
 `~/.config/systemd/user/whisper-asr.service` — resident, loopback only, 16 threads so the
@@ -86,8 +99,8 @@ e-ink server still gets a core:
 ```ini
 [Service]
 ExecStart=%h/.nix-profile/bin/whisper-server \
-    -m %h/.local/share/eink-bridge/models/ggml-small.en.bin \
-    --host 127.0.0.1 --port 8090 -t 16 -l en --suppress-nst --convert
+    -m %h/.local/share/eink-bridge/models/ggml-small.bin \
+    --host 127.0.0.1 --port 8090 -t 16 -l auto --suppress-nst --convert
 Restart=on-failure
 [Install]
 WantedBy=default.target

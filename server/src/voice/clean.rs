@@ -12,10 +12,19 @@ pub struct Cleaned {
 }
 
 /// Sounds, not words: dropped wherever they are.
-const FILLERS: &[&str] = &["um", "uh", "uhm", "erm", "hmm", "mhm", "mm"];
+const FILLERS: &[&str] = &[
+    "um", "uh", "uhm", "erm", "hmm", "mhm", "mm",
+    // Polish hesitation: the sound, not a word, so nothing is lost by dropping it.
+    "yyy", "eee", "yhm", "eeeem", "hmmm",
+];
 /// Words that are fillers only when the recogniser set them off as their own clause.
 /// "I like this" keeps its "like".
-const CLAUSE_FILLERS: &[&str] = &["like", "you know", "i mean", "sort of", "kind of"];
+const CLAUSE_FILLERS: &[&str] = &[
+    "like", "you know", "i mean", "sort of", "kind of",
+    // Polish hedges that carry no content. "znaczy" is deliberately absent: it is also
+    // the verb "means", and dropping it changes what the sentence says.
+    "jakby", "w sensie", "no wiesz", "jak gdyby",
+];
 /// Throat-clearing at the start of a sentence: "so um drop the cache column".
 const OPENERS: &[&str] = &["so", "well", "okay", "ok", "right", "yeah"];
 /// What a speaker says before replacing what they just said. "or" is deliberately not
@@ -29,9 +38,16 @@ const CORRECTIONS: &[&str] = &[
     "i mean",
     "sorry",
     "no",
+    // Polish self-corrections.
+    "nie czekaj", "nie, czekaj", "właściwie nie", "to nie tak", "chodziło mi",
 ];
 /// Spoken punctuation inside an identifier: "eink underscore token".
-const SPOKEN_PUNCTUATION: &[&str] = &["underscore", "dot", "dash", "hyphen", "slash", "point"];
+const SPOKEN_PUNCTUATION: &[&str] = &[
+    // English
+    "underscore", "dot", "dash", "hyphen", "slash", "point",
+    // Polish: the same characters, named the way the reader actually says them.
+    "podkreślnik", "podkreślenie", "kropka", "kropkę", "myślnik", "kreska", "ukośnik",
+];
 /// Words that carry no content, so a rewrite may add or drop them freely.
 const STOP_WORDS: &[&str] = &[
     "a", "an", "the", "is", "are", "was", "were", "be", "been", "being", "am", "to", "of", "in",
@@ -43,6 +59,15 @@ const STOP_WORDS: &[&str] = &[
     "really", "um", "uh", "like", "mean", "know", "well", "okay", "ok", "one", "ones", "thing",
     "things", "into", "from", "up", "down", "out", "about", "over", "have", "has", "had", "get",
     "got", "make", "made", "let", "lets", "s", "t", "re", "ve", "ll", "d", "m",
+    // Polish function words. Without them a Polish note's rewritten form is compared
+    // word for word against the raw and rejected for adding an innocent "się".
+    "i", "w", "we", "z", "ze", "na", "do", "od", "po", "o", "że", "ze", "to", "jest",
+    "są", "być", "by", "była", "był", "będzie", "nie", "tak", "się", "ale", "jak",
+    "już", "też", "tylko", "jeszcze", "bardzo", "można", "trzeba", "przez", "przy",
+    "dla", "czy", "co", "który", "która", "które", "ten", "ta", "te", "tego", "tym",
+    "ich", "jego", "jej", "mi", "ci", "go", "mu", "nas", "was", "ja", "ty", "on",
+    "ona", "ono", "my", "wy", "oni", "tu", "tam", "wtedy", "potem", "teraz", "no",
+    "więc", "bo", "gdy", "kiedy", "gdzie", "dlaczego", "żeby", "aby", "oraz", "lub",
 ];
 
 /// The identifier-like words of a document: what a spoken note can be matched against.
@@ -111,8 +136,11 @@ fn is_term_of_art(word: &str) -> bool {
 }
 
 fn alnum(word: &str) -> String {
+    // Unicode, not ASCII: this run is used on Polish as well as English, and an
+    // ASCII filter turns "żółć" into nothing at all — a word that exists in the note and
+    // nowhere in the guard's view of it.
     word.chars()
-        .filter(char::is_ascii_alphanumeric)
+        .filter(|c| c.is_alphanumeric())
         .flat_map(char::to_lowercase)
         .collect()
 }
@@ -325,7 +353,7 @@ pub fn content_words(text: &str) -> HashSet<String> {
         if whole.len() >= 2 && !STOP_WORDS.contains(&whole.as_str()) {
             words.insert(whole);
         }
-        for part in word.split(|c: char| !c.is_ascii_alphanumeric()) {
+        for part in word.split(|c: char| !c.is_alphanumeric()) {
             let part = part.to_ascii_lowercase();
             if part.len() >= 2 && !STOP_WORDS.contains(&part.as_str()) {
                 words.insert(part);
@@ -552,6 +580,36 @@ mod tests {
         );
         let c = clean("the web socket drops, lasso b-box too.", &vocab());
         assert_eq!(c.text, "The WebSocket drops, lasso_bbox too.");
+    }
+
+    #[test]
+    fn a_polish_hesitation_sound_is_filler_not_a_word() {
+        let c = clean("yyy, to jest notatka", &vocab());
+        assert_eq!(c.text, "To jest notatka.");
+    }
+
+    #[test]
+    fn a_polish_speaker_spells_an_identifier_the_polish_way() {
+        // "re-anchor kropka rs" is how a Polish speaker says `reanchor.rs` out loud.
+        let c = clean("re-anchor kropka rs wywala notkę", &vocab());
+        assert_eq!(c.text, "reanchor.rs wywala notkę.");
+        assert_eq!(c.repairs.len(), 1);
+    }
+
+    #[test]
+    fn a_polish_self_correction_keeps_the_correction() {
+        // The same rule as "the second one, no wait, the third": what it replaced goes.
+        let c = clean("pierwsza wersja, nie czekaj, druga wersja", &vocab());
+        assert_eq!(c.text, "Druga wersja.");
+    }
+
+    #[test]
+    fn the_guard_does_not_miss_a_polish_word_for_being_unaccented() {
+        // "żółć" is entirely non-ASCII: an ASCII filter erased it, so a cleaner could
+        // have replaced it with anything and the guard would not have noticed.
+        assert!(content_words("żółć").contains("żółć"));
+        assert!(!guard("zostaw żółć", "zostaw czerwień", &[]));
+        assert!(guard("zostaw żółć", "żółć zostaw", &[]));
     }
 
     #[test]

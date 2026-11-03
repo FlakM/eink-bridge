@@ -56,7 +56,8 @@ impl Cleaner {
         let prompt = format!(
             "Rewrite the note below following the instruction. Rules: add nothing the note does not say; \
              keep every identifier, file name and number exactly as written; keep hedges such as \
-             \"I think\" and \"maybe\"; do not summarise, translate or reorder unless the instruction asks. \
+             \"I think\", \"maybe\", \"chyba\", \"może\"; write in the language the note is already in and \
+             never translate it; do not summarise or reorder unless the instruction asks. \
              Output only the rewritten note.\n\nInstruction: {instruction}\n\nNote: {text}"
         );
         let response = self
