@@ -34,6 +34,62 @@
         };
         androidSdk = androidComposition.androidsdk;
 
+        # The emulator and its system image are most of a gigabyte, and only the
+        # instrumented suite needs them, so they live in their own shell. `just
+        # test-emulator` enters it; every other job keeps the small SDK.
+        androidEmulatorComposition = pkgs.androidenv.composeAndroidPackages {
+          buildToolsVersions = [ "35.0.0" "34.0.0" ];
+          platformVersions = [ "35" "34" ];
+          includeEmulator = true;
+          includeSystemImages = true;
+          systemImageTypes = [ "google_apis" ];
+          abiVersions = [ "x86_64" ];
+          includeNDK = false;
+        };
+        androidEmulatorSdk = androidEmulatorComposition.androidsdk;
+
+        # Both Android shells need the same two pieces of local setup; only the SDK and
+        # the packages differ. The emulator shell leaves out the built CLI: it needs a
+        # compiler for the test server, not the server's own package (which would be
+        # built again on every CI run just to enter a shell).
+        androidShell =
+          { sdkPath, extraPackages }:
+          craneLib.devShell {
+            checks = { inherit cargoArtifacts; };
+            ANDROID_HOME = sdkPath;
+            ANDROID_SDK_ROOT = sdkPath;
+            packages = [
+              pkgs.rust-analyzer
+              pkgs.just
+              pkgs.cargo-watch
+              pkgs.cargo-llvm-cov
+              pkgs.cargo-nextest
+              pkgs.jdk17
+              pkgs.curl
+              # Pinned, not ambient: the watcher and channel tests run Node with
+              # `--experimental-strip-types`, which a runner's older Node does not have.
+              pkgs.nodejs_22
+            ] ++ extraPackages;
+            shellHook = let
+              aapt2Path = "${sdkPath}/build-tools/35.0.0/aapt2";
+            in ''
+              # Generate local.properties pointing at the nix Android SDK
+              if [ -d android ]; then
+                printf 'sdk.dir=${sdkPath}\n' > android/local.properties
+              fi
+              # Tell AGP to use the nix-patched aapt2 instead of the Maven one
+              # (the Maven binary has /lib64/ld-linux-x86-64.so.2 as interpreter
+              # which doesn't exist on NixOS). We write this to ~/.gradle/gradle.properties
+              # because it's a Gradle project property that must be set before transforms run.
+              mkdir -p "''${HOME}/.gradle"
+              if ! grep -q 'aapt2FromMavenOverride' "''${HOME}/.gradle/gradle.properties" 2>/dev/null; then
+                printf '\nandroid.aapt2FromMavenOverride=${aapt2Path}\n' >> "''${HOME}/.gradle/gradle.properties"
+              else
+                sed -i 's|android.aapt2FromMavenOverride=.*|android.aapt2FromMavenOverride=${aapt2Path}|' "''${HOME}/.gradle/gradle.properties"
+              fi
+            '';
+          };
+
         commonArgs = {
           src = pkgs.lib.cleanSourceWith {
             src = ./server;
@@ -102,40 +158,16 @@
           inherit harness einkChannel;
         };
 
-        devShells.default = craneLib.devShell {
-          checks = { inherit cargoArtifacts; };
-          ANDROID_HOME = "${androidSdk}/libexec/android-sdk";
-          ANDROID_SDK_ROOT = "${androidSdk}/libexec/android-sdk";
-          packages = with pkgs; [
-            rust-analyzer
-            just
-            cargo-watch
-            cargo-llvm-cov
-            cargo-nextest
-            androidSdk
-            jdk17
-            einkBridge
-            einkChannel
-          ];
-          shellHook = let
-            sdkPath = "${androidSdk}/libexec/android-sdk";
-            aapt2Path = "${sdkPath}/build-tools/35.0.0/aapt2";
-          in ''
-            # Generate local.properties pointing at the nix Android SDK
-            if [ -d android ]; then
-              printf 'sdk.dir=${sdkPath}\n' > android/local.properties
-            fi
-            # Tell AGP to use the nix-patched aapt2 instead of the Maven one
-            # (the Maven binary has /lib64/ld-linux-x86-64.so.2 as interpreter
-            # which doesn't exist on NixOS). We write this to ~/.gradle/gradle.properties
-            # because it's a Gradle project property that must be set before transforms run.
-            mkdir -p "''${HOME}/.gradle"
-            if ! grep -q 'aapt2FromMavenOverride' "''${HOME}/.gradle/gradle.properties" 2>/dev/null; then
-              printf '\nandroid.aapt2FromMavenOverride=${aapt2Path}\n' >> "''${HOME}/.gradle/gradle.properties"
-            else
-              sed -i 's|android.aapt2FromMavenOverride=.*|android.aapt2FromMavenOverride=${aapt2Path}|' "''${HOME}/.gradle/gradle.properties"
-            fi
-          '';
+        devShells.default = androidShell {
+          sdkPath = "${androidSdk}/libexec/android-sdk";
+          extraPackages = [ androidSdk einkBridge einkChannel ];
+        };
+
+        # The instrumented suite's shell: the same tools, plus an emulator and a
+        # `system-images;android-34;google_apis;x86_64` image to boot it from.
+        devShells.emulator = androidShell {
+          sdkPath = "${androidEmulatorSdk}/libexec/android-sdk";
+          extraPackages = [ androidEmulatorSdk ];
         };
       }
     );
