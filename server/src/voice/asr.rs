@@ -44,10 +44,7 @@ pub enum Language {
 
 impl Language {
     fn from_env() -> Self {
-        match std::env::var("EINK_ASR_LANGUAGE") {
-            Ok(value) => Self::parse(&value),
-            Err(_) => Self::Auto,
-        }
+        Self::from_env_value(std::env::var("EINK_ASR_LANGUAGE").ok().as_deref())
     }
 
     fn from_env_value(value: Option<&str>) -> Self {
@@ -432,20 +429,48 @@ mod tests {
         assert_eq!(Language::parse("PL"), Language::Fixed("pl".into()));
         // A preference list keeps the first: whisper takes one code per request.
         assert_eq!(Language::parse("pl,en"), Language::Fixed("pl".into()));
-        assert_eq!(Language::Auto.request_value(), None, "auto asks for nothing");
+        assert_eq!(
+            Language::Auto.request_value(),
+            None,
+            "auto asks for nothing"
+        );
         assert_eq!(Language::Fixed("en".into()).request_value(), Some("en"));
     }
 
     #[test]
     fn the_language_reported_is_the_one_that_was_used() {
         let english = json!({"text":"hi","segments":[],"language":"english"});
-        assert_eq!(parse_verbose(&english, "whisper", "m", None).unwrap().stt.language, "en");
+        assert_eq!(
+            parse_verbose(&english, "whisper", "m", None)
+                .unwrap()
+                .stt
+                .language,
+            "en"
+        );
         let polish = json!({"text":"cześć","segments":[],"language":"polish"});
-        assert_eq!(parse_verbose(&polish, "whisper", "m", None).unwrap().stt.language, "pl");
+        assert_eq!(
+            parse_verbose(&polish, "whisper", "m", None)
+                .unwrap()
+                .stt
+                .language,
+            "pl"
+        );
         // Nothing claimed and nothing asked: say so rather than assume English.
         let silent = json!({"text":"x","segments":[]});
-        assert_eq!(parse_verbose(&silent, "whisper", "m", None).unwrap().stt.language, "unknown");
-        assert_eq!(parse_verbose(&silent, "whisper", "m", Some("pl")).unwrap().stt.language, "pl");
+        assert_eq!(
+            parse_verbose(&silent, "whisper", "m", None)
+                .unwrap()
+                .stt
+                .language,
+            "unknown"
+        );
+        assert_eq!(
+            parse_verbose(&silent, "whisper", "m", Some("pl"))
+                .unwrap()
+                .stt
+                .language,
+            "pl"
+        );
     }
 
     #[test]
@@ -474,7 +499,8 @@ mod tests {
             .is_err()
         );
         assert!(parse_verbose(&json!({"segments":[]}), "whisper", "m", None).is_err());
-        let silent = parse_verbose(&json!({"text":"","segments":[]}), "whisper", "m", None).unwrap();
+        let silent =
+            parse_verbose(&json!({"text":"","segments":[]}), "whisper", "m", None).unwrap();
         assert_eq!(silent.text, "");
         assert_eq!(silent.confidence, 1.0);
         assert_eq!(silent.stt.language, "unknown");

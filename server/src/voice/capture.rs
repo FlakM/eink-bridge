@@ -23,9 +23,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::path::PathBuf;
-use tokio::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 /// The bounds of one capture, in the shape the rest of the API uses.

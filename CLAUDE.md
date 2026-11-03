@@ -120,7 +120,9 @@ systemctl --user enable --now whisper-asr   # ~/.config/systemd/user/whisper-asr
 | `EINK_ASR_LANGUAGE` | `auto` | `auto` detects per capture and pins the first answer; `pl`, `en` or `pl,en` pins the first of the list |
 | `EINK_ASR_TIMEOUT_SECONDS` | `30` (max 120) | Bound on one transcription |
 | `EINK_ASR_OPENAI_ENABLED` | unset | `1` adds OpenAI `whisper-1` as the fallback (same key as OCR) |
-| `EINK_VOICE_LLM_URL` / `EINK_VOICE_LLM_MODEL` | the OCR Ollama | The cleaner for free-form edits; `EINK_VOICE_LLM_ENABLED=0` turns it off |
+| `EINK_VOICE_LLM_PROVIDER` | `openai` when a key is configured, else `ollama` | Which model rewrites a spoken edit |
+| `EINK_VOICE_LLM_URL` / `EINK_VOICE_LLM_MODEL` | `https://api.openai.com/v1` + `gpt-4.1-mini`, or the OCR Ollama | The cleaner for edits, and its model |
+| `EINK_VOICE_LLM_ENABLED` | unset | `0` turns the cleaner off; the deterministic verbs still work |
 | `EINK_PIPER_VOICE` | unset | An `.onnx` voice; set it to enable `POST .../speech` |
 | `EINK_PIPER_BIN` | `piper` | The binary, when it is not on the service's PATH |
 
@@ -130,6 +132,12 @@ The service gets the piper variables from
 model cannot be asked for anything else. Accuracy against English still saturates from tiny
 to medium and the errors that remain are lexical, which the document vocabulary repairs
 deterministically — see `docs/voice-comments.md`.
+
+The cleaner that rewrites a spoken edit runs on the **hosted** model when a key is present,
+because it sits on the reader's critical path: a rewrite took 2.0 s through `gpt-4.1-mini`
+and 9.9 s through the house `qwen2.5vl:7b` on the same note. Neither is believed until
+`clean::guard` has checked that it invented no word. The initial note never touches a model
+at all — `clean::clean` is rules.
 
 Partials are transcribed off the websocket's receive loop, one at a time, and stop after
 20 s of audio; transcribing inline used to stop the audio being read for the length of the

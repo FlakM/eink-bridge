@@ -234,6 +234,13 @@ can be tested, and cannot surprise the reader:
 | `undo` | pop the edit stack |
 | `done` / `send` | accept into the session |
 
+Three of the verbs — `shorter`, `make it a question`, a free instruction — need a model.
+It is the hosted one when a key is configured, because the reader is standing at the tablet
+waiting: 2.0 s through `gpt-4.1-mini` against 9.9 s through the house `qwen2.5vl:7b` on the
+same Polish note, both still guarded against the raw transcript. The initial note never
+touches a model: `clean::clean` is rules, and that is what makes the text the agent reads
+predictable.
+
 Anything outside the set is "clean with this instruction" — unbounded, so it previews with
 `keep` / `undo` and is never applied silently. Only the closed verbs apply immediately.
 
