@@ -316,6 +316,40 @@ class AppFlowTest {
     }
 
     /**
+     * An agent that rewrites the brief while the reader has it open is seen.
+     *
+     * The update arrives as a WebSocket `version_updated` and the app reloads the page. If
+     * either half breaks, the reader keeps reviewing the old document and nobody notices
+     * -- which is worse than a page that refuses to load, because it looks fine.
+     */
+    @Test
+    fun anAgentUpdateReachesTheOpenPage() {
+        val id = newSession()
+        val activity = launch()
+        assertTrue("the session list did not show it", awaitSession(activity, title))
+        open(activity, title)
+        Page.awaitElementMap(activity.webView)
+
+        // The push can only arrive once the app's socket is up; the server's own count of
+        // tablet clients is the honest way to know, and it is the same signal the
+        // screenshot test needs.
+        awaitTabletListening(id)
+
+        val added = "The agent added this paragraph."
+        ServerUnderTest.updateContent(id, "# $title\n\n$added\n")
+
+        val deadline = System.currentTimeMillis() + 20_000
+        var texts = emptyList<String>()
+        while (System.currentTimeMillis() < deadline && texts.none { it.contains(added) }) {
+            // The page is being replaced while this runs: a script evaluated into the old
+            // document can be dropped, which is not a failure of the update.
+            texts = runCatching { Page.elementTexts(activity.webView) }.getOrElse { emptyList() }
+            if (texts.none { it.contains(added) }) Thread.sleep(200)
+        }
+        assertTrue("the page never showed the update: $texts", texts.any { it.contains(added) })
+    }
+
+    /**
      * The agent can ask the tablet what it is showing, and gets a picture.
      *
      * This runs the whole return path: the server's ask over the WebSocket, the app
@@ -331,18 +365,7 @@ class AppFlowTest {
         open(activity, title)
         Page.awaitElementMap(activity.webView)
 
-        // The socket connects asynchronously, so a "not delivered" answer is a retry, not
-        // a failure — the server reuses the pending request's id.
-        val askDeadline = System.currentTimeMillis() + 20_000
-        var ask = ServerUnderTest.requestScreenshot(id)
-        while (!ask.optBoolean("delivered")) {
-            if (System.currentTimeMillis() > askDeadline) {
-                throw AssertionError("no tablet ever listened for the ask: $ask")
-            }
-            Thread.sleep(300)
-            ask = ServerUnderTest.requestScreenshot(id)
-        }
-
+        val ask = awaitTabletListening(id)
         val requestId = ask.getString("id")
         val deadline = System.currentTimeMillis() + 25_000
         var png: ByteArray? = null
@@ -494,6 +517,27 @@ class AppFlowTest {
             if (bound.isEmpty()) Thread.sleep(200)
         }
         return bound
+    }
+
+    /**
+     * Wait until the server can see this app's socket, which is when a push can arrive.
+     *
+     * The socket connects asynchronously after the page opens. The server counts the
+     * sockets that connected with `?client=tablet`, so asking for a screenshot is a
+     * truthful probe: a "not delivered" answer is a retry, not a failure, and the server
+     * reuses the pending request's id.
+     */
+    private fun awaitTabletListening(id: String, timeoutMs: Long = 20_000): org.json.JSONObject {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        var ask = ServerUnderTest.requestScreenshot(id)
+        while (!ask.optBoolean("delivered")) {
+            if (System.currentTimeMillis() > deadline) {
+                throw AssertionError("no tablet ever listened for the session: $ask")
+            }
+            Thread.sleep(300)
+            ask = ServerUnderTest.requestScreenshot(id)
+        }
+        return ask
     }
 
     /** The groups the overlay is holding, once the page's search has answered. */

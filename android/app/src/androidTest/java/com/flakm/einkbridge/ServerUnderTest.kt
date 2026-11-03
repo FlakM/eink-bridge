@@ -114,6 +114,17 @@ internal object ServerUnderTest {
         }
     }
 
+    /** Replace the brief, the way `eink-review update` does. */
+    fun updateContent(id: String, markdown: String) {
+        val request = Request.Builder()
+            .url("$url/api/sessions/$id/content")
+            .put(markdown.toRequestBody("text/plain".toMediaType()))
+            .build()
+        client.newCall(request).execute().use { response ->
+            check(response.isSuccessful) { "update content failed: ${response.code}" }
+        }
+    }
+
     /** The detail record, which is where a submitted session's annotations live. */    fun detail(id: String): JSONObject {
         val request = Request.Builder().url("$url/api/sessions/$id").build()
         client.newCall(request).execute().use { response ->
