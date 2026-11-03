@@ -350,6 +350,34 @@ class AppFlowTest {
     }
 
     /**
+     * A review that ends somewhere else takes the tablet off the page.
+     *
+     * The agent submits from its own machine; the tablet is holding a page whose review is
+     * over. Leaving it there invites more notes into a session that will refuse them.
+     */
+    @Test
+    fun aSessionSubmittedElsewhereSendsTheTabletBackToTheList() {
+        val id = newSession()
+        val activity = launch()
+        assertTrue("the session list did not show it", awaitSession(activity, title))
+        open(activity, title)
+        Page.awaitElementMap(activity.webView)
+        awaitTabletListening(id)
+
+        ServerUnderTest.submit(id)
+
+        val deadline = System.currentTimeMillis() + 20_000
+        while (System.currentTimeMillis() < deadline && activity.showingReaderForTest()) {
+            Thread.sleep(200)
+        }
+        assertTrue("the tablet kept a finished page open", !activity.showingReaderForTest())
+        assertTrue(
+            "the list came back empty: ${titles(activity)}",
+            activity.sessionsForTest().any { it.title == title },
+        )
+    }
+
+    /**
      * The agent can ask the tablet what it is showing, and gets a picture.
      *
      * This runs the whole return path: the server's ask over the WebSocket, the app

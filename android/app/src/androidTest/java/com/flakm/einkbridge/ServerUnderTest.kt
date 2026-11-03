@@ -114,6 +114,18 @@ internal object ServerUnderTest {
         }
     }
 
+    /** End the review from elsewhere, the way the CLI or another agent would. */
+    fun submit(id: String) {
+        val body = JSONObject().put("annotations", org.json.JSONArray())
+        val request = Request.Builder()
+            .url("$url/api/sessions/$id/submit")
+            .post(body.toString().toRequestBody("application/json".toMediaType()))
+            .build()
+        client.newCall(request).execute().use { response ->
+            check(response.isSuccessful) { "submit failed: ${response.code}" }
+        }
+    }
+
     /** Replace the brief, the way `eink-review update` does. */
     fun updateContent(id: String, markdown: String) {
         val request = Request.Builder()
