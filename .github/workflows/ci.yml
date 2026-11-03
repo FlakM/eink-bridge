@@ -50,6 +50,43 @@ jobs:
       - name: Unit tests
         run: nix develop -c sh -c 'cd android && ./gradlew testDebugUnitTest'
 
+  # The instrumented suite: the real app, a real WebView, a real server, on an emulator.
+  # Everything below Robolectric is exercised here, which is where the two bugs of
+  # 2026-11-03 lived (a page function that did not exist, and a layout inflated as the
+  # wrong button class) — both invisible to unit tests.
+  emulator:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - name: Hardware acceleration
+        run: |
+          if [ ! -e /dev/kvm ]; then
+            echo "::error::/dev/kvm is missing; the emulator would take longer than the job"
+            exit 1
+          fi
+          ls -l /dev/kvm
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            ~/.android/avd
+          key: emulator-${{ hashFiles('android/**/*.gradle*', 'android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: emulator-
+      - name: Instrumented suite
+        run: nix develop -c just test-emulator
+      - name: Keep the reports when it fails
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: instrumented-reports
+          path: |
+            android/app/build/reports/androidTests/
+            android/app/build/outputs/androidTest-results/
+          if-no-files-found: ignore
+
   mutations:
     runs-on: ubuntu-latest
     # Every case rebuilds the server or the app; a cold run is slow, a hung one is worse.

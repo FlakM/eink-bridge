@@ -547,7 +547,10 @@ async fn a_capture_nobody_speaks_into_closes_itself() {
 
     speak(&mut socket, &silence(16.0)).await;
     let frame = next_frame(&mut socket).await;
-    assert_eq!(frame["type"], "error", "an empty capture has to end by itself");
+    assert_eq!(
+        frame["type"], "error",
+        "an empty capture has to end by itself"
+    );
     assert_eq!(frame["message"], "nothing was heard");
 }
 

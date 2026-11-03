@@ -1151,6 +1151,26 @@ class MainActivity : AppCompatActivity() {
         manager.deleteNotificationChannel("eink_updates")
     }
 
+
+    // ── test surface ─────────────────────────────────────────────────────────
+    // The instrumented suite drives the app through its own state rather than through
+    // Espresso matchers: the list is a RecyclerView fed by a coroutine, and matching on
+    // its views failed for reasons that had nothing to do with the app. These are the
+    // same entry points the buttons call.
+    internal fun sessionsForTest(): List<SessionInfo> = sessionViewModel.state.value.sessions
+
+    internal fun statusForTest(): String = serverUrlText.text.toString()
+
+    internal fun openSessionForTest(id: String) = openSession(id)
+
+    internal fun submitForTest() = submitAndGoBack()
+
+    /** What the voice tray is telling the reader, verbatim. */
+    internal fun voiceStateForTest(): String =
+        findViewById<TextView>(R.id.voiceState).text.toString()
+
+    internal fun boundGroupsForTest(): List<BindGroup> = penOverlay?.bindGroupsForTest().orEmpty()
+
     internal fun showRoutineStatus(message: String) {
         findViewById<TextView>(R.id.routineStatus).apply {
             removeCallbacks(hideRoutineStatus)

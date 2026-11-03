@@ -212,6 +212,11 @@ logs-recent n='50':
 test-android:
     cd android && ./gradlew testDebugUnitTest --console=plain -q
 
+# instrumented suite on an emulator: real app, real WebView, a server of its own.
+# Boots (or reuses) a headless emulator, runs one isolated eink-serve, cleans up after.
+test-emulator filter='':
+    ./android/scripts/emulator-test.sh {{filter}}
+
 # portable OpenCode watcher and Claude MCP-channel contracts
 test-delivery:
     python3 -m unittest discover -s harness/tests -v

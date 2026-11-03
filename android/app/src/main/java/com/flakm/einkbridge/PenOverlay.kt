@@ -1377,6 +1377,9 @@ internal class PenOverlay(
         }
     }
 
+    /** The groups a note is anchored to, for the instrumented suite. */
+    internal fun bindGroupsForTest(): List<BindGroup> = _bindGroups.toList()
+
     /** The server accepted the note: the words land on the group and the page draws the card. */
     fun setVoiceNote(groupId: Int, text: String, severity: String, noteJson: String) {
         val idx = _bindGroups.indexOfFirst { it.id == groupId }

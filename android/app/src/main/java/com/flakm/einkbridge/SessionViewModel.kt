@@ -144,7 +144,9 @@ internal class SessionViewModel(app: Application) : AndroidViewModel(app) {
         val cwd = origin?.let { if (it.has("cwd") && !it.isNull("cwd")) it.getString("cwd") else null }
         return SessionInfo(
             id = obj.getString("id"),
-            title = obj.optString("title", "(untitled)"),
+            // A JSON `null` is not a missing key: `optString` answers the string "null"
+            // for it, which is what the list showed for a session pushed without a title.
+            title = if (obj.isNull("title")) "(untitled)" else obj.optString("title", "(untitled)"),
             status = obj.getString("status"),
             createdAt = obj.getString("created_at"),
             updatedAt = obj.optString("updated_at", obj.getString("created_at")),

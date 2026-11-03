@@ -199,6 +199,13 @@ just verify-deploy # prove the running server is the build in ./result
 just ci            # full CI check
 ```
 
+`just test-emulator` is the instrumented suite: a headless emulator, a server on a
+temporary state directory, and four tests that drive the real app — the list, the rendered
+page, the page's own nearest-element search, and a submit reaching the server. It is the
+only layer that exercises a real WebView and the JS bridge, which is where two silent bugs
+lived (a page function that did not exist, and a layout inflated as the wrong button class).
+CI runs it on every push; it needs `/dev/kvm`.
+
 `just test` is the gate: the Rust suite (404 tests across 25 binaries, about three
 seconds), the tablet's 285 JVM tests, and the 85 harness tests. The server part is fast
 enough to run before every commit because `cargo nextest` runs the binaries in parallel,
@@ -337,6 +344,7 @@ be exercised in a unit test without racing every other test in the binary.
 | OCR: strokes, providers, the engine | `cargo test ocr::` then `cargo test --test ocr_handwriting_test -- --ignored` |
 | WebSocket gauge leak | `cargo test --test ws_metrics_test` |
 | The tablet's own logic | `just test-android` |
+| Android end to end (app + server + WebView) | `just test-emulator` — needs `/dev/kvm`, boots a headless AVD and its own server |
 | WebSocket heartbeat / half-open sockets | `cargo test --test ws_heartbeat_test` |
 | Startup failures (port in use) | `cargo test --test startup_test` |
 | Pagination and the session list | `cargo test --test api_edge_test` (`pages_` / `a_page_size`) |

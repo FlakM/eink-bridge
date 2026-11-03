@@ -11,10 +11,29 @@ emulator, including stylus/pen event injection.
 | Component (Robolectric) | MainActivity states, PenOverlay + MockPenController, SessionAdapter | Robolectric (JVM) |
 | Integration (HTTP) | AnnotationE2ETest: real Rust server + OkHttp round-trip | JUnit + spawned server |
 | Render goldens | Server-side HTML output snapshots | cargo test |
-| **Instrumented (emulator)** | **Nothing yet** | -- |
+| **Instrumented (emulator)** | `AppFlowTest`: the app against a real server in a real WebView | `just test-emulator`, and the `emulator` job in CI |
 
-The gap: no tests exercise the real Android touch pipeline, WebView JS bridge,
-or on-screen rendering. MockPenController bypasses the MotionEvent path entirely.
+**Built.** `android/app/src/androidTest/` holds the suite; `android/scripts/emulator-test.sh`
+boots a headless emulator, starts an `eink-serve` on a temporary XDG state directory, runs
+`connectedDebugAndroidTest`, and tears both down. `just test-emulator` is the whole thing,
+and `.github/workflows/ci.yml` runs it on every push.
+
+What it covers, in the order a failure would hurt:
+
+| Test | What breaks it |
+|---|---|
+| `theAppListsASessionTheServerHas` | the list, the HTTP client, the connection status |
+| `openingASessionRendersTheDocumentInTheWebView` | the page, the CSS, the injected JS, the WebView itself |
+| `everyBlockOnThePageResolvesToItself` | `__einkFindNearestElement` — the function whose absence made every voice tap do nothing |
+| `aSubmittedNoteReachesTheServer` | submit → the server marking the session |
+
+Deliberately not there: a synthetic *tap* on the page. That path runs screen coordinates
+through the Onyx ink transform, and an emulator has no Onyx SDK and no viewport report to
+transform from — the test would fail for a reason that is not the app's. The search is
+covered directly, its input by `BindGestureHandlerTest`, and the finger by the real tablet.
+
+Still open from the plan below: stylus event injection (the emulator cannot send
+`TOOL_TYPE_STYLUS`; only the device can), and the render goldens.
 
 ---
 
