@@ -32,8 +32,11 @@ jobs:
       - name: Assets
         run: nix develop -c just lint-assets
       - name: Harness tests
+        # The justfile recipe, not the unittest command: it installs the channel's node
+        # dependencies first, and they are not in the repo. Calling the runner directly
+        # here is how three delivery tests stayed red without anyone noticing.
         # Includes the skill-flag check, which builds the CLI on first use.
-        run: nix develop -c python3 -m unittest discover -s harness/tests -v
+        run: nix develop -c just harness-test
 
   android:
     runs-on: ubuntu-latest
@@ -72,7 +75,6 @@ jobs:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-            ~/.android/avd
           key: emulator-${{ hashFiles('android/**/*.gradle*', 'android/gradle/wrapper/gradle-wrapper.properties') }}
           restore-keys: emulator-
       - name: Instrumented suite

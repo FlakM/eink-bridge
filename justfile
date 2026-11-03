@@ -219,12 +219,21 @@ test-android:
 test-emulator filter='':
     nix develop .#emulator -c ./android/scripts/emulator-test.sh {{filter}}
 
+# the channel's node dependencies live in node_modules, which is not in the repo, so a
+# fresh clone -- and every CI job -- had none of them and the delivery tests failed at
+# module resolution
+harness-deps:
+    @if [ ! -d harness/channels/eink-channel/node_modules ]; then \
+        echo "installing the channel's node dependencies"; \
+        cd harness/channels/eink-channel && npm ci --no-audit --no-fund; \
+    fi
+
 # portable OpenCode watcher and Claude MCP-channel contracts
-test-delivery:
+test-delivery: harness-deps
     python3 -m unittest discover -s harness/tests -v
 
 # all harness tests: delivery, marks, review core, registry, assets
-harness-test:
+harness-test: harness-deps
     python3 -m unittest discover -s harness/tests -v
 
 # deterministic e-ink PR review scenarios (no model, no network)
