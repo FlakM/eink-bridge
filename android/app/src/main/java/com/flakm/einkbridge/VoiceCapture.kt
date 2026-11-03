@@ -225,6 +225,9 @@ internal class MicrophoneSource : AudioSource {
             Log.w(TAG, "microphone did not initialise")
             return
         }
+        Log.i(TAG, "microphone started rate=$VOICE_SAMPLE_RATE buffer=${maxOf(min, VOICE_CHUNK_BYTES * 8)}")
+        var chunks = 0
+        var shortReads = 0
         try {
             record.startRecording()
             val chunk = ByteArray(VOICE_CHUNK_BYTES)
@@ -232,12 +235,23 @@ internal class MicrophoneSource : AudioSource {
                 var filled = 0
                 while (filled < chunk.size && !stop()) {
                     val n = record.read(chunk, filled, chunk.size - filled)
-                    if (n <= 0) return
+                    if (n <= 0) {
+                        // A dying read used to end the capture's audio with no trace at
+                        // all: the tray kept counting up while the microphone thread was
+                        // already gone. Say so, and stop rather than spin.
+                        Log.w(TAG, "microphone read failed n=$n after $chunks chunks")
+                        return
+                    }
+                    if (n < chunk.size - filled) shortReads++
                     filled += n
                 }
-                if (filled == chunk.size) onChunk(chunk.copyOf())
+                if (filled == chunk.size) {
+                    chunks++
+                    onChunk(chunk.copyOf())
+                }
             }
         } finally {
+            Log.i(TAG, "microphone stopped chunks=$chunks shortReads=$shortReads stopped=${stop()}")
             runCatching { record.stop() }
             record.release()
         }
@@ -263,6 +277,11 @@ internal class VoiceSession(
     private var ws: WebSocket? = null
     @Volatile private var micStopped = false
     @Volatile private var closed = false
+    /// The server said how this ended (a final, a done, an error). After that, the socket
+    /// closing is not news: the server closes it *because* it ended, and the client's own
+    /// close frame then fails with "Broken pipe" — which used to replace "nothing was
+    /// heard" with a network error the reader could do nothing about.
+    @Volatile private var terminalSeen = false
     private var mic: Thread? = null
 
     fun open() {
@@ -274,17 +293,27 @@ internal class VoiceSession(
 
             override fun onMessage(webSocket: WebSocket, text: String) {
                 val frame = parseVoiceFrame(text) ?: return
-                if (frame is VoiceFrame.Final || frame is VoiceFrame.Done || frame is VoiceFrame.Error) micStopped = true
+                if (frame is VoiceFrame.Final || frame is VoiceFrame.Done || frame is VoiceFrame.Error) {
+                    micStopped = true
+                    terminalSeen = true
+                }
                 main.post { if (!closed) onFrame(frame) }
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 micStopped = true
+                if (terminalSeen) return
                 main.post { if (!closed) { closed = true; onClosed() } }
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 micStopped = true
+                if (terminalSeen) {
+                    // The server ended this capture and closed the socket; the tray already
+                    // has the reason it gave.
+                    Log.i(TAG, "voice socket closed after the server said how it ended")
+                    return
+                }
                 Log.w(TAG, "voice socket failed code=${response?.code}", t)
                 val code = response?.code
                 val reason = response?.body?.let { runCatching { it.string() }.getOrNull() }?.takeIf { it.length < 200 }
@@ -298,8 +327,19 @@ internal class VoiceSession(
     }
 
     private fun startMicrophone(socket: WebSocket) {
+        Log.i(TAG, "voice socket open, starting the microphone")
         mic = Thread({
-            source.run({ micStopped || closed }) { chunk -> socket.send(chunk.toByteString()) }
+            var dropped = 0
+            source.run({ micStopped || closed }) { chunk ->
+                // okhttp returns false when the outgoing queue is full and the chunk is
+                // gone. Ignoring that made lost audio invisible; count it and say once.
+                if (!socket.send(chunk.toByteString())) {
+                    dropped++
+                    if (dropped == 1 || dropped % 100 == 0) {
+                        Log.w(TAG, "audio chunk dropped by the socket queue (dropped=$dropped)")
+                    }
+                }
+            }
         }, "eink-voice-mic").also { it.start() }
     }
 

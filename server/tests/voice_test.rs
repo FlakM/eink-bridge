@@ -171,10 +171,21 @@ async fn frame_of_type(socket: &mut Socket, wanted: &str) -> Value {
     }
 }
 
+/// Speech as the gate has to hear it: loud, with gaps. A constant tone is a machine, and
+/// the gate treats it as one — the room floor is the quietest block of the last two
+/// seconds, so anything that never goes quiet is the room, not the reader.
 fn tone(seconds: f64) -> Vec<u8> {
     let n = (seconds * SAMPLE_RATE as f64) as usize;
+    let period = (SAMPLE_RATE as f64 * 0.4) as usize; // 300 ms of voice, 100 ms of gap
     (0..n)
-        .flat_map(|i| ((3000.0 * (i as f64 * 0.1).sin()) as i16).to_le_bytes())
+        .flat_map(|i| {
+            let v = if i % period < period * 3 / 4 {
+                (3000.0 * (i as f64 * 0.1).sin()) as i16
+            } else {
+                0
+            };
+            v.to_le_bytes()
+        })
         .collect()
 }
 
@@ -241,9 +252,11 @@ async fn a_spoken_note_comes_back_cleaned_with_the_documents_spelling_and_its_au
         (final_["confidence"].as_f64().unwrap() - (-0.5f64).exp()).abs() < 1e-5,
         "the worst segment"
     );
+    // 2 s of speech plus the 1.5 s silence gate, plus the final gap of the last speech
+    // burst — the fixture now has gaps, which is what makes it speech rather than a fan.
     let seconds = final_["seconds"].as_f64().unwrap();
     assert!(
-        (3.5..=3.7).contains(&seconds),
+        (3.3..=3.6).contains(&seconds),
         "{seconds} s of audio were kept"
     );
     assert!(final_["seq"].as_u64().unwrap() > partial["seq"].as_u64().unwrap());
@@ -256,9 +269,14 @@ async fn a_spoken_note_comes_back_cleaned_with_the_documents_spelling_and_its_au
     assert_eq!(wav.headers()["cache-control"], "no-store");
     let bytes = wav.bytes().await.unwrap();
     assert_eq!(&bytes[..4], b"RIFF");
-    // The gate closed at 1.5 s of quiet; the last tenth of a second arrived after the
-    // note was final and is not part of it.
-    assert_eq!(bytes.len(), 44 + tone(2.0).len() + silence(1.5).len());
+    // The audio kept is exactly the audio the note was made from: the gate closed at
+    // 1.5 s of quiet, and whatever arrived after that is not part of the note.
+    let expected = 44 + (seconds * 32_000.0) as i64;
+    assert!(
+        (bytes.len() as i64 - expected).abs() <= 64,
+        "{} bytes of wav for {seconds} s",
+        bytes.len()
+    );
 
     say(&mut socket, json!({"type":"done"})).await;
     let done = frame_of_type(&mut socket, "done").await;
@@ -514,6 +532,23 @@ async fn the_size_bound_closes_a_capture_instead_of_letting_it_grow() {
         seconds > 100.0,
         "{seconds} s: the bound closed it, not the gate"
     );
+}
+
+#[tokio::test]
+async fn a_capture_nobody_speaks_into_closes_itself() {
+    // The bug this pins: the gate needed speech before it would end a capture, and in a
+    // kitchen it had already decided the extractor fan was speech — so a capture with
+    // nobody at the tablet ran for seventy seconds and kept recording.
+    let fake = fake().await;
+    let (url, _dir) = start_server(Some(&fake)).await;
+    let id = create_session(&url).await;
+    let mut socket = connect(&url, &id).await.unwrap();
+    next_frame(&mut socket).await; // ready
+
+    speak(&mut socket, &silence(16.0)).await;
+    let frame = next_frame(&mut socket).await;
+    assert_eq!(frame["type"], "error", "an empty capture has to end by itself");
+    assert_eq!(frame["message"], "nothing was heard");
 }
 
 #[tokio::test]

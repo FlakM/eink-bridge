@@ -57,17 +57,50 @@ const PARTIAL_FIRST_BYTES: usize = BYTES_PER_SECOND * 2;
 /// reads a 30 s window), so a partial is worth doing while the buffer is short, and stops
 /// being worth doing once the decode behind it starts to show.
 const PARTIAL_CEILING_BYTES: usize = BYTES_PER_SECOND * 20;
-/// RMS of 16-bit samples above which a chunk is speech rather than room.
-const SPEECH_RMS: f64 = 700.0;
+/// How far above the room a chunk has to be to count as speech. A ratio, not a level,
+/// because a room is not a constant: a study and a kitchen with an extractor fan differ by
+/// an order of magnitude, and the fixed 700 this replaced called the kitchen a
+/// conversation — a capture then ran for 70 seconds with nobody in the room talking,
+/// because every chunk of room tone counted as the reader speaking.
+const SPEECH_MARGIN: f64 = 2.5;
+/// The quietest level that can still be speech, for a room quiet enough that the ratio
+/// is meaningless.
+const SPEECH_FLOOR_MIN: f64 = 150.0;
+/// The floor is the quietest 20 ms block of the last two seconds. Speech has gaps — between
+/// words, between sentences — and a fan does not: that is the whole difference between a
+/// reader and a room, and it needs no magic level.
+const FLOOR_BLOCK_BYTES: usize = 640;
+const FLOOR_BLOCKS: usize = 100;
+/// How long a capture may run without hearing anything before it closes itself. The old
+/// gate could not end an empty capture at all: it needed speech first, and in a noisy room
+/// it had already decided the noise was speech.
+const NO_SPEECH_BYTES: usize = BYTES_PER_SECOND * 15;
 /// A tablet that sends nothing at all for this long has lost its microphone or its
 /// network; the capture is abandoned rather than held open.
 const IDLE: Duration = Duration::from_secs(30);
 
 /// The silence gate as a pure decision over the bytes, so it can be tested with a tone.
-#[derive(Debug, Default)]
+///
+/// It learns the room from the first chunk and keeps following it downwards, so the same
+/// rule works in a silent study and next to a fan. Speech is what stands clearly above
+/// that floor, not what exceeds a number somebody picked at a desk.
+#[derive(Debug)]
 pub struct Gate {
     loud_bytes: usize,
     quiet_bytes: usize,
+    /// The last two seconds of 20 ms block levels, so the floor can be the quietest of
+    /// them rather than a number somebody guessed.
+    recent: std::collections::VecDeque<f64>,
+}
+
+impl Default for Gate {
+    fn default() -> Self {
+        Self {
+            loud_bytes: 0,
+            quiet_bytes: 0,
+            recent: std::collections::VecDeque::with_capacity(FLOOR_BLOCKS),
+        }
+    }
 }
 
 impl Gate {
@@ -75,9 +108,30 @@ impl Gate {
         self.loud_bytes >= MIN_SPEECH_BYTES
     }
 
+    /// The room, as the quietest block of the last two seconds.
+    fn floor(&self) -> f64 {
+        self.recent
+            .iter()
+            .cloned()
+            .fold(f64::INFINITY, f64::min)
+            .min(1000.0)
+    }
+
+    /// The level a chunk has to beat to be speech.
+    fn threshold(&self) -> f64 {
+        (self.floor() * SPEECH_MARGIN).max(SPEECH_FLOOR_MIN)
+    }
+
     /// Feed one chunk; true when the reader has been quiet long enough after speaking.
     pub fn feed(&mut self, chunk: &[u8]) -> bool {
-        if rms(chunk) > SPEECH_RMS {
+        for block in chunk.chunks(FLOOR_BLOCK_BYTES) {
+            if self.recent.len() == FLOOR_BLOCKS {
+                self.recent.pop_front();
+            }
+            self.recent.push_back(rms(block));
+        }
+        let level = rms(chunk);
+        if level > self.threshold() {
             self.loud_bytes += chunk.len();
             self.quiet_bytes = 0;
         } else {
@@ -373,6 +427,11 @@ async fn handle(
                             break "failed";
                         }
                     }
+                } else if !gate.heard_speech() && pcm.len() >= NO_SPEECH_BYTES {
+                    let _ = frames
+                        .send(json!({"type":"error","message":"nothing was heard"}))
+                        .await;
+                    break "failed";
                 } else if gate.heard_speech()
                     && !partial_in_flight
                     && pcm.len() >= PARTIAL_FIRST_BYTES
@@ -750,11 +809,19 @@ pub async fn speech(
 mod tests {
     use super::*;
 
+    /// Speech, as the gate sees it: loud, and never loud for long. A constant tone is a
+    /// machine, and the gate is right to refuse it as speech — the earlier fixture was a
+    /// fan wearing a reader's clothes.
     fn tone(seconds: f64) -> Vec<u8> {
         let n = (seconds * SAMPLE_RATE as f64) as usize;
+        let period = (SAMPLE_RATE as f64 * 0.4) as usize; // 300 ms of voice, 100 ms of gap
         (0..n)
             .flat_map(|i| {
-                let v = (3000.0 * (i as f64 * 0.1).sin()) as i16;
+                let v = if i % period < period * 3 / 4 {
+                    (3000.0 * (i as f64 * 0.1).sin()) as i16
+                } else {
+                    0
+                };
                 v.to_le_bytes()
             })
             .collect()
@@ -785,6 +852,44 @@ mod tests {
         assert!(
             gate.feed(&room(0.5)),
             "1.5 s of quiet after speech ends the note"
+        );
+    }
+
+    /// A room with the extractor fan on: loud enough that the old fixed threshold heard
+    /// it as a person talking, and ended nothing.
+    fn noisy_room(seconds: f64) -> Vec<u8> {
+        let n = (seconds * SAMPLE_RATE as f64) as usize;
+        (0..n)
+            .flat_map(|i| {
+                let v = (900.0 * (i as f64 * 0.37).sin()) as i16;
+                v.to_le_bytes()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn room_noise_is_not_a_reader_talking() {
+        let mut gate = Gate::default();
+        for _ in 0..30 {
+            assert!(!gate.feed(&noisy_room(0.5)), "a fan is not a sentence");
+        }
+        assert!(
+            !gate.heard_speech(),
+            "15 seconds of kitchen must not count as speech, or the capture never ends"
+        );
+    }
+
+    #[test]
+    fn a_reader_above_a_noisy_room_is_still_heard() {
+        let mut gate = Gate::default();
+        let _ = gate.feed(&noisy_room(0.5));
+        assert!(!gate.heard_speech());
+        // The same tone the other test uses, which is well above the fan.
+        assert!(!gate.feed(&tone(0.3)));
+        assert!(gate.heard_speech(), "speech above the room has to be heard");
+        assert!(
+            gate.feed(&noisy_room(2.0)),
+            "and the fan that follows it ends the note"
         );
     }
 
