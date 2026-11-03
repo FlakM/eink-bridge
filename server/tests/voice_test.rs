@@ -203,6 +203,28 @@ async fn speak(socket: &mut Socket, pcm: &[u8]) {
     }
 }
 
+/// Silence, in the tablet's frames, until the server decides nobody is there.
+///
+/// The amount matters. A capture with no speech ends itself at fifteen seconds, so this
+/// streams exactly fifteen and then listens: one more second and the tail of the burst is
+/// written after the server has already hung up, which is a `BrokenPipe` racing the close
+/// (it did on CI, while passing locally where the extra second fit in the socket buffer).
+/// A write that does fail is still not an assertion about the server — the test is asking
+/// what it *said* before it left.
+async fn silence_until_the_capture_ends_itself(socket: &mut Socket) -> Value {
+    const SECONDS: f64 = 15.0;
+    for chunk in silence(SECONDS).chunks(640) {
+        if socket
+            .send(WsMessage::Binary(chunk.to_vec()))
+            .await
+            .is_err()
+        {
+            break;
+        }
+    }
+    next_frame(socket).await
+}
+
 async fn say(socket: &mut Socket, frame: Value) {
     socket
         .send(WsMessage::Text(frame.to_string()))
@@ -496,27 +518,31 @@ async fn the_size_bound_closes_a_capture_instead_of_letting_it_grow() {
     let mut socket = connect(&url, &id).await.unwrap();
     next_frame(&mut socket).await;
     let loud = tone(2.0);
-    let mut sent = 0;
+    // The tablet streams until it is told to stop, so the client does too. The writes end
+    // when the server closes the capture; a write that fails after the bound fired is the
+    // close arriving, not a bug, and on a slow machine it used to panic the test.
+    // 80 bursts of two seconds is 160 s: past the four-megabyte bound at 16 kHz and far
+    // short of the test suite's patience if the bound never fires.
     let mut final_ = None;
-    while sent < 4 * 1024 * 1024 + 64 * 1024 {
+    'streaming: for _ in 0..80 {
         for chunk in loud.chunks(64 * 1024) {
-            socket
+            if socket
                 .send(WsMessage::Binary(chunk.to_vec()))
                 .await
-                .unwrap();
-            sent += chunk.len();
-        }
-        // Drain what the server said so far without waiting on it.
-        while let Ok(Some(Ok(WsMessage::Text(text)))) =
-            tokio::time::timeout(Duration::from_millis(5), socket.next()).await
-        {
-            let frame: Value = serde_json::from_str(&text).unwrap();
-            if frame["type"] == "final" {
-                final_ = Some(frame);
+                .is_err()
+            {
+                break 'streaming;
             }
-        }
-        if final_.is_some() {
-            break;
+            // Check between bursts, so the frame the bound sent is read before the close.
+            if let Ok(Some(Ok(WsMessage::Text(text)))) =
+                tokio::time::timeout(Duration::from_millis(20), socket.next()).await
+            {
+                let frame: Value = serde_json::from_str(&text).unwrap();
+                if frame["type"] == "final" {
+                    final_ = Some(frame);
+                    break 'streaming;
+                }
+            }
         }
     }
     let final_ = match final_ {
@@ -545,8 +571,7 @@ async fn a_capture_nobody_speaks_into_closes_itself() {
     let mut socket = connect(&url, &id).await.unwrap();
     next_frame(&mut socket).await; // ready
 
-    speak(&mut socket, &silence(16.0)).await;
-    let frame = next_frame(&mut socket).await;
+    let frame = silence_until_the_capture_ends_itself(&mut socket).await;
     assert_eq!(
         frame["type"], "error",
         "an empty capture has to end by itself"
