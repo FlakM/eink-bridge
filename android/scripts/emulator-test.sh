@@ -35,13 +35,18 @@ ADB="$SDK/platform-tools/adb"
 EMULATOR_PID=""
 SERVER_PID=""
 SERIAL=""
+STARTED_EMULATOR=0
 
 cleanup() {
     status=$?
     [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null || true
-    [ -n "$EMULATOR_PID" ] && kill "$EMULATOR_PID" 2>/dev/null || true
-    # adb keeps the emulator registered for a moment after the process dies.
-    [ -n "$SERIAL" ] && "$ADB" -s "$SERIAL" emu kill 2>/dev/null || true
+    # Only tear down an emulator this run started: a device someone already had running
+    # is not ours to kill.
+    if [ "$STARTED_EMULATOR" = 1 ]; then
+        [ -n "$EMULATOR_PID" ] && kill "$EMULATOR_PID" 2>/dev/null || true
+        # adb keeps the emulator registered for a moment after the process dies.
+        [ -n "$SERIAL" ] && "$ADB" -s "$SERIAL" emu kill 2>/dev/null || true
+    fi
     rm -rf "$TMP"
     exit $status
 }
@@ -80,32 +85,57 @@ fi
 # ── the emulator ─────────────────────────────────────────────────────────────
 # Every adb call below names the device: the tablet is often plugged in at the same time,
 # and an unqualified `adb shell` is "more than one device".
-SERIAL="$("$ADB" devices | awk '/^emulator-/{print $1; exit}')"
-if [ -z "$SERIAL" ]; then
-    AVDMANAGER="$(command -v avdmanager || find "$SDK/cmdline-tools" -name avdmanager -type f | head -1)"
+# The emulator this run owns, by port. Picking "the first emulator adb lists" instead
+# once chose a serial that never answered while a healthy emulator booted on another port,
+# and the whole run waited four minutes for a device that was not there.
+EMULATOR_PORT="${EINK_EMULATOR_PORT:-5556}"
+SERIAL="emulator-$EMULATOR_PORT"
+
+if [ "$("$ADB" -s "$SERIAL" get-state 2>/dev/null | tr -d '\r')" = "device" ]; then
+    echo "reusing the emulator already on $SERIAL"
+else
+    # The SDK's own avdmanager, not whatever is first on PATH: another Android SDK on
+    # PATH does not know this one's system images and answers "Valid system image paths
+    # are: null", which is how the harness failed the first time it had to create an AVD.
+    AVDMANAGER="$(find "$SDK/cmdline-tools" -name avdmanager -type f | head -1)"
+    if [ -z "$AVDMANAGER" ]; then
+        AVDMANAGER="$(command -v avdmanager || true)"
+    fi
     if [ -z "$AVDMANAGER" ]; then
         echo "error: avdmanager is not in this SDK" >&2
         exit 1
     fi
-    if ! "$AVDMANAGER" list avd 2>/dev/null | grep -q "Name: $AVD_NAME"; then
-        echo "creating the $AVD_NAME image (once)"
-        echo no | "$AVDMANAGER" create avd \
-            -n "$AVD_NAME" -k "system-images;android-34;google_apis;x86_64" \
-            -d "Nexus 10" --force >/dev/null
+    # Always recreated, not reused: an AVD records the absolute path of the system image
+    # it was made from, and a shell whose SDK moved leaves that path dangling. Creating
+    # one takes a few seconds; booting a stale one fails in a way that reads like a
+    # harness bug.
+    echo "creating the $AVD_NAME image"
+    if ! echo no | "$AVDMANAGER" create avd \
+        -n "$AVD_NAME" -k "system-images;android-34;google_apis;x86_64" \
+        -d "Nexus 10" --force >"$TMP/avd.log" 2>&1; then
+        echo "error: could not create the $AVD_NAME image; avdmanager said:" >&2
+        tail -20 "$TMP/avd.log" >&2
+        exit 1
     fi
-    echo "booting the emulator headless"
-    "$SDK/emulator/emulator" -avd "$AVD_NAME" -no-window -no-audio -no-snapshot \
-        -no-boot-anim -gpu swiftshader_indirect >"$TMP/emulator.log" 2>&1 &
+    echo "booting the emulator headless on $SERIAL"
+    "$SDK/emulator/emulator" -avd "$AVD_NAME" -port "$EMULATOR_PORT" \
+        -no-window -no-audio -no-snapshot -no-boot-anim -gpu swiftshader_indirect \
+        >"$TMP/emulator.log" 2>&1 &
     EMULATOR_PID=$!
+    STARTED_EMULATOR=1
 
-    for _ in $(seq 1 60); do
-        SERIAL="$("$ADB" devices | awk '/^emulator-/{print $1; exit}')"
-        [ -n "$SERIAL" ] && break
-        sleep 1
+    for _ in $(seq 1 90); do
+        [ "$("$ADB" -s "$SERIAL" get-state 2>/dev/null | tr -d '\r')" = "device" ] && break
+        if ! kill -0 "$EMULATOR_PID" 2>/dev/null; then
+            echo "error: the emulator exited before adb saw it; its log:" >&2
+            tail -30 "$TMP/emulator.log" >&2
+            exit 1
+        fi
+        sleep 2
     done
-    if [ -z "$SERIAL" ]; then
-        echo "error: the emulator never registered with adb; its log:" >&2
-        tail -20 "$TMP/emulator.log" >&2
+    if [ "$("$ADB" -s "$SERIAL" get-state 2>/dev/null | tr -d '\r')" != "device" ]; then
+        echo "error: $SERIAL never answered adb; the emulator's log:" >&2
+        tail -30 "$TMP/emulator.log" >&2
         exit 1
     fi
 fi
@@ -117,8 +147,8 @@ for _ in $(seq 1 120); do
     sleep 2
 done
 if [ "$("$ADB" -s "$SERIAL" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" != "1" ]; then
-    echo "error: $SERIAL never finished booting; its log:" >&2
-    tail -20 "$TMP/emulator.log" 2>/dev/null >&2
+    echo "error: $SERIAL never finished booting; the emulator's log:" >&2
+    tail -30 "$TMP/emulator.log" 2>/dev/null >&2
     exit 1
 fi
 

@@ -214,8 +214,10 @@ test-android:
 
 # instrumented suite on an emulator: real app, real WebView, a server of its own.
 # Boots (or reuses) a headless emulator, runs one isolated eink-serve, cleans up after.
+# The emulator shell is entered here because its SDK carries an emulator and a system
+# image, which the default shell's does not (they are ~1 GB, for this suite alone).
 test-emulator filter='':
-    ./android/scripts/emulator-test.sh {{filter}}
+    nix develop .#emulator -c ./android/scripts/emulator-test.sh {{filter}}
 
 # portable OpenCode watcher and Claude MCP-channel contracts
 test-delivery:
