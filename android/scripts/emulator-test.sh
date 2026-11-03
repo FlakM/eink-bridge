@@ -37,6 +37,12 @@ AVD_NAME="${AVD_NAME:-eink-test}"
 PORT="${EINK_TEST_PORT:-4123}"
 FILTER="${1:-}"
 TMP="$(mktemp -d)"
+# The AVD this run creates lives in the temp directory, and both tools are told so.
+# Without it `avdmanager` writes to `$XDG_CONFIG_HOME/.android/avd` while the emulator
+# looks in `$HOME/.android/avd`: on a machine that had an old AVD there, the run booted
+# someone else's image and passed; on a clean runner it found nothing and died.
+export ANDROID_AVD_HOME="$TMP/avd"
+mkdir -p "$ANDROID_AVD_HOME"
 ADB="$SDK/platform-tools/adb"
 EMULATOR_PID=""
 SERVER_PID=""
