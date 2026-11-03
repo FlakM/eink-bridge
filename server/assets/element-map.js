@@ -418,6 +418,38 @@
     }));
   };
 
+  // The element a reader means when they tap near the text rather than on it.
+  //
+  // A margin note is written *beside* a paragraph, and this page's margin is wide: a 992px
+  // column inside a 2400px body. Measuring the distance to each box handles that for free —
+  // every paragraph shares the same left edge, so the horizontal distance is identical for
+  // all of them and the vertical one decides. That is why the cap here is vertical: a tap
+  // far above or below the text must say "nothing here" rather than bind the reader's
+  // sentence to whatever happened to be closest.
+  var NEAREST_MAX_DY = 260;
+
+  window.__einkFindNearestElement = function(docX, docY) {
+    var map = window.__einkElementMap || [];
+    var best = null, bestDy = Infinity, bestDx = Infinity;
+    for (var i = 0; i < map.length; i++) {
+      var e = map[i];
+      var dy = Math.max(e.t - docY, 0, docY - e.b);
+      if (dy > NEAREST_MAX_DY) continue;
+      var dx = Math.max(e.l - docX, 0, docX - e.r);
+      // On a tie prefer the inner block: a <li> and the <p> inside it are equally near,
+      // and the paragraph is what the reader was pointing at.
+      var smaller = best && (e.r - e.l) * (e.b - e.t) < (best.r - best.l) * (best.b - best.t);
+      if (dy < bestDy || (dy === bestDy && (dx < bestDx || (dx === bestDx && smaller)))) {
+        bestDy = dy; bestDx = dx; best = e;
+      }
+    }
+    if (!best) return JSON.stringify([]);
+    return JSON.stringify([{
+      i: best.i, tag: best.tag, id: best.id || null, section: best.section || null,
+      text: best.text.substring(0, 80), cx: (best.l + best.r) / 2, cy: (best.t + best.b) / 2
+    }]);
+  };
+
   window.__einkFlashGroup = function(elementIndices, colorHex) {
     var r = parseInt(colorHex.slice(1, 3), 16);
     var g = parseInt(colorHex.slice(3, 5), 16);

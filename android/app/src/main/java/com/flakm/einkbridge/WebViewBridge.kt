@@ -70,12 +70,6 @@ internal class WebViewBridge(private val webView: WebView) {
         webView.evaluateJavascript("window.__einkUnhighlightAll && window.__einkUnhighlightAll()", null)
     }
 
-    fun setLassoTarget(elementIndex: Int) {
-        webView.evaluateJavascript("window.__einkSetLassoTarget && window.__einkSetLassoTarget($elementIndex)", null)
-    }
-
-    fun clearLassoTarget() = setLassoTarget(-1)
-
     fun findElements(left: Float, top: Float, right: Float, bottom: Float, callback: (String?) -> Unit) {
         webView.evaluateJavascript("window.__einkFindElements($left, $top, $right, $bottom)", callback)
     }
