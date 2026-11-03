@@ -380,17 +380,17 @@
                 android:maxLines="1"
                 android:ellipsize="end" />
 
-            <Button
+            <androidx.appcompat.widget.AppCompatButton
                 android:id="@+id/voiceDone"
                 style="@style/Widget.VoiceButton.Primary"
                 android:text="Done" />
 
-            <Button
+            <androidx.appcompat.widget.AppCompatButton
                 android:id="@+id/voiceUndo"
                 style="@style/Widget.VoiceButton"
                 android:text="Undo" />
 
-            <Button
+            <androidx.appcompat.widget.AppCompatButton
                 android:id="@+id/voiceDiscard"
                 style="@style/Widget.VoiceButton"
                 android:text="Discard" />
@@ -417,22 +417,22 @@
             android:layout_height="wrap_content"
             android:orientation="horizontal">
 
-            <Button
+            <androidx.appcompat.widget.AppCompatButton
                 android:id="@+id/voiceShorter"
                 style="@style/Widget.VoiceButton"
                 android:text="Shorter" />
 
-            <Button
+            <androidx.appcompat.widget.AppCompatButton
                 android:id="@+id/voiceList"
                 style="@style/Widget.VoiceButton"
                 android:text="As a list" />
 
-            <Button
+            <androidx.appcompat.widget.AppCompatButton
                 android:id="@+id/voiceBlocker"
                 style="@style/Widget.VoiceButton"
                 android:text="Blocker" />
 
-            <Button
+            <androidx.appcompat.widget.AppCompatButton
                 android:id="@+id/voicePlay"
                 style="@style/Widget.VoiceButton"
                 android:text="Play" />

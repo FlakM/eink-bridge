@@ -385,4 +385,30 @@ class MainActivityTest {
             repo.saveToken("")
         }
     }
+
+    // The tray's buttons were invisible in a way no unit test could have seen: a plain
+    // <Button> under this MaterialComponents theme is inflated as a MaterialButton, which
+    // ignores android:background and paints itself from colorPrimary — black fill, black
+    // text. They have to be AppCompatButton, like every other button that carries a
+    // drawable of its own.
+    @Test
+    fun theVoiceTrayButtonsKeepTheirOwnBackground() {
+        scenario.onActivity { activity ->
+            val buttons = listOf(
+                R.id.voiceDone, R.id.voiceUndo, R.id.voiceDiscard,
+                R.id.voiceShorter, R.id.voiceList, R.id.voiceBlocker, R.id.voicePlay,
+            )
+            for (id in buttons) {
+                val button = activity.findViewById<View>(id)
+                assertTrue(
+                    "${activity.resources.getResourceEntryName(id)} is ${button.javaClass.name}",
+                    button is androidx.appcompat.widget.AppCompatButton,
+                )
+                assertNotNull(
+                    "${activity.resources.getResourceEntryName(id)} has no background",
+                    button.background,
+                )
+            }
+        }
+    }
 }
