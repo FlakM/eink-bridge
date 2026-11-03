@@ -29,6 +29,9 @@ What it covers, in the order a failure would hurt:
 | `aVoiceNoteLandsOnTheBlockItWasSpokenAt` | the whole note path: the page's search, the group it builds, the card on the page, and the anchor, words, severity and voice provenance the server ends up holding |
 | `aPictureInTheBriefIsServedFromTheSession` | an upload that never arrives, an `image/` reference that resolves against `/session/{id}`, or a route that serves nothing — only a decoded `naturalWidth` proves it |
 | `aDiagramIsDrawnInThePage` | mermaid failing in the WebView, which leaves a blank rectangle no server-side test can see |
+| `anAgentUpdateReachesTheOpenPage` | the `version_updated` push being dropped or the reload being skipped, which leaves the reader reviewing a stale brief that looks fine |
+| `aSessionSubmittedElsewhereSendsTheTabletBackToTheList` | the tablet keeping a page whose review is over, so every further note goes into a session that refuses it |
+| `theAgentCanAskTheTabletForAPicture` | `delivered` counting the agent's own observer instead of a tablet, or a capture of a page that had not drawn |
 | `aServerThatIsNotThereIsSaidSo` | a connection refused reaching the reader as a crash instead of a status line |
 | `goingBackFromTheReaderReturnsToTheList` | back leaving a blank screen or an empty list |
 | `theVoiceTrayShowsRealButtons` | the plain `<Button>` that AppCompat inflated as a `MaterialButton`, black on black |

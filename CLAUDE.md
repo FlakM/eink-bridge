@@ -200,16 +200,17 @@ just ci            # full CI check
 ```
 
 `just test-emulator` is the instrumented suite: a headless emulator, a server on a
-temporary state directory, and ten tests that drive the real app — the list, the rendered
-page and its element map, the page's own nearest-element search, submit, a spoken note
-landing on the block it was aimed at (card and server payload), a picture served from its
-own session, a mermaid diagram actually drawn, an unreachable server said so, back to the
-list, and the voice tray's buttons. It is the only layer that exercises a real WebView and
-the JS bridge, which is where two silent bugs lived (a page function that did not exist,
-and a layout inflated as the wrong button class). CI runs it on every push; it needs
-`/dev/kvm`. The emulator and its system image are a gigabyte, so they live in their own
-shell (`nix develop .#emulator`); the recipe enters it, and the other jobs keep the small
-SDK.
+temporary state directory, and thirteen tests that drive the real app — the list, the
+rendered page and its element map, the page's own nearest-element search, submit, a spoken
+note landing on the block it was aimed at (card and server payload), a picture served from
+its own session, a mermaid diagram actually drawn, an agent's rewrite reaching the open
+page, a review submitted elsewhere sending the tablet back, the screenshot round trip, an
+unreachable server said so, back to the list, and the voice tray's buttons. It is the only
+layer that exercises a real WebView and the JS bridge, which is where two silent bugs
+lived (a page function that did not exist, and a layout inflated as the wrong button
+class). CI runs it on every push; it needs `/dev/kvm`. The emulator and its system image
+are a gigabyte, so they live in their own shell (`nix develop .#emulator`); the recipe
+enters it, and the other jobs keep the small SDK.
 
 `just test` is the gate: the Rust suite (404 tests across 25 binaries, about three
 seconds), the tablet's 285 JVM tests, and the 85 harness tests. The server part is fast
