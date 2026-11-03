@@ -23,14 +23,24 @@ What it covers, in the order a failure would hurt:
 | Test | What breaks it |
 |---|---|
 | `theAppListsASessionTheServerHas` | the list, the HTTP client, the connection status |
-| `openingASessionRendersTheDocumentInTheWebView` | the page, the CSS, the injected JS, the WebView itself |
+| `openingASessionRendersTheDocumentInTheWebView` | the page, the CSS, the injected JS, the WebView itself — and that the element map covers every block the page shows, so a script that throws partway cannot hide blocks from a tap |
 | `everyBlockOnThePageResolvesToItself` | `__einkFindNearestElement` — the function whose absence made every voice tap do nothing |
 | `aSubmittedNoteReachesTheServer` | submit → the server marking the session |
+| `aVoiceNoteLandsOnTheBlockItWasSpokenAt` | the whole note path: the page's search, the group it builds, the card on the page, and the anchor, words, severity and voice provenance the server ends up holding |
+| `aPictureInTheBriefIsServedFromTheSession` | an upload that never arrives, an `image/` reference that resolves against `/session/{id}`, or a route that serves nothing — only a decoded `naturalWidth` proves it |
+| `aDiagramIsDrawnInThePage` | mermaid failing in the WebView, which leaves a blank rectangle no server-side test can see |
+| `aServerThatIsNotThereIsSaidSo` | a connection refused reaching the reader as a crash instead of a status line |
+| `goingBackFromTheReaderReturnsToTheList` | back leaving a blank screen or an empty list |
+| `theVoiceTrayShowsRealButtons` | the plain `<Button>` that AppCompat inflated as a `MaterialButton`, black on black |
 
 Deliberately not there: a synthetic *tap* on the page. That path runs screen coordinates
 through the Onyx ink transform, and an emulator has no Onyx SDK and no viewport report to
 transform from — the test would fail for a reason that is not the app's. The search is
 covered directly, its input by `BindGestureHandlerTest`, and the finger by the real tablet.
+
+The emulator and a `system-images;android-34;google_apis;x86_64` image live in their own
+dev shell (`nix develop .#emulator`), because they are most of a gigabyte and only this
+suite needs them; `just test-emulator` enters that shell for you.
 
 Still open from the plan below: stylus event injection (the emulator cannot send
 `TOOL_TYPE_STYLUS`; only the device can), and the render goldens.

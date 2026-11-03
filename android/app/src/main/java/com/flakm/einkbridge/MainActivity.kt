@@ -153,37 +153,7 @@ class MainActivity : AppCompatActivity() {
         })
 
         lifecycleScope.launch {
-            sessionViewModel.state.collect { listState ->
-                val hadSessions = adapter.itemCount
-                adapter.setPendingStrokes(listState.pendingStrokes)
-                adapter.setCachedSessions(listState.cachedSessions)
-                adapter.submitList(listState.sessions)
-                if (listState.sessions.isEmpty()) {
-                    sessionList.visibility = View.GONE
-                    emptyState.visibility = View.VISIBLE
-                } else {
-                    sessionList.visibility = View.VISIBLE
-                    emptyState.visibility = View.GONE
-                }
-                if (listState.sessions.size > hadSessions && hadSessions > 0) {
-                    showRoutineStatus("New review")
-                }
-                when (listState.connectionStatus) {
-                    is ConnectionStatus.Online -> {
-                        serverUrlText.text = "Connected: ${sessionViewModel.serverUrl}"
-                        serverUrlText.setTextColor(Color.parseColor("#006600"))
-                    }
-                    is ConnectionStatus.Offline -> {
-                        serverUrlText.text = "Offline \u2014 showing cached: ${sessionViewModel.serverUrl}"
-                        serverUrlText.setTextColor(Color.parseColor("#FF9800"))
-                    }
-                    is ConnectionStatus.Unreachable -> {
-                        serverUrlText.text = "Unreachable: ${sessionViewModel.serverUrl}"
-                        serverUrlText.setTextColor(Color.parseColor("#CC0000"))
-                    }
-                    is ConnectionStatus.Unknown -> {}
-                }
-            }
+            sessionViewModel.state.collect { listState -> renderListState(listState) }
         }
 
         findViewById<Button>(R.id.connectBtn).setOnClickListener {
@@ -1152,6 +1122,46 @@ class MainActivity : AppCompatActivity() {
     }
 
 
+    /**
+     * Draw the list from its state, in one place.
+     *
+     * Split out of the collector so a headless test can call it with a state of its own:
+     * the collector runs whatever the poll last said, and a poll against a machine that is
+     * not there rewrote the list underneath the assertion. The instrumented suite covers
+     * the poll itself; this is the screen.
+     */
+    internal fun renderListState(listState: SessionListState) {
+        val hadSessions = adapter.itemCount
+        adapter.setPendingStrokes(listState.pendingStrokes)
+        adapter.setCachedSessions(listState.cachedSessions)
+        adapter.submitList(listState.sessions)
+        if (listState.sessions.isEmpty()) {
+            sessionList.visibility = View.GONE
+            emptyState.visibility = View.VISIBLE
+        } else {
+            sessionList.visibility = View.VISIBLE
+            emptyState.visibility = View.GONE
+        }
+        if (listState.sessions.size > hadSessions && hadSessions > 0) {
+            showRoutineStatus("New review")
+        }
+        when (listState.connectionStatus) {
+            is ConnectionStatus.Online -> {
+                serverUrlText.text = "Connected: ${sessionViewModel.serverUrl}"
+                serverUrlText.setTextColor(Color.parseColor("#006600"))
+            }
+            is ConnectionStatus.Offline -> {
+                serverUrlText.text = "Offline \u2014 showing cached: ${sessionViewModel.serverUrl}"
+                serverUrlText.setTextColor(Color.parseColor("#FF9800"))
+            }
+            is ConnectionStatus.Unreachable -> {
+                serverUrlText.text = "Unreachable: ${sessionViewModel.serverUrl}"
+                serverUrlText.setTextColor(Color.parseColor("#CC0000"))
+            }
+            is ConnectionStatus.Unknown -> {}
+        }
+    }
+
     // ── test surface ─────────────────────────────────────────────────────────
     // The instrumented suite drives the app through its own state rather than through
     // Espresso matchers: the list is a RecyclerView fed by a coroutine, and matching on
@@ -1170,6 +1180,15 @@ class MainActivity : AppCompatActivity() {
         findViewById<TextView>(R.id.voiceState).text.toString()
 
     internal fun boundGroupsForTest(): List<BindGroup> = penOverlay?.bindGroupsForTest().orEmpty()
+
+    /** The overlay that owns the ink, for the paths the stylus would reach. */
+    internal fun overlayForTest(): PenOverlay? = penOverlay
+
+    /** Which screen the app is showing: the reader, or the list behind it. */
+    internal fun showingReaderForTest(): Boolean = webView.visibility == View.VISIBLE
+
+    /** A button in the voice tray, read on the UI thread by the caller. */
+    internal fun trayButtonForTest(id: Int): View = findViewById(id)
 
     internal fun showRoutineStatus(message: String) {
         findViewById<TextView>(R.id.routineStatus).apply {

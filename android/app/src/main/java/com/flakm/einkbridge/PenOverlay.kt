@@ -1348,8 +1348,22 @@ internal class PenOverlay(
 
     private fun pickVoiceTarget(screenX: Float, screenY: Float) {
         val t = currentTransform()
-        val docX = t.screenToDocX(screenX)
-        val docY = t.screenToDocY(screenY)
+        bindVoiceTarget(t.screenToDocX(screenX), t.screenToDocY(screenY))
+    }
+
+    /**
+     * A tap in voice mode, from a document point instead of a screen one.
+     *
+     * The instrumented suite cannot synthesize the stylus: ink goes through the Onyx SDK's
+     * raw-drawing callback, which an emulator does not have. This is the code the tap
+     * reaches *after* the coordinate transform, so the page's search, the group it builds
+     * and the note the group carries are all the real ones.
+     */
+    internal fun pickVoiceTargetAtForTest(docX: Float, docY: Float) =
+        bindVoiceTarget(docX, docY)
+
+    /** The block nearest a document point is the one the reader aimed at: bind it. */
+    private fun bindVoiceTarget(docX: Float, docY: Float) {
         bridge.findNearestElement(docX, docY) { raw ->
             val elements = parseFoundElements(raw)
             if (elements.isEmpty() || !isVoiceMode) {

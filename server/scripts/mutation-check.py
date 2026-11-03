@@ -344,10 +344,19 @@ CASES = [
         "an answered screenshot request is handed out again",
         text_edit(
             APPI,
-            """    if pending.get(&id).is_some_and(|request| request.id == request_id) {
+            # The anchor is the formatter's, not the author's: rustfmt rewrapped this
+            # chain, and the harness kept looking for the one-line version.
+            """    if pending
+        .get(&id)
+        .is_some_and(|request| request.id == request_id)
+    {
         pending.remove(&id);
     }""",
-            """    if pending.get(&id).is_some_and(|request| request.id == request_id) && false {
+            """    if pending
+        .get(&id)
+        .is_some_and(|request| request.id == request_id)
+        && false
+    {
         pending.remove(&id);
     }""",
         ),

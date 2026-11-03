@@ -110,13 +110,16 @@ class MainActivityTest {
         }
     }
 
+    /*
+     * These two drive `renderListState`, the function the state collector calls, rather
+     * than poking the adapter: the old version asserted a visibility the activity sets
+     * elsewhere, so it passed only when the background poll had not yet decided the list
+     * was empty (it had, on CI).
+     */
     @Test
     fun emptyStateLabelVisible_whenNoSessions() {
         scenario.onActivity { activity ->
-            // Simulate what fetchSessions does when the response is empty
-            activity.adapter.submitList(emptyList())
-            activity.sessionList.visibility = View.GONE
-            activity.emptyState.visibility = View.VISIBLE
+            activity.renderListState(SessionListState())
 
             assertEquals(View.GONE, activity.sessionList.visibility)
             assertEquals(View.VISIBLE, activity.emptyState.visibility)
@@ -126,15 +129,22 @@ class MainActivityTest {
     @Test
     fun sessionListVisible_whenSessionsExist() {
         scenario.onActivity { activity ->
-            activity.adapter.submitList(
-                listOf(
-                    SessionInfo("id1", "PR Review", "Active", "2026-03-30T10:00:00Z", "2026-03-30T10:00:00Z"),
-                    SessionInfo("id2", "Bug Report", "Submitted", "2026-03-30T09:00:00Z", "2026-03-30T09:30:00Z"),
+            activity.renderListState(
+                SessionListState(
+                    sessions = listOf(
+                        SessionInfo("id1", "PR Review", "Active", "2026-03-30T10:00:00Z", "2026-03-30T10:00:00Z"),
+                        SessionInfo("id2", "Bug Report", "Submitted", "2026-03-30T09:00:00Z", "2026-03-30T09:30:00Z"),
+                    ),
+                    connectionStatus = ConnectionStatus.Online,
                 )
             )
-        }
-        scenario.onActivity { activity ->
+
             assertEquals(View.VISIBLE, activity.sessionList.visibility)
+            assertEquals(View.GONE, activity.emptyState.visibility)
+            assertTrue(
+                "the connection line should say it is online, not \"${activity.statusForTest()}\"",
+                activity.statusForTest().startsWith("Connected: "),
+            )
         }
     }
 

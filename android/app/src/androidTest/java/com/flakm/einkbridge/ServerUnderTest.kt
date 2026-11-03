@@ -2,6 +2,7 @@ package com.flakm.einkbridge
 
 import androidx.test.platform.app.InstrumentationRegistry
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -42,6 +43,32 @@ internal object ServerUnderTest {
         }
     }
 
+    /**
+     * Create a session that carries a picture, the way `push --image` does.
+     *
+     * The bytes travel in the request, never a path: the server will not open a file for a
+     * caller. It writes them under the session and rewrites the markdown's `image/<name>`
+     * reference to the session's own route.
+     */
+    fun createSessionWithImage(
+        title: String,
+        markdown: String,
+        name: String,
+        bytes: ByteArray,
+    ): String {
+        val body = MultipartBody.Builder()
+            .setType(MultipartBody.FORM)
+            .addFormDataPart("content", markdown)
+            .addFormDataPart("title", title)
+            .addFormDataPart("image", name, bytes.toRequestBody("image/png".toMediaType()))
+            .build()
+        val request = Request.Builder().url("$url/api/sessions").post(body).build()
+        client.newCall(request).execute().use { response ->
+            check(response.isSuccessful) { "create session with image failed: ${response.code}" }
+            return JSONObject(response.body!!.string()).getString("id")
+        }
+    }
+
     fun sessionStatus(id: String): String {
         val request = Request.Builder().url("$url/api/sessions/$id").build()
         client.newCall(request).execute().use { response ->
@@ -54,6 +81,43 @@ internal object ServerUnderTest {
         val request = Request.Builder().url("$url/api/sessions/$id/result").build()
         client.newCall(request).execute().use { response ->
             check(response.isSuccessful) { "read result failed: ${response.code}" }
+            return JSONObject(response.body!!.string())
+        }
+    }
+
+    /**
+     * Ask the tablet for a picture of its page, the way `eink-review screenshot` does.
+     *
+     * `delivered` is the server's own answer to "is a tablet listening": it counts the
+     * sockets that connected with `?client=tablet` and not the agent's observer.
+     */
+    fun requestScreenshot(id: String): JSONObject {
+        val request = Request.Builder()
+            .url("$url/api/sessions/$id/screenshot")
+            .post(ByteArray(0).toRequestBody(null))
+            .build()
+        client.newCall(request).execute().use { response ->
+            check(response.isSuccessful) { "screenshot request failed: ${response.code}" }
+            return JSONObject(response.body!!.string())
+        }
+    }
+
+    /** The picture, once the tablet has sent it; null while it is still working (404). */
+    fun screenshot(id: String, requestId: String): ByteArray? {
+        val request = Request.Builder()
+            .url("$url/api/sessions/$id/screenshot/$requestId")
+            .build()
+        client.newCall(request).execute().use { response ->
+            if (response.code == 404) return null
+            check(response.isSuccessful) { "read screenshot failed: ${response.code}" }
+            return response.body!!.bytes()
+        }
+    }
+
+    /** The detail record, which is where a submitted session's annotations live. */    fun detail(id: String): JSONObject {
+        val request = Request.Builder().url("$url/api/sessions/$id").build()
+        client.newCall(request).execute().use { response ->
+            check(response.isSuccessful) { "read session failed: ${response.code}" }
             return JSONObject(response.body!!.string())
         }
     }

@@ -60,6 +60,103 @@ internal object Page {
             (0 until array.length()).map { array.getJSONObject(it).getString("text") }
         }
 
+    /**
+     * Every diagram on the page, as the size it was drawn at.
+     *
+     * A diagram is drawn by `bootstrap.js` with mermaid, in the page. A missing or broken
+     * asset leaves the block in place with an empty body, which is what this count sees.
+     */
+    fun drawnDiagrams(webView: WebView): List<Pair<Int, Int>> {
+        val raw = eval(
+            webView,
+            """
+            JSON.stringify(Array.prototype.map.call(
+              document.querySelectorAll('.diagram-block svg'),
+              function (svg) {
+                var r = svg.getBoundingClientRect();
+                return [Math.round(r.width), Math.round(r.height)];
+              }
+            ))
+            """.trimIndent(),
+        ) ?: throw AssertionError("could not read the page's diagrams")
+        val array = JSONArray(raw)
+        return (0 until array.length()).map { index ->
+            val size = array.getJSONArray(index)
+            size.getInt(0) to size.getInt(1)
+        }
+    }
+
+    /**
+     * How many blocks the page shows, counted the way the element map counts them.
+     *
+     * If the map's own build throws partway, the count it reports is smaller than this and
+     * the blocks it skipped can no longer be annotated — a failure that otherwise looks
+     * like a page that simply has fewer paragraphs.
+     */
+    fun blockCount(webView: WebView): Int {
+        val raw = eval(
+            webView,
+            """
+            (function () {
+              var content = document.getElementById('content');
+              if (!content) return -1;
+              return content.querySelectorAll(
+                'h1, h2, h3, p, li, pre, blockquote, td, th, table, ul, ol, img, .diagram-block, .snippet-block, .steps-block, .diff-block'
+              ).length;
+            })()
+            """.trimIndent(),
+        ) ?: return -1
+        return raw.toIntOrNull() ?: -1
+    }
+
+    /** The spoken-note cards the page has drawn, by the words they carry. */
+    fun voiceCards(webView: WebView): List<String> {
+        val raw = eval(
+            webView,
+            """
+            JSON.stringify(Array.prototype.map.call(
+              document.querySelectorAll('.voice-block .voice-text'),
+              function (el) { return (el.textContent || '').trim(); }
+            ))
+            """.trimIndent(),
+        ) ?: throw AssertionError("could not read the voice cards")
+        val array = JSONArray(raw)
+        return (0 until array.length()).map { array.getString(it) }
+    }
+
+    /** A picture the page is showing, and whether its bytes actually arrived. */
+    data class DocumentImage(val src: String, val complete: Boolean, val naturalWidth: Int)
+
+    /**
+     * Every `img` on the page.
+     *
+     * `naturalWidth` is what makes this worth asking: a broken URL still leaves an `img`
+     * element behind, so only a decoded picture proves the route served it.
+     */
+    fun images(webView: WebView): List<DocumentImage> {
+        val raw = eval(
+            webView,
+            """
+            JSON.stringify(Array.prototype.map.call(document.images, function (img) {
+              return {
+                src: img.getAttribute('src') || '',
+                complete: !!img.complete,
+                naturalWidth: img.naturalWidth || 0
+              };
+            }))
+            """.trimIndent(),
+        ) ?: throw AssertionError("could not read the page's images")
+        val array = JSONArray(raw)
+        return (0 until array.length()).map { index ->
+            val image = array.getJSONObject(index)
+            DocumentImage(
+                src = image.getString("src"),
+                complete = image.getBoolean("complete"),
+                naturalWidth = image.getInt("naturalWidth"),
+            )
+        }
+    }
+
     /** The elements of the page, as the element map sees them. */
     fun elements(webView: WebView): JSONArray {
         val raw = eval(webView, "JSON.stringify(window.__einkElementMap || [])")

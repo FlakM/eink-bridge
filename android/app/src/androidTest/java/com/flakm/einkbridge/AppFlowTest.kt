@@ -89,6 +89,11 @@ class AppFlowTest {
         // so a non-zero count means HTML, CSS and scripts all arrived and ran.
         val count = Page.awaitElementMap(activity.webView)
         assertTrue("the page reported $count elements", count >= 3)
+        assertEquals(
+            "the element map skipped blocks the page is showing: a script threw partway",
+            Page.blockCount(activity.webView),
+            count,
+        )
 
         val texts = Page.elementTexts(activity.webView)
         assertTrue(
@@ -157,6 +162,284 @@ class AppFlowTest {
         )
     }
 
+    /**
+     * A note spoken at a block lands on that block, all the way to the server.
+     *
+     * This is the path that was silently dead: the page's search function did not exist,
+     * so the tap produced nothing and the tray said "nothing to talk about there". It also
+     * pins the payload — the anchor is the paragraph the reader aimed at, and the group
+     * keeps the words, the severity and the voice provenance through the multipart submit.
+     *
+     * The tray is not told about the target: it would open a microphone, and what the
+     * microphone does is not what this test is asking.
+     */
+    @Test
+    fun aVoiceNoteLandsOnTheBlockItWasSpokenAt() {
+        val id = newSession()
+        val activity = launch()
+        assertTrue("the session list did not show it", awaitSession(activity, title))
+        open(activity, title)
+        Page.awaitElementMap(activity.webView)
+
+        val index = Page.elementTexts(activity.webView).indexOfFirst {
+            it.contains("second paragraph")
+        }
+        assertTrue("the second paragraph is not on the page", index >= 0)
+        val box = Page.elementAt(activity.webView, index)
+        val cx = ((box.getDouble("l") + box.getDouble("r")) / 2).toFloat()
+        val cy = ((box.getDouble("t") + box.getDouble("b")) / 2).toFloat()
+
+        val overlay = activity.overlayForTest()
+            ?: throw AssertionError("the reader has no overlay")
+        App.onMain { activity.setToolMode(ToolMode.VOICE) }
+        App.onMain {
+            overlay.onVoiceTarget = null // no microphone in this test
+            overlay.pickVoiceTargetAtForTest(cx, cy)
+        }
+
+        val groups = awaitGroups(activity)
+        assertEquals("the tap bound ${groups.size} blocks", 1, groups.size)
+        val group = groups.single()
+        assertTrue(
+            "bound to the wrong block: ${group.elementRefs.map { it.text }}",
+            group.elementRefs.any { it.text.contains("second paragraph") },
+        )
+
+        // What the tray hands back when the server answers `done`.
+        val note = "the second paragraph needs an example"
+        App.onMain {
+            overlay.setVoiceNote(
+                group.id,
+                note,
+                "blocker",
+                """{"raw":"$note","seconds":2.4,"severity":"blocker"}""",
+            )
+        }
+        // The card is the reader-visible half: the words have to reach the page, not just
+        // the submission. It is drawn by the same JS that draws every other block.
+        val deadline = System.currentTimeMillis() + 10_000
+        var cards = emptyList<String>()
+        while (System.currentTimeMillis() < deadline && cards.none { it.contains("needs an example") }) {
+            cards = Page.voiceCards(activity.webView)
+            if (cards.none { it.contains("needs an example") }) Thread.sleep(200)
+        }
+        assertTrue("the page never drew the note's card: $cards", cards.any { it.contains("needs an example") })
+
+        App.onMain { activity.submitForTest() }
+
+        val annotations = awaitAnnotations(id)
+        assertEquals("the server stored ${annotations.length()} notes", 1, annotations.length())
+        val stored = annotations.getJSONObject(0)
+        assertEquals("the words changed on the way", note, stored.optString("recognized_text"))
+        assertEquals("the note lost its provenance", "voice", stored.optString("source"))
+        // Severity is not a field of the annotation: it rides inside the voice payload,
+        // which is what an agent reads to know whether the reader was stopping the work.
+        val voice = stored.getJSONObject("voice")
+        assertEquals("what was heard was not kept", note, voice.optString("raw"))
+        assertEquals("a blocker became a note", "blocker", voice.optString("severity"))
+        val anchored = stored.getJSONObject("anchor").getJSONArray("elements")
+        assertTrue(
+            "the anchor is not the block the reader aimed at: $anchored",
+            (0 until anchored.length()).any {
+                anchored.getJSONObject(it).getString("text").contains("second paragraph")
+            },
+        )
+    }
+
+    /**
+     * A picture in the brief is a picture the page shows.
+     *
+     * Three things have to line up for this: the create request carrying bytes, the
+     * renderer pointing `image/<name>` at the session's own route (a bare relative path
+     * resolved against `/session/{id}` and 404ed), and that route serving the bytes back.
+     * A broken URL still leaves an `img` element, so only the decoded width proves it.
+     */
+    @Test
+    fun aPictureInTheBriefIsServedFromTheSession() {
+        val name = "shot.png"
+        val id = ServerUnderTest.createSessionWithImage(
+            title = "A picture",
+            markdown = "# A picture\n\nBelow is the artefact itself.\n\n![$name](image/$name)\n",
+            name = name,
+            bytes = pixelPng,
+        ).also { sessions += it }
+
+        val activity = launch()
+        assertTrue("the session list did not show it", awaitSession(activity, "A picture"))
+        open(activity, "A picture")
+        Page.awaitElementMap(activity.webView)
+
+        val deadline = System.currentTimeMillis() + 20_000
+        var images = emptyList<Page.DocumentImage>()
+        while (System.currentTimeMillis() < deadline && images.none { it.naturalWidth > 0 }) {
+            images = Page.images(activity.webView)
+            if (images.none { it.naturalWidth > 0 }) Thread.sleep(200)
+        }
+        assertEquals("the page shows ${images.size} pictures", 1, images.size)
+        val image = images.single()
+        assertEquals(
+            "the picture is not served from its own session",
+            "/api/sessions/$id/image/$name",
+            image.src,
+        )
+        assertTrue("the picture never decoded: $image", image.naturalWidth > 0)
+    }
+
+    /**
+     * A diagram is drawn, not left as an empty box.
+     *
+     * Mermaid runs in the page: the server sends a payload and `bootstrap.js` turns it into
+     * an SVG. No server-side test can prove that happened, and when it fails the reader is
+     * left with a blank rectangle where the picture should be.
+     */
+    @Test
+    fun aDiagramIsDrawnInThePage() {
+        ServerUnderTest.createSession(
+            "A diagram",
+            "# A diagram\n\n\u0060\u0060\u0060mermaid\nflowchart LR\n  A[Start] --> B[Done]\n\u0060\u0060\u0060\n",
+        ).also { sessions += it }
+
+        val activity = launch()
+        assertTrue("the session list did not show it", awaitSession(activity, "A diagram"))
+        open(activity, "A diagram")
+        Page.awaitElementMap(activity.webView)
+
+        val deadline = System.currentTimeMillis() + 20_000
+        var diagrams = emptyList<Pair<Int, Int>>()
+        while (System.currentTimeMillis() < deadline && diagrams.isEmpty()) {
+            diagrams = Page.drawnDiagrams(activity.webView)
+            if (diagrams.isEmpty()) Thread.sleep(200)
+        }
+        assertEquals("the page drew ${diagrams.size} diagrams", 1, diagrams.size)
+        val (width, height) = diagrams.single()
+        assertTrue("the diagram was drawn at ${width}x$height", width > 0 && height > 0)
+    }
+
+    /**
+     * The agent can ask the tablet what it is showing, and gets a picture.
+     *
+     * This runs the whole return path: the server's ask over the WebSocket, the app
+     * compositing the page and the pen overlay off the main thread, the upload, and the
+     * route back. Two failures it is aimed at: `delivered` counting the agent's own
+     * observer instead of a tablet, and a blank page sent as a picture.
+     */
+    @Test
+    fun theAgentCanAskTheTabletForAPicture() {
+        val id = newSession()
+        val activity = launch()
+        assertTrue("the session list did not show it", awaitSession(activity, title))
+        open(activity, title)
+        Page.awaitElementMap(activity.webView)
+
+        // The socket connects asynchronously, so a "not delivered" answer is a retry, not
+        // a failure — the server reuses the pending request's id.
+        val askDeadline = System.currentTimeMillis() + 20_000
+        var ask = ServerUnderTest.requestScreenshot(id)
+        while (!ask.optBoolean("delivered")) {
+            if (System.currentTimeMillis() > askDeadline) {
+                throw AssertionError("no tablet ever listened for the ask: $ask")
+            }
+            Thread.sleep(300)
+            ask = ServerUnderTest.requestScreenshot(id)
+        }
+
+        val requestId = ask.getString("id")
+        val deadline = System.currentTimeMillis() + 25_000
+        var png: ByteArray? = null
+        while (System.currentTimeMillis() < deadline && png == null) {
+            png = ServerUnderTest.screenshot(id, requestId)
+            if (png == null) Thread.sleep(300)
+        }
+        val picture = png ?: throw AssertionError("the tablet never sent a picture")
+        assertEquals("the picture is not a PNG", 0x89.toByte(), picture[0])
+        assertEquals("the picture is not a PNG", 'P'.code.toByte(), picture[1])
+        assertEquals("the picture is not a PNG", 'N'.code.toByte(), picture[2])
+        assertEquals("the picture is not a PNG", 'G'.code.toByte(), picture[3])
+        assertTrue("the picture is ${picture.size} bytes, which is not a page", picture.size > 1_000)
+    }
+
+    /**
+     * A server that is not there is said so, not crashed on.
+     *
+     * The reader's tablet is a tablet: it gets turned off, moved to another network and
+     * pointed at a machine that is asleep. Every one of those used to be an exception in
+     * a coroutine; the connection line is what the reader is left with.
+     */
+    @Test
+    fun aServerThatIsNotThereIsSaidSo() {
+        App.useServer("http://10.0.2.2:1")
+        val activity = launch()
+
+        val deadline = System.currentTimeMillis() + 25_000
+        var status = ""
+        while (System.currentTimeMillis() < deadline && !status.startsWith("Unreachable")) {
+            status = activity.statusForTest()
+            if (!status.startsWith("Unreachable")) Thread.sleep(250)
+        }
+        assertTrue(
+            "the app never said the server was unreachable; it said \"$status\"",
+            status.startsWith("Unreachable"),
+        )
+        assertTrue("the list should be empty, not stale", activity.sessionsForTest().isEmpty())
+    }
+
+    /** The back button is how a reader leaves the page; it has to land on the list. */
+    @Test
+    fun goingBackFromTheReaderReturnsToTheList() {
+        newSession()
+        val activity = launch()
+        assertTrue("the session list did not show it", awaitSession(activity, title))
+        open(activity, title)
+        assertTrue("the reader never showed", activity.showingReaderForTest())
+
+        App.onMain { activity.onBackPressedDispatcher.onBackPressed() }
+
+        val deadline = System.currentTimeMillis() + 10_000
+        while (System.currentTimeMillis() < deadline && activity.showingReaderForTest()) {
+            Thread.sleep(100)
+        }
+        assertTrue("back did not leave the reader", !activity.showingReaderForTest())
+        assertTrue(
+            "the list came back empty after leaving: ${titles(activity)}",
+            activity.sessionsForTest().any { it.title == title },
+        )
+    }
+
+    /**
+     * The tray's controls are buttons that can be seen.
+     *
+     * The bug this pins: the tray used plain `<Button>`s, which AppCompat inflates as
+     * `MaterialButton`, took the dark Material background and painted the label black on
+     * black. Robolectric sees the class; a device sees the class too, and this is the
+     * layer that runs on every push.
+     */
+    @Test
+    fun theVoiceTrayShowsRealButtons() {
+        newSession()
+        val activity = launch()
+        assertTrue("the session list did not show it", awaitSession(activity, title))
+        open(activity, title)
+        Page.awaitElementMap(activity.webView)
+        App.onMain { activity.setToolMode(ToolMode.VOICE) }
+
+        var states = emptyList<Pair<String, android.view.View>>()
+        App.onMain {
+            states = listOf(
+                "Done" to activity.trayButtonForTest(R.id.voiceDone),
+                "Discard" to activity.trayButtonForTest(R.id.voiceDiscard),
+            )
+        }
+        for ((name, view) in states) {
+            assertTrue(
+                "$name is a ${view.javaClass.name}, and a MaterialButton paints itself " +
+                    "dark with a dark label",
+                view is androidx.appcompat.widget.AppCompatButton,
+            )
+            assertTrue("$name is not shown", view.isShown)
+            assertTrue("$name has no background", view.background != null)
+        }
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────
 
     private fun newSession(): String =
@@ -212,4 +495,46 @@ class AppFlowTest {
         }
         return bound
     }
+
+    /** The groups the overlay is holding, once the page's search has answered. */
+    private fun awaitGroups(activity: MainActivity, timeoutMs: Long = 10_000): List<BindGroup> {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            val groups = activity.boundGroupsForTest()
+            if (groups.isNotEmpty()) return groups
+            Thread.sleep(100)
+        }
+        return emptyList()
+    }
+
+    /**
+     * The annotations the server ends up holding, once it has the submission.
+     *
+     * `/result` blocks while the session is still active, so this waits for the submit to
+     * land first and then asks once; there is no retry of a blocked poll in here.
+     */
+    private fun awaitAnnotations(id: String, timeoutMs: Long = 25_000): org.json.JSONArray {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        var last = ""
+        while (System.currentTimeMillis() < deadline) {
+            val result = try {
+                ServerUnderTest.result(id)
+            } catch (error: Throwable) {
+                last = error.message ?: error.toString()
+                Thread.sleep(300)
+                continue
+            }
+            val annotations = result.optJSONArray("annotations") ?: org.json.JSONArray()
+            if (annotations.length() > 0) return annotations
+            last = result.optString("status")
+            Thread.sleep(300)
+        }
+        throw AssertionError("no annotations ever arrived; the session said \"$last\"")
+    }
+
+    /** A one-pixel PNG: enough for the server to accept it and the WebView to decode it. */
+    private val pixelPng: ByteArray = android.util.Base64.decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+        android.util.Base64.NO_WRAP,
+    )
 }
