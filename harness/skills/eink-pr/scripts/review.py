@@ -31,7 +31,12 @@ TAG_BOOST = {
     "concurrency": 2.0,
 }
 MARK_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-REQUIRED_FINDING_FIELDS = ("file", "line", "claim", "action")
+REQUIRED_FINDING_FIELDS = ("file", "line", "claim", "action", "refutation")
+VERIFIED = ("confirmed", "plausible", "refuted")
+# A finding outside the diff survives only with this tag: the evidence sits in an unchanged
+# caller, and the anchor names the changed line that breaks it.
+CALLER_BROKEN = "caller-broken"
+HUNK_HEADER = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 
 # Single words are matched on word boundaries: a substring test flagged "every" as the
 # filler "very", and "adjust" as "just".
@@ -104,6 +109,9 @@ def validate_finding(finding, index=0):
     confidence = finding.get("confidence", 1.0)
     if not isinstance(confidence, (int, float)) or not 0.0 <= float(confidence) <= 1.0:
         problems.append(f"finding[{index}] confidence {confidence!r} not in 0..1")
+    verified = finding.get("verified")
+    if verified is not None and verified not in VERIFIED:
+        problems.append(f"finding[{index}] verified {verified!r} not in {VERIFIED}")
     return problems
 
 
@@ -112,6 +120,42 @@ def validate_document(pr, findings):
     for index, finding in enumerate(findings):
         problems.extend(validate_finding(finding, index))
     return problems
+
+
+def parse_diff_hunks(diff_text):
+    """Unified diff -> {path: [(first, last), ...]} on the new side.
+
+    Ranges include the hunk's context lines: a finding three lines from a change is still
+    about that change. A deleted file has no new side and is left out.
+    """
+    hunks = {}
+    path = None
+    for line in diff_text.splitlines():
+        if line.startswith("+++ "):
+            target = line[4:].strip()
+            path = None if target == "/dev/null" else re.sub(r"^b/", "", target)
+            if path is not None:
+                hunks.setdefault(path, [])
+            continue
+        match = HUNK_HEADER.match(line)
+        if match and path is not None:
+            first = int(match.group(1))
+            length = int(match.group(2)) if match.group(2) is not None else 1
+            hunks[path].append((first, first + max(length, 1) - 1))
+    return hunks
+
+
+def outside_diff(finding, hunks):
+    """Why a finding is outside the change, or None when it is inside it."""
+    if CALLER_BROKEN in (finding.get("tags") or []):
+        return None
+    ranges = hunks.get(finding["file"])
+    if ranges is None:
+        return f"not in the diff: {finding['file']} is unchanged"
+    line = int(finding["line"])
+    if not any(first <= line <= last for first, last in ranges):
+        return f"outside the changed hunks of {finding['file']}"
+    return None
 
 
 def file_line_count(checkout, relative_path):
@@ -198,8 +242,12 @@ def rank_key(finding, interfaces=None):
 
 
 def filter_findings(findings, checkout=None, limit=6, per_file=2, allow_nits=False,
-                    interfaces=None):
-    """Return (kept, dropped) where dropped is a list of (finding, reason)."""
+                    interfaces=None, hunks=None):
+    """Return (kept, dropped) where dropped is a list of (finding, reason).
+
+    hunks, from parse_diff_hunks, drops findings outside the change. Every finding must
+    carry the verifier's `verified`: an unverified one is dropped, not trusted.
+    """
     dropped = []
     valid = []
     nits = []
@@ -208,6 +256,18 @@ def filter_findings(findings, checkout=None, limit=6, per_file=2, allow_nits=Fal
         if problems:
             dropped.append((finding, "invalid: " + "; ".join(problems)))
             continue
+        verified = finding.get("verified")
+        if verified is None:
+            dropped.append((finding, "unverified: run the verifier (5c)"))
+            continue
+        if verified == "refuted":
+            dropped.append((finding, "refuted by the verifier"))
+            continue
+        if hunks is not None:
+            reason = outside_diff(finding, hunks)
+            if reason:
+                dropped.append((finding, reason))
+                continue
         severity = finding.get("severity")
         confidence = float(finding.get("confidence", 1.0))
         if severity == "nit":
@@ -335,30 +395,40 @@ DERIVED_LABEL = {
 }
 
 
+STATED_VERDICTS = {
+    "yes": "Yes", "lgtm": "Yes", "approve": "Yes",
+    "no": "No", "refuse": "No", "reject": "No",
+    "with fixes": "With fixes", "fixes": "With fixes", "changes": "With fixes",
+}
+
+
 def render_verdict(pr, findings):
     """The answer before the evidence.
 
     A reader who trusts the author stops after one line; a reader who does not has the
-    whole page to argue with. Deriving it from severity keeps the two from disagreeing:
-    a brief that says "Yes" above a blocking finding is the failure this prevents.
+    whole page to argue with. Deriving it from the verifier's confirmed findings keeps the
+    two from disagreeing, in both directions: "Yes" above a confirmed blocker, and "With
+    fixes" above a page of unconfirmed suggestions.
     """
-    stated = str(pr.get("verdict") or "").strip().lower()
-    reason = str(pr.get("verdict_reason") or "").strip()
-    if stated in ("yes", "lgtm", "approve"):
-        verdict = "Yes"
-    elif stated in ("no", "refuse", "reject"):
+    blocking = [f for f in findings if f.get("verified") == "confirmed"]
+    if any(f.get("severity") == "critical" for f in blocking):
         verdict = "No"
-    elif stated in ("with fixes", "fixes", "changes"):
-        verdict = "With fixes"
-    elif any(f.get("severity") in ("critical", "major") for f in findings):
-        verdict = "No" if any(f.get("severity") == "critical" for f in findings) else "With fixes"
-    elif findings:
+    elif any(f.get("severity") == "major" for f in blocking):
         verdict = "With fixes"
     else:
         verdict = "Yes"
+    # A stated verdict only lends its reason: one stricter than the confirmed findings
+    # support is how a page of suggestions ends up reading "With fixes".
+    stated = STATED_VERDICTS.get(str(pr.get("verdict") or "").strip().lower())
+    reason = str(pr.get("verdict_reason") or "").strip() if stated == verdict else ""
     if not reason:
         # Point at the finding that decides it rather than inventing a rationale.
-        reason = "**A** is the one that matters." if findings else "nothing actionable found."
+        if verdict != "Yes":
+            reason = "**A** is the one that matters."
+        elif findings:
+            reason = "nothing blocking; the findings are suggestions."
+        else:
+            reason = "nothing actionable found."
     reason = ensure_sentence(reason).rstrip(".")
     return f"**Ready?** {verdict} — {reason}."
 
@@ -720,11 +790,24 @@ def split_spot(spot):
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
+def changed_paths(args):
+    changed = list(getattr(args, "changed_file", None) or [])
+    if getattr(args, "changed_files_from", None):
+        with open(args.changed_files_from) as handle:
+            changed += [line.strip() for line in handle if line.strip()]
+    return changed
+
+
 def cmd_filter(args):
     pr, findings = load_document(args.findings)
+    hunks = None
+    if args.diff:
+        with open(args.diff) as handle:
+            hunks = parse_diff_hunks(handle.read())
     kept, dropped = filter_findings(
         findings, checkout=args.checkout, limit=args.max, per_file=args.per_file,
-        allow_nits=args.allow_nits)
+        allow_nits=args.allow_nits, interfaces=interface_files(changed_paths(args)),
+        hunks=hunks)
     payload = {"pr": pr, "findings": kept, "dropped": [
         {"file": f.get("file"), "line": f.get("line"), "claim": f.get("claim"), "reason": r}
         for f, r in dropped]}
@@ -757,14 +840,10 @@ def cmd_render(args):
 def cmd_lint(args):
     with open(args.file) as handle:
         markdown = handle.read()
-    changed = list(getattr(args, "changed_file", None) or [])
-    if getattr(args, "changed_files_from", None):
-        with open(args.changed_files_from) as handle:
-            changed += [line.strip() for line in handle if line.strip()]
     problems = lint_brief(markdown, max_words=args.max_words,
                           max_bullet_words=args.max_bullet_words,
                           max_sentence_words=args.max_sentence_words,
-                          interfaces=interface_files(changed))
+                          interfaces=interface_files(changed_paths(args)))
     if not problems:
         print("brief ok")
         return 0
@@ -792,6 +871,7 @@ def main(argv=None):
     watch.add_argument("--max", type=int, default=6)
     watch.add_argument("--per-file", type=int, default=2)
     watch.add_argument("--allow-nits", action="store_true")
+    watch.add_argument("--diff", help="unified diff of the change; drops findings outside it")
     # The files the change touches: a contract in the diff outranks an implementation file,
     # because the contract is what the reviewer is being asked to agree with.
     watch.add_argument("--changed-file", action="append",

@@ -61,7 +61,9 @@
       "claim": "f1 problem alpha",
       "evidence": "e",
       "action": "check alpha",
-      "tags": []
+      "tags": [],
+      "refutation": "no comment, test or description line explains it",
+      "verified": "confirmed"
     },
     {
       "lens": "correctness",
@@ -72,7 +74,9 @@
       "claim": "f1 problem beta",
       "evidence": "e",
       "action": "check beta",
-      "tags": []
+      "tags": [],
+      "refutation": "no comment, test or description line explains it",
+      "verified": "confirmed"
     },
     {
       "lens": "correctness",
@@ -83,7 +87,9 @@
       "claim": "f1 problem gamma",
       "evidence": "e",
       "action": "check gamma",
-      "tags": []
+      "tags": [],
+      "refutation": "no comment, test or description line explains it",
+      "verified": "confirmed"
     },
     {
       "lens": "correctness",
@@ -94,7 +100,9 @@
       "claim": "f2 problem alpha",
       "evidence": "e",
       "action": "check alpha",
-      "tags": []
+      "tags": [],
+      "refutation": "no comment, test or description line explains it",
+      "verified": "confirmed"
     },
     {
       "lens": "correctness",
@@ -105,7 +113,9 @@
       "claim": "f2 problem alpha",
       "evidence": "e",
       "action": "check alpha",
-      "tags": []
+      "tags": [],
+      "refutation": "no comment, test or description line explains it",
+      "verified": "confirmed"
     },
     {
       "lens": "correctness",
@@ -116,7 +126,9 @@
       "claim": "f3 problem alpha",
       "evidence": "e",
       "action": "check alpha",
-      "tags": []
+      "tags": [],
+      "refutation": "no comment, test or description line explains it",
+      "verified": "confirmed"
     },
     {
       "lens": "correctness",
@@ -127,7 +139,9 @@
       "claim": "f4 problem alpha",
       "evidence": "e",
       "action": "check alpha",
-      "tags": []
+      "tags": [],
+      "refutation": "no comment, test or description line explains it",
+      "verified": "confirmed"
     },
     {
       "lens": "correctness",
@@ -138,7 +152,9 @@
       "claim": "f5 problem alpha",
       "evidence": "e",
       "action": "check alpha",
-      "tags": []
+      "tags": [],
+      "refutation": "no comment, test or description line explains it",
+      "verified": "confirmed"
     },
     {
       "lens": "correctness",
@@ -149,7 +165,9 @@
       "claim": "f6 problem alpha",
       "evidence": "e",
       "action": "check alpha",
-      "tags": []
+      "tags": [],
+      "refutation": "no comment, test or description line explains it",
+      "verified": "confirmed"
     },
     {
       "lens": "correctness",
@@ -160,7 +178,9 @@
       "claim": "f7 problem alpha",
       "evidence": "e",
       "action": "check alpha",
-      "tags": []
+      "tags": [],
+      "refutation": "no comment, test or description line explains it",
+      "verified": "confirmed"
     },
     {
       "lens": "correctness",
@@ -171,7 +191,9 @@
       "claim": "f8 problem alpha",
       "evidence": "e",
       "action": "check alpha",
-      "tags": []
+      "tags": [],
+      "refutation": "no comment, test or description line explains it",
+      "verified": "confirmed"
     },
     {
       "lens": "correctness",
@@ -182,7 +204,9 @@
       "claim": "f9 problem alpha",
       "evidence": "e",
       "action": "check alpha",
-      "tags": []
+      "tags": [],
+      "refutation": "no comment, test or description line explains it",
+      "verified": "confirmed"
     },
     {
       "lens": "correctness",
@@ -193,7 +217,9 @@
       "claim": "f10 problem alpha",
       "evidence": "e",
       "action": "check alpha",
-      "tags": []
+      "tags": [],
+      "refutation": "no comment, test or description line explains it",
+      "verified": "confirmed"
     },
     {
       "lens": "style",
@@ -204,7 +230,9 @@
       "claim": "naming here is inconsistent",
       "evidence": "e",
       "action": "rename it",
-      "tags": []
+      "tags": [],
+      "refutation": "no comment, test or description line explains it",
+      "verified": "confirmed"
     },
     {
       "lens": "style",
@@ -215,7 +243,9 @@
       "claim": "this helper is duplicated",
       "evidence": "e",
       "action": "reuse the shared helper",
-      "tags": []
+      "tags": [],
+      "refutation": "no comment, test or description line explains it",
+      "verified": "confirmed"
     },
     {
       "lens": "style",
@@ -226,7 +256,9 @@
       "claim": "extra blank line",
       "evidence": "e",
       "action": "remove it",
-      "tags": []
+      "tags": [],
+      "refutation": "no comment, test or description line explains it",
+      "verified": "confirmed"
     },
     {
       "lens": "style",
@@ -237,7 +269,9 @@
       "claim": "comment casing",
       "evidence": "e",
       "action": "fix it",
-      "tags": []
+      "tags": [],
+      "refutation": "no comment, test or description line explains it",
+      "verified": "confirmed"
     },
     {
       "lens": "style",
@@ -248,7 +282,9 @@
       "claim": "trailing whitespace",
       "evidence": "e",
       "action": "trim it",
-      "tags": []
+      "tags": [],
+      "refutation": "no comment, test or description line explains it",
+      "verified": "confirmed"
     },
     {
       "lens": "docs",
@@ -259,7 +295,9 @@
       "claim": "the doc comment is stale",
       "evidence": "e",
       "action": "update it",
-      "tags": []
+      "tags": [],
+      "refutation": "no comment, test or description line explains it",
+      "verified": "confirmed"
     },
     {
       "lens": "docs",
@@ -270,7 +308,9 @@
       "claim": "no module doc",
       "evidence": "e",
       "action": "add one",
-      "tags": []
+      "tags": [],
+      "refutation": "no comment, test or description line explains it",
+      "verified": "confirmed"
     },
     {
       "lens": "docs",
@@ -281,7 +321,9 @@
       "claim": "README not updated",
       "evidence": "e",
       "action": "update it",
-      "tags": []
+      "tags": [],
+      "refutation": "no comment, test or description line explains it",
+      "verified": "confirmed"
     },
     {
       "lens": "performance",
@@ -292,7 +334,9 @@
       "claim": "allocation per item",
       "evidence": "e",
       "action": "reuse the buffer",
-      "tags": []
+      "tags": [],
+      "refutation": "no comment, test or description line explains it",
+      "verified": "confirmed"
     },
     {
       "lens": "performance",
@@ -303,7 +347,9 @@
       "claim": "clone in the loop",
       "evidence": "e",
       "action": "borrow instead",
-      "tags": []
+      "tags": [],
+      "refutation": "no comment, test or description line explains it",
+      "verified": "confirmed"
     },
     {
       "lens": "performance",
@@ -314,7 +360,9 @@
       "claim": "unbounded queue",
       "evidence": "e",
       "action": "cap it",
-      "tags": []
+      "tags": [],
+      "refutation": "no comment, test or description line explains it",
+      "verified": "confirmed"
     },
     {
       "lens": "performance",
@@ -325,7 +373,9 @@
       "claim": "repeated parse",
       "evidence": "e",
       "action": "cache it",
-      "tags": []
+      "tags": [],
+      "refutation": "no comment, test or description line explains it",
+      "verified": "confirmed"
     },
     {
       "lens": "performance",
@@ -336,7 +386,9 @@
       "claim": "linear scan",
       "evidence": "e",
       "action": "index it",
-      "tags": []
+      "tags": [],
+      "refutation": "no comment, test or description line explains it",
+      "verified": "confirmed"
     },
     {
       "lens": "performance",
@@ -347,7 +399,9 @@
       "claim": "wide struct",
       "evidence": "e",
       "action": "split it",
-      "tags": []
+      "tags": [],
+      "refutation": "no comment, test or description line explains it",
+      "verified": "confirmed"
     },
     {
       "lens": "tests",
@@ -358,7 +412,9 @@
       "claim": "no failure-path test",
       "evidence": "e",
       "action": "add one",
-      "tags": []
+      "tags": [],
+      "refutation": "no comment, test or description line explains it",
+      "verified": "confirmed"
     },
     {
       "lens": "tests",
@@ -369,7 +425,9 @@
       "claim": "assertions are weak",
       "evidence": "e",
       "action": "assert the error",
-      "tags": []
+      "tags": [],
+      "refutation": "no comment, test or description line explains it",
+      "verified": "confirmed"
     },
     {
       "lens": "tests",
@@ -380,7 +438,9 @@
       "claim": "test name is vague",
       "evidence": "e",
       "action": "rename it",
-      "tags": []
+      "tags": [],
+      "refutation": "no comment, test or description line explains it",
+      "verified": "confirmed"
     }
   ],
   "expect": {

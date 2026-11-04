@@ -52,7 +52,9 @@
       ],
       "claim": "expiry never clears notifiers",
       "evidence": "the loop only calls expire_stale",
-      "action": "clear the notifier map for each expired id"
+      "action": "clear the notifier map for each expired id",
+      "refutation": "no comment, test or description line explains it",
+      "verified": "confirmed"
     },
     {
       "lens": "correctness",
@@ -63,7 +65,9 @@
       "tags": [],
       "claim": "expiry never clears the notifier map",
       "evidence": "same loop as above",
-      "action": "clear the notifier map when expiring"
+      "action": "clear the notifier map when expiring",
+      "refutation": "no comment, test or description line explains it",
+      "verified": "confirmed"
     },
     {
       "lens": "style",
@@ -73,7 +77,9 @@
       "line": 12,
       "claim": "the variable name is unclear",
       "evidence": "single letter name",
-      "action": "rename it"
+      "action": "rename it",
+      "refutation": "no comment, test or description line explains it",
+      "verified": "confirmed"
     },
     {
       "lens": "style",
@@ -83,7 +89,9 @@
       "line": 20,
       "claim": "prefer an early return",
       "evidence": "nested if at the end",
-      "action": "return early instead"
+      "action": "return early instead",
+      "refutation": "no comment, test or description line explains it",
+      "verified": "confirmed"
     },
     {
       "lens": "performance",
@@ -93,7 +101,9 @@
       "line": 50,
       "claim": "this could be slow",
       "evidence": "",
-      "action": "measure it someday"
+      "action": "measure it someday",
+      "refutation": "no comment, test or description line explains it",
+      "verified": "confirmed"
     }
   ],
   "expect": {

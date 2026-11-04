@@ -56,7 +56,9 @@
       ],
       "claim": "the new field reuses tag 3",
       "evidence": "",
-      "action": "pick an unused tag"
+      "action": "pick an unused tag",
+      "refutation": "no comment, test or description line explains it",
+      "verified": "confirmed"
     },
     {
       "lens": "contracts",
@@ -70,7 +72,9 @@
       ],
       "claim": "the new field is required and breaks old clients",
       "evidence": "the field has no optional marker",
-      "action": "mark it optional or version the message"
+      "action": "mark it optional or version the message",
+      "refutation": "no comment, test or description line explains it",
+      "verified": "confirmed"
     },
     {
       "lens": "tests",
@@ -81,7 +85,9 @@
       "tags": [],
       "claim": "the pagination path has no test",
       "evidence": "no test covers the last page",
-      "action": "cover the empty page and the last page"
+      "action": "cover the empty page and the last page",
+      "refutation": "no comment, test or description line explains it",
+      "verified": "confirmed"
     },
     {
       "lens": "correctness",
@@ -92,7 +98,9 @@
       "tags": [],
       "claim": "the cursor is not validated",
       "evidence": "grep",
-      "action": "check the cursor"
+      "action": "check the cursor",
+      "refutation": "no comment, test or description line explains it",
+      "verified": "confirmed"
     }
   ],
   "expect": {

@@ -24,6 +24,8 @@ def finding(**overrides):
         "claim": "expiry never clears notifiers",
         "evidence": "the loop calls expire_stale only",
         "action": "call notify_and_cleanup for each expired id",
+        "refutation": "no comment or test explains the skipped cleanup",
+        "verified": "confirmed",
         "tags": [],
     }
     base.update(overrides)
@@ -147,6 +149,73 @@ class FilterTests(unittest.TestCase):
         kept, _ = review.filter_findings([finding(severity="minor", evidence="")])
         self.assertEqual(len(kept), 1)
 
+    def test_a_finding_must_say_how_its_reviewer_tried_to_refute_it(self):
+        kept, dropped = review.filter_findings([finding(refutation="")])
+        self.assertEqual(kept, [])
+        self.assertIn("missing refutation", dropped[0][1])
+
+    def test_an_unverified_finding_is_dropped_not_trusted(self):
+        unverified = finding()
+        del unverified["verified"]
+        kept, dropped = review.filter_findings([unverified])
+        self.assertEqual(kept, [])
+        self.assertIn("unverified", dropped[0][1])
+
+    def test_a_refuted_finding_is_dropped(self):
+        kept, dropped = review.filter_findings([finding(verified="refuted")])
+        self.assertEqual(kept, [])
+        self.assertIn("refuted", dropped[0][1])
+
+    def test_a_plausible_finding_survives(self):
+        kept, _ = review.filter_findings([finding(verified="plausible")])
+        self.assertEqual(len(kept), 1)
+
+
+DIFF = """\
+diff --git a/server/src/app.rs b/server/src/app.rs
+--- a/server/src/app.rs
++++ b/server/src/app.rs
+@@ -8,4 +8,6 @@ fn expire_loop() {
+@@ -40 +42 @@ fn other() {
+diff --git a/server/src/gone.rs b/server/src/gone.rs
+--- a/server/src/gone.rs
++++ /dev/null
+@@ -1,3 +0,0 @@
+"""
+
+
+class DiffAnchorTests(unittest.TestCase):
+    def test_parses_new_side_ranges_and_skips_deleted_files(self):
+        self.assertEqual(review.parse_diff_hunks(DIFF), {"server/src/app.rs": [(8, 13), (42, 42)]})
+
+    def test_a_finding_inside_a_hunk_is_kept(self):
+        hunks = review.parse_diff_hunks(DIFF)
+        kept, _ = review.filter_findings([finding(line=10), finding(line=42, claim="other")],
+                                         hunks=hunks)
+        self.assertEqual(len(kept), 2)
+
+    def test_a_finding_on_an_unchanged_file_is_dropped(self):
+        kept, dropped = review.filter_findings(
+            [finding(file="server/src/untouched.rs")], hunks=review.parse_diff_hunks(DIFF))
+        self.assertEqual(kept, [])
+        self.assertIn("not in the diff", dropped[0][1])
+
+    def test_a_finding_outside_the_changed_hunks_is_dropped(self):
+        kept, dropped = review.filter_findings([finding(line=30)],
+                                               hunks=review.parse_diff_hunks(DIFF))
+        self.assertEqual(kept, [])
+        self.assertIn("outside the changed hunks", dropped[0][1])
+
+    def test_a_broken_caller_may_sit_outside_the_diff(self):
+        kept, _ = review.filter_findings(
+            [finding(file="server/src/caller.rs", tags=["caller-broken"])],
+            hunks=review.parse_diff_hunks(DIFF))
+        self.assertEqual(len(kept), 1)
+
+    def test_without_a_diff_nothing_is_dropped_for_its_anchor(self):
+        kept, _ = review.filter_findings([finding(file="server/src/untouched.rs")])
+        self.assertEqual(len(kept), 1)
+
 
 class RenderTests(unittest.TestCase):
     def test_assigns_letters_and_builds_the_marks_legend(self):
@@ -169,10 +238,23 @@ class RenderTests(unittest.TestCase):
         clean = review.render_brief({"title": "t"}, [])[0]
         self.assertIn("**Ready?** Yes — ", clean)
 
-    def test_a_stated_verdict_is_kept_and_gets_its_reason(self):
+    def test_a_stated_verdict_that_agrees_lends_its_reason(self):
         markdown, _ = review.render_brief(
-            {"title": "t", "verdict": "with fixes", "verdict_reason": "the leak is real"}, [])
+            {"title": "t", "verdict": "with fixes", "verdict_reason": "the leak is real"},
+            [finding(severity="major")])
         self.assertIn("**Ready?** With fixes — The leak is real.", markdown)
+
+    def test_a_stated_verdict_stricter_than_the_confirmed_findings_is_overruled(self):
+        markdown, _ = review.render_brief(
+            {"title": "t", "verdict": "with fixes", "verdict_reason": "it is still spaghetti"},
+            [finding(severity="minor")])
+        self.assertIn("**Ready?** Yes — Nothing blocking", markdown)
+        self.assertNotIn("spaghetti", markdown)
+
+    def test_only_a_confirmed_finding_blocks(self):
+        plausible = review.render_brief({"title": "t"},
+                                        [finding(severity="major", verified="plausible")])[0]
+        self.assertIn("**Ready?** Yes — ", plausible)
 
     def test_the_budget_line_states_what_needs_judgement(self):
         markdown, _ = review.render_brief(

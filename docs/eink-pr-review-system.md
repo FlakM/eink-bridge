@@ -40,25 +40,31 @@ Every reviewer subagent emits the same shape; `review.py` validates it.
   "tags": ["behavior-change", "public-api"],
   "claim": "one factual problem statement",
   "evidence": "what in the diff shows it",
-  "action": "what to change"
+  "refutation": "what the reviewer searched to disprove it",
+  "action": "what to change",
+  "verified": "confirmed|plausible|refuted"
 }
 ```
 
-A finding without a file, a line, a claim, and an action is dropped: it is not
-actionable, so it does not belong on the tablet.
+A finding without a file, a line, a claim, a refutation and an action is dropped: it is
+not actionable, so it does not belong on the tablet. `verified` is set by the blind
+verifier (SKILL.md §5c), not by the lens.
 
 ## Filter rules (deterministic, in `review.py`)
 
-1. Drop structurally invalid findings (missing file/line/claim/action).
-2. Drop findings whose line does not exist in the checkout (stale anchors).
-3. Drop `nit` unless nothing else survives or it is tagged `public-api`.
-4. Drop `confidence < 0.5` unless `severity == critical`.
-5. Deduplicate: same file, lines within 3, similar claim (token overlap) → keep the
+1. Drop structurally invalid findings (missing file/line/claim/refutation/action).
+2. Drop findings the verifier did not mark, or marked `refuted`.
+3. With `--diff`, drop findings on an unchanged file or outside every changed hunk,
+   unless tagged `caller-broken`.
+4. Drop findings whose line does not exist in the checkout (stale anchors).
+5. Drop `nit` unless nothing else survives or it is tagged `public-api`.
+6. Drop `confidence < 0.5` unless `severity == critical`.
+7. Deduplicate: same file, lines within 3, similar claim (token overlap) → keep the
    higher severity, then confidence.
-6. Cap per file (2) so one messy file cannot dominate the brief.
-7. Rank by severity, confidence, and blast radius (public-api / behavior-change /
+8. Cap per file (2) so one messy file cannot dominate the brief.
+9. Rank by severity, confidence, and blast radius (public-api / behavior-change /
    migration / security tags).
-8. Cap the total (default 6, matching the usable mark letters).
+10. Cap the total (default 6, matching the usable mark letters).
 
 ## Brevity and humanness
 

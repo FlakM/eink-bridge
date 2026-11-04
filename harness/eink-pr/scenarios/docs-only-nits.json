@@ -43,7 +43,9 @@
       "claim": "the anchor is misspelled",
       "evidence": "e",
       "action": "fix the anchor",
-      "tags": []
+      "tags": [],
+      "refutation": "no comment, test or description line explains it",
+      "verified": "confirmed"
     },
     {
       "lens": "docs",
@@ -54,7 +56,9 @@
       "claim": "the code sample is outdated",
       "evidence": "e",
       "action": "update the sample",
-      "tags": []
+      "tags": [],
+      "refutation": "no comment, test or description line explains it",
+      "verified": "confirmed"
     }
   ],
   "expect": {
