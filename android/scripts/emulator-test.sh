@@ -7,6 +7,7 @@
 #
 #   ./scripts/emulator-test.sh            # whole suite
 #   ./scripts/emulator-test.sh AppFlowTest#aSubmittedNoteReachesTheServer
+#   EINK_EMULATOR_WINDOW=1 ./scripts/emulator-test.sh   # watch it happen
 #
 # Requires KVM. On NixOS the emulator comes from the Android SDK in the dev shell; on CI
 # the same, and /dev/kvm is present on GitHub's Linux runners.
@@ -129,10 +130,21 @@ else
         tail -20 "$TMP/avd.log" >&2
         exit 1
     fi
-    echo "booting the emulator headless on $SERIAL"
-    "$SDK/emulator/emulator" -avd "$AVD_NAME" -port "$EMULATOR_PORT" \
-        -no-window -no-audio -no-snapshot -no-boot-anim -gpu swiftshader_indirect \
-        >"$TMP/emulator.log" 2>&1 &
+    # `EINK_EMULATOR_WINDOW=1 just test-emulator` opens the emulator's own window, so the
+    # run can be watched: the suite drives the app through every screen in under a minute,
+    # which is hard to follow headless but obvious on a screen.
+    EMULATOR_ARGS=(-avd "$AVD_NAME" -port "$EMULATOR_PORT"
+        -no-audio -no-snapshot -no-boot-anim -gpu swiftshader_indirect)
+    if [ "${EINK_EMULATOR_WINDOW:-0}" != "1" ]; then
+        EMULATOR_ARGS+=(-no-window)
+    else
+        # The emulator's Qt has an xcb plugin and no Wayland one, and a Wayland session
+        # exports QT_QPA_PLATFORM=wayland for it -- which fails with "no Qt platform
+        # plugin could be initialized". It has to be xcb, not merely a default.
+        export QT_QPA_PLATFORM=xcb
+    fi
+    echo "booting the emulator${EINK_EMULATOR_WINDOW:+ with a window} on $SERIAL"
+    "$SDK/emulator/emulator" "${EMULATOR_ARGS[@]}" >"$TMP/emulator.log" 2>&1 &
     EMULATOR_PID=$!
     STARTED_EMULATOR=1
 
@@ -167,7 +179,18 @@ fi
 echo "running the instrumented suite on $SERIAL"
 
 # `10.0.2.2` is how the emulator reaches the host's loopback.
+LOG="$TMP/gradle.log"
+status=0
 cd "$ANDROID_DIR"
 ANDROID_SERIAL="$SERIAL" ./gradlew --console=plain connectedDebugAndroidTest \
     "-Pandroid.testInstrumentationRunnerArguments.serverUrl=http://10.0.2.2:$PORT" \
-    ${FILTER:+-Pandroid.testInstrumentationRunnerArguments.class="com.flakm.einkbridge.$FILTER"}
+    ${FILTER:+-Pandroid.testInstrumentationRunnerArguments.class="com.flakm.einkbridge.$FILTER"} \
+    2>&1 | tee "$LOG" || status=$?
+
+# A filter that matches nothing exits zero and reports success, which is how a typo
+# becomes a green run. The same rule the mutation harness learned the hard way.
+if [ "$status" -eq 0 ] && grep -q "Starting 0 tests" "$LOG"; then
+    echo "error: the filter \"${FILTER:-<none>}\" matched no test; check the class and method name" >&2
+    status=1
+fi
+exit "$status"
