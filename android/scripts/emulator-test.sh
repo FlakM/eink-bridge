@@ -94,6 +94,13 @@ if ! curl -sf "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1; then
     tail -20 "$TMP/server.log" >&2
     exit 1
 fi
+# Health can be answered by something else on the port: our server would have exited
+# without binding, and the suite would run against a stranger's state directory.
+if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+    echo "error: port $PORT is already in use by another process; set EINK_TEST_PORT" >&2
+    tail -10 "$TMP/server.log" >&2
+    exit 1
+fi
 
 # ── the emulator ─────────────────────────────────────────────────────────────
 # The emulator this run owns, by port, and every adb call below names it: the reader's

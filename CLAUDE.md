@@ -212,9 +212,10 @@ class). CI runs it on every push; it needs `/dev/kvm`. The emulator and its syst
 are a gigabyte, so they live in their own shell (`nix develop .#emulator`); the recipe
 enters it, and the other jobs keep the small SDK.
 
-`EINK_EMULATOR_WINDOW=1 just test-emulator` opens the emulator's window so the run can be
-watched, and `just test-emulator 'AppFlowTest#<method>'` runs one path; a filter that matches
-no test fails rather than reporting a green run with nothing in it.
+`just watch-emulator` is the same run with the emulator's window open, so the app can be
+watched being driven; both recipes take a filter (`just test-emulator
+'AppFlowTest#<method>'`) and a filter that matches no test fails rather than reporting a
+green run with nothing in it.
 
 `just test` is the gate: the Rust suite (404 tests across 25 binaries, about three
 seconds), the tablet's 285 JVM tests, and the 85 harness tests. The server part is fast

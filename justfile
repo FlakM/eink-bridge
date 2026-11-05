@@ -219,6 +219,11 @@ test-android:
 test-emulator filter='':
     nix develop .#emulator -c ./android/scripts/emulator-test.sh {{filter}}
 
+# the same suite with the emulator's window open, to watch the app being driven
+# (`just watch-emulator 'AppFlowTest#<method>'` for one path)
+watch-emulator filter='':
+    EINK_EMULATOR_WINDOW=1 nix develop .#emulator -c ./android/scripts/emulator-test.sh {{filter}}
+
 # the channel's node dependencies live in node_modules, which is not in the repo, so a
 # fresh clone -- and every CI job -- had none of them and the delivery tests failed at
 # module resolution

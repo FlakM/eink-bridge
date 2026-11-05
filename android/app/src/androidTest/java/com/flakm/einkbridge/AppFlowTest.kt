@@ -1,13 +1,16 @@
 package com.flakm.einkbridge
 
+import android.Manifest
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.filters.LargeTest
+import androidx.test.rule.GrantPermissionRule
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Before
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 
@@ -25,6 +28,17 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 @LargeTest
 class AppFlowTest {
+
+    /**
+     * Granted before the app launches, so the system does not put a permission dialog in
+     * front of the suite. It is the app's own launch-time request, not a test artifact:
+     * a fresh install asks once, and a headless run should not be answering for a reader.
+     */
+    @get:Rule
+    val permissions: GrantPermissionRule = GrantPermissionRule.grant(
+        Manifest.permission.POST_NOTIFICATIONS,
+        Manifest.permission.RECORD_AUDIO,
+    )
 
     private var scenario: ActivityScenario<MainActivity>? = null
     private val sessions = mutableListOf<String>()
