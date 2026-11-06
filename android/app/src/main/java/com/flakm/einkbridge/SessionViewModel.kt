@@ -14,7 +14,6 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
@@ -39,7 +38,7 @@ internal class SessionViewModel(app: Application) : AndroidViewModel(app) {
     private val sessionRepo = SessionRepository(app)
     private val docCache = DocumentCache(app)
     private val client = HttpClients.withToken(
-        OkHttpClient.Builder()
+        HttpClients.builder()
             .connectTimeout(5, TimeUnit.SECONDS)
             .readTimeout(10, TimeUnit.SECONDS)
             .build()

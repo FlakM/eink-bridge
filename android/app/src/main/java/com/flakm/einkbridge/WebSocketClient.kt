@@ -1,7 +1,6 @@
 package com.flakm.einkbridge
 
 import android.util.Log
-import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
@@ -21,7 +20,7 @@ class WebSocketClient(
     private val handler = android.os.Handler(android.os.Looper.getMainLooper())
     @Volatile private var stopped = false
     private val retry = Runnable { if (!stopped) connect() }
-    private val client = OkHttpClient.Builder()
+    private val client = HttpClients.builder()
         .readTimeout(0, TimeUnit.MILLISECONDS)
         .pingInterval(10, TimeUnit.SECONDS)
         .build()

@@ -273,7 +273,7 @@ internal class VoiceSession(
 ) {
     private val url = voiceSocketUrl(serverUrl, sessionId, token)
     private val main = android.os.Handler(android.os.Looper.getMainLooper())
-    private val client = OkHttpClient.Builder().readTimeout(0, TimeUnit.MILLISECONDS).pingInterval(10, TimeUnit.SECONDS).build()
+    private val client = HttpClients.builder().readTimeout(0, TimeUnit.MILLISECONDS).pingInterval(10, TimeUnit.SECONDS).build()
     private var ws: WebSocket? = null
     @Volatile private var micStopped = false
     @Volatile private var closed = false

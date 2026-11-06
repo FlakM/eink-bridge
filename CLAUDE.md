@@ -252,6 +252,7 @@ be exercised in a unit test without racing every other test in the binary.
 | WebSocket gauge leak | `cargo test --test ws_metrics_test` |
 | The tablet's own logic | `just test-android` |
 | The tablet's socket messages (`WsEvent`) | `just test-android` (`WsEventTest`) |
+| Finding the server after the tablet wakes (`ServerDns`) | `just test-android` (`ServerDnsTest`) |
 | Harness tools, skills, the nix module | `just harness-test`, `nix build .#harness-tools`, then build the host with `--override-input eink-bridge path:$PWD` |
 | Android end to end (app + server + WebView) | `just test-emulator` — needs `/dev/kvm`, boots a headless AVD and its own server from `nix develop .#emulator` |
 | WebSocket heartbeat / half-open sockets | `cargo test --test ws_heartbeat_test` |
@@ -444,7 +445,15 @@ just coverage-android    # JaCoCo report
 solves on the server, and holds the same safety property: ink follows the top-left of its
 paragraph (so a margin note stays beside its line when the paragraph grows), a bound note
 whose paragraph is gone is archived rather than drawn over unrelated text, and the
-archived count is the truth about what the reader can no longer see. A *free* stroke
+archived count is the truth about what the reader can no longer see.
+
+After the tablet wakes or rejoins Wi-Fi, its resolver can lose the server for minutes:
+`amd-pc.local` (mDNS) stays unresolvable until Wi-Fi is cycled, and `amd-pc` fails while
+the router, which does not know it, answers instead of AdGuard. Every HTTP client is built
+by `HttpClients.builder()` and resolves through `ServerDns`, which tries the other form of a
+single-label name and then the last address that answered; the WebView page is loaded
+from that address while the name is lost. `ServerDnsTest` fails if a client is built
+any other way. A *free* stroke
 always binds to the nearest paragraph however far it is -- there is no distance cap, which
 is deliberate and worth knowing before "fixing" it.
 

@@ -11,6 +11,9 @@ import java.net.URLEncoder
  * an outage from the tablet.
  */
 internal object HttpClients {
+    /** Every client starts here, so each one finds the server the same way ([ServerDns]). */
+    fun builder(): OkHttpClient.Builder = OkHttpClient.Builder().dns(ServerDns.shared)
+
     fun withToken(base: OkHttpClient, token: () -> String?): OkHttpClient =
         base.newBuilder().addInterceptor { chain ->
             val value = token()?.trim().orEmpty()

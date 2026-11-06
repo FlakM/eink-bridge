@@ -26,7 +26,6 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.collect
-import okhttp3.OkHttpClient
 import okhttp3.Request
 import com.onyx.android.sdk.api.device.epd.EpdController
 import com.onyx.android.sdk.api.device.epd.UpdateMode
@@ -63,7 +62,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var ocrOverlay: View
     private lateinit var ocrStatus: TextView
     private val client = HttpClients.withToken(
-        OkHttpClient.Builder()
+        HttpClients.builder()
             .connectTimeout(5, TimeUnit.SECONDS)
             .readTimeout(10, TimeUnit.SECONDS)
             .build()
@@ -96,6 +95,7 @@ class MainActivity : AppCompatActivity() {
             requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), NOTIFICATION_ID_UPDATE)
         }
         WebView.setWebContentsDebuggingEnabled(true)
+        ServerDns.install(this)
         sessionRepo = SessionRepository(this)
         submissionManager = SubmissionManager(client)
         docCache = DocumentCache(this)
@@ -626,23 +626,26 @@ class MainActivity : AppCompatActivity() {
      * cookie is set before the WebView asks for anything. The header still goes on the
      * main frame; the cookie exists for the subresources.
      */
-    private fun installSessionCookie() {
+    private fun installSessionCookie(base: String) {
         val token = sessionRepo.token().trim()
         if (token.isEmpty()) return
-        android.webkit.CookieManager.getInstance().setCookie(serverUrl, "eink_token=$token")
+        android.webkit.CookieManager.getInstance().setCookie(base, "eink_token=$token")
         android.webkit.CookieManager.getInstance().flush()
     }
 
+    /**
+     * The WebView resolves names on its own, so when the tablet's resolver has lost the
+     * server the page is loaded from the address [ServerDns] last reached it at.
+     */
     internal fun loadSessionPage(sessionId: String) {
-        installSessionCookie()
+        val base = ServerDns.current.usableUrl(serverUrl)
+        if (base != serverUrl) Log.w(TAG, "$serverUrl does not resolve; loading the page from $base")
+        installSessionCookie(base)
         val token = sessionRepo.token().trim()
         if (token.isEmpty()) {
-            webView.loadUrl("$serverUrl/session/$sessionId")
+            webView.loadUrl("$base/session/$sessionId")
         } else {
-            webView.loadUrl(
-                "$serverUrl/session/$sessionId",
-                mapOf("Authorization" to "Bearer $token"),
-            )
+            webView.loadUrl("$base/session/$sessionId", mapOf("Authorization" to "Bearer $token"))
         }
     }
 

@@ -29,7 +29,7 @@ internal class OcrClient(
     companion object {
         internal fun buildHttpClient(getToken: () -> String? = { null }): OkHttpClient =
             HttpClients.withToken(
-                OkHttpClient.Builder()
+                HttpClients.builder()
                     .connectTimeout(3, TimeUnit.SECONDS)
                     // The server allows up to 120 seconds for a cold Ollama request.
                     .readTimeout(130, TimeUnit.SECONDS)

@@ -50,6 +50,8 @@ SUBMISSION = SERVER.parent / "android/app/src/main/java/com/flakm/einkbridge/Sub
 SESSIONVM = SERVER.parent / "android/app/src/main/java/com/flakm/einkbridge/SessionViewModel.kt"
 PENOVERLAY = SERVER.parent / "android/app/src/main/java/com/flakm/einkbridge/PenOverlay.kt"
 WSEVENT = SERVER.parent / "android/app/src/main/java/com/flakm/einkbridge/WsEvent.kt"
+SERVERDNS = SERVER.parent / "android/app/src/main/java/com/flakm/einkbridge/ServerDns.kt"
+METRICS_REPORTER = SERVER.parent / "android/app/src/main/java/com/flakm/einkbridge/MetricsReporter.kt"
 STROKEVIEW = SERVER.parent / "android/app/src/main/java/com/flakm/einkbridge/StrokeView.kt"
 THEME = SERVER / "assets/eink-theme.tmTheme"
 HARNESS = SERVER.parent / "harness"
@@ -1082,6 +1084,34 @@ CASES = [
             'eink-pr-mark = "eink_harness.nvim_marks:main"',
         ),
         "python:test_harness_assets.SkillTests.test_every_tool_a_skill_runs_is_installed",
+    ),
+    (
+        "a lost mDNS name is not tried as a unicast one",
+        text_edit(
+            SERVERDNS,
+            """host.endsWith(".local") && host.count { it == '.' } == 1 -> listOf(host, host.removeSuffix(".local"))""",
+            """host.endsWith(".local") && host.count { it == '.' } == 1 -> listOf(host)""",
+        ),
+        "gradle:ServerDnsTest",
+    ),
+    (
+        "the tablet forgets the address that last answered",
+        text_edit(
+            SERVERDNS,
+            "if (keep.isNotEmpty()) store.remember(hostname, keep)",
+            "if (false) store.remember(hostname, keep)",
+        ),
+        "gradle:ServerDnsTest",
+    ),
+    (
+        "the page keeps dialling a name the tablet lost",
+        text_edit(SERVERDNS, "if (host !in lost) return url", "return url"),
+        "gradle:ServerDnsTest",
+    ),
+    (
+        "a client resolves the server through the system alone",
+        text_edit(METRICS_REPORTER, "HttpClients.builder()", "okhttp3.OkHttpClient.Builder()"),
+        "gradle:ServerDnsTest",
     ),
     (
         "the socket forgets which spoken notes a rewrite consumed",
