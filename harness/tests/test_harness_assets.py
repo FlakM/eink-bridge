@@ -3,9 +3,11 @@
 These catch the quiet failures — a skill that lost its frontmatter, an agent file that
 never declares a model, a pipeline stage that stopped being referenced.
 """
+import importlib
 import json
 from pathlib import Path
 import re
+import tomllib
 import unittest
 
 HARNESS = Path(__file__).resolve().parents[1]
@@ -76,13 +78,23 @@ class SkillTests(unittest.TestCase):
 
     def test_eink_pr_is_wired_to_the_pipeline_and_helpers(self):
         body = (SKILLS / "eink-pr" / "SKILL.md").read_text()
-        for reference in ("review.py", "nvim_marks.py", "ihaveadhd", "jump", "eink"):
+        for reference in ("eink-pr-review", "eink-pr-marks", "ihaveadhd", "jump", "eink"):
             self.assertIn(reference, body, f"eink-pr should reference {reference}")
 
     def test_jump_skill_points_at_the_socket_helper(self):
         body = (SKILLS / "jump" / "SKILL.md").read_text()
-        self.assertIn("nvim_marks.py", body)
+        self.assertIn("eink-pr-marks", body)
         self.assertIn("EINK_PR_SOCKET", body)
+
+    def test_every_tool_a_skill_runs_is_installed(self):
+        """Skills run the harness tools by name (a line that starts with one is a command); a renamed entry point leaves the agent
+        with a command that is not on PATH, which no other test notices."""
+        declared = tomllib.loads((SKILLS.parent / "pyproject.toml").read_text())["project"]["scripts"]
+        for module in {target.split(":")[0] for target in declared.values()}:
+            importlib.import_module(module)
+        for path in SKILLS.glob("**/*.md"):
+            for tool in set(re.findall(r"^\s*(eink-pr-[a-z-]+[a-z]|eink-watch-feedback)\b", path.read_text(), re.M)):
+                self.assertIn(tool, declared, f"{path} runs {tool}, which pyproject.toml does not install")
 
 
 class ContinueFlowTests(unittest.TestCase):

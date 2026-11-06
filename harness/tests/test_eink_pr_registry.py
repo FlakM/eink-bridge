@@ -3,18 +3,11 @@
 The failure this prevents: two PR reviews that pick the same worktree, socket, tab
 label or tablet session, and then overwrite each other's marks.
 """
-import importlib.util
 from pathlib import Path
-import sys
 import tempfile
 import unittest
 
-SCRIPTS = Path(__file__).resolve().parents[1] / "skills/eink-pr/scripts"
-spec = importlib.util.spec_from_file_location("eink_registry", SCRIPTS / "registry.py")
-registry = importlib.util.module_from_spec(spec)
-# dataclasses looks the module up in sys.modules while processing the class.
-sys.modules[spec.name] = registry
-spec.loader.exec_module(registry)
+from eink_harness import registry
 
 
 class KeyTests(unittest.TestCase):

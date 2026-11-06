@@ -13,7 +13,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -21,10 +20,8 @@ import sys
 import urllib.error
 import urllib.request
 
-SCRIPTS = Path(__file__).resolve().parent.parent / "skills/eink-pr/scripts"
-spec = importlib.util.spec_from_file_location("eink_review", SCRIPTS / "review.py")
-review = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(review)
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from eink_harness import review  # noqa: E402
 
 BRIEF = """# PR 88: Add pagination to list sessions
 

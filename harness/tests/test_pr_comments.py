@@ -1,16 +1,10 @@
 """Tests for the comment collector: placement, payload, and the record on disk."""
-import importlib.util
-import json
 import pathlib
-import sys
 import tempfile
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-spec = importlib.util.spec_from_file_location(
-    "pr_comments", ROOT / "harness/skills/eink-pr/scripts/pr_comments.py")
-comments = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(comments)
+from eink_harness import pr_comments as comments
 
 PATCH = """@@ -10,3 +10,4 @@
  context ten

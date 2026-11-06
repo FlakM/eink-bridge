@@ -49,17 +49,17 @@ resolve PR -> worktree -> Neovim workspace + diff
                  |
       verifier (subagent: confirmed / plausible / refuted)
                  |
-      review.py filter   (mechanical: only relevant, actionable findings)
+      eink-pr-review filter   (mechanical: only relevant, actionable findings)
                  |
       ihaveadhd          (model: brief and human)
                  |
-      review.py lint     (mechanical gate: refuses verbose output)
+      eink-pr-review lint     (mechanical gate: refuses verbose output)
                  |
-      review.py render   (context opening + checks + marks) -> eink -> feedback -> jump
+      eink-pr-review render   (context opening + checks + marks) -> eink -> feedback -> jump
 ```
 
 **The brief always opens with what changed, why, and how it fits the wider system**, and
-it always states what was checked. `review.py lint` enforces both, so a brief cannot reach
+it always states what was checked. `eink-pr-review lint` enforces both, so a brief cannot reach
 the tablet without them. How to collect that context, which checks to run in the
 background, and the calibrated writing prompt are in
 `references/review-prompt.md` — read it before writing any brief.
@@ -239,7 +239,7 @@ complete answer.
 Collect every reviewer's findings into one file:
 
 ```bash
-python3 <skill-base>/scripts/review.py validate --findings findings.json   # schema check
+eink-pr-review validate --findings findings.json   # schema check
 ```
 
 ## 5b. Put the contract in front of the reader
@@ -257,8 +257,8 @@ is being asked to agree with. Show it, ahead of the implementation:
 - Keep the implementation to one line per change. The reader can read code later; they
   cannot un-agree with an interface.
 
-`review.py filter --changed-file <path>` (repeatable, or `--changed-files-from <list>`)
-ranks findings on contract files first, and `review.py lint --changed-file <path>` **fails a
+`eink-pr-review filter --changed-file <path>` (repeatable, or `--changed-files-from <list>`)
+ranks findings on contract files first, and `eink-pr-review lint --changed-file <path>` **fails a
 brief that touches a contract and has neither a `## Change surface` table nor an
 `## Interfaces` section**.
 
@@ -305,7 +305,7 @@ a human:
 
 ```bash
 git -C "<worktree-dir>" diff <merge-base>..HEAD > change.diff
-python3 <skill-base>/scripts/review.py filter \
+eink-pr-review filter \
   --findings findings.json --checkout "<worktree-dir>" --diff change.diff \
   --max 6 --out filtered.json
 ```
@@ -337,8 +337,8 @@ Two layers, and both must pass:
 2. **The lint gate** — mechanical, and it blocks delivery:
 
 ```bash
-python3 <skill-base>/scripts/review.py render --findings filtered.json --out brief.md --marks-out marks.json
-python3 <skill-base>/scripts/review.py lint --file brief.md    # non-zero = fix it, do not send
+eink-pr-review render --findings filtered.json --out brief.md --marks-out marks.json
+eink-pr-review lint --file brief.md    # non-zero = fix it, do not send
 ```
 
 Wire the `ihaveadhd` output back into `filtered.json` (`claim`/`action`) and re-render,
@@ -350,14 +350,14 @@ names and re-run; never send a failing brief because it "mostly reads fine".
 Render assigns `A`–`F` to the kept findings. Set them in the running Neovim and verify:
 
 ```bash
-python3 <skill-base>/scripts/nvim_marks.py --socket "$EINK_PR_SOCKET" \
+eink-pr-marks --socket "$EINK_PR_SOCKET" \
   --marks "A:server/src/app.rs:170,B:proto/api.proto:12" --verify A,B
 ```
 
 Put the finding on its line, without burying the code under it:
 
 ```bash
-python3 <skill-base>/scripts/nvim_marks.py --socket "$EINK_PR_SOCKET" \
+eink-pr-marks --socket "$EINK_PR_SOCKET" \
   --comment "A:peek then take: two callbacks both pass the peek" \
   --comment "B:redirect_uri is rebuilt from config"
 ```
@@ -388,7 +388,7 @@ Before delivery, check that every mark in the brief resolves on disk. Repeat `--
 for a batch:
 
 ```bash
-python3 <eink-pr-base>/scripts/check_marks.py <brief.md> \
+eink-pr-check-marks <brief.md> \
   --worktree <worktree> [--worktree <second-worktree>]
 ```
 
@@ -411,7 +411,7 @@ to the important lines in the tab you opened. Nothing else.
 
 A note arrives anchored to nearby text and often names a mark letter.
 
-1. Resolve it: `review.py`'s marks map, or `jump` — `nvim_marks.py --jump B` puts the
+1. Resolve it: `eink-pr-review`'s marks map, or `jump` — `eink-pr-marks --jump B` puts the
    cursor on the line the reader meant.
 2. Read the line before changing anything.
 3. Edit **in the worktree**, never the user's main checkout, unless asked.
@@ -433,14 +433,14 @@ Comments come from two places and become one GitHub review:
   place, it belongs in the review body. Record it with:
 
 ```bash
-python3 <eink-pr-base>/scripts/pr_comments.py add \
+eink-pr-comments add \
   --pr <n> --path <file> --line <n> --body "<the note>" --source eink
 ```
 
 At the end of the review:
 
 ```bash
-python3 <eink-pr-base>/scripts/pr_comments.py list --pr <n>
+eink-pr-comments list --pr <n>
 ```
 
 Show that list in chat and ask how to post it: **pending review** (the default; the reader
@@ -449,9 +449,9 @@ answer.
 
 ```bash
 # pending review, finished in the GitHub UI
-python3 <eink-pr-base>/scripts/pr_comments.py post --pr <url> --yes
+eink-pr-comments post --pr <url> --yes
 # or submit it now
-python3 <eink-pr-base>/scripts/pr_comments.py post --pr <url> --submit --yes
+eink-pr-comments post --pr <url> --submit --yes
 ```
 
 A line outside the diff cannot take an inline comment; the script puts it in the review

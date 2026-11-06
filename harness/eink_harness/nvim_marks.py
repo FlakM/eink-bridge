@@ -22,9 +22,9 @@ notes above their lines for the findings that must not be missed. Notes are extm
 display only, never written to the file, and they move with the text.
 
 Usage:
-  nvim_marks.py --socket /tmp/x.sock --marks "A:src/app.rs:42,B:src/lib.rs:7"
-  nvim_marks.py --socket /tmp/x.sock --comment "A:this trusts the header" --verify-comments A
-  nvim_marks.py --socket /tmp/x.sock --verify A,B
+  eink-pr-marks --socket /tmp/x.sock --marks "A:src/app.rs:42,B:src/lib.rs:7"
+  eink-pr-marks --socket /tmp/x.sock --comment "A:this trusts the header" --verify-comments A
+  eink-pr-marks --socket /tmp/x.sock --verify A,B
 """
 import argparse
 import os
@@ -32,7 +32,6 @@ import re
 import subprocess
 import sys
 import tempfile
-import time
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--socket", required=True, help="Neovim --listen socket path")
@@ -45,10 +44,7 @@ parser.add_argument("--comment", action="append", default=[], metavar="LETTER:TE
 parser.add_argument("--inline", default="", help="comma list of letters whose note is drawn above its line")
 parser.add_argument("--verify-comments", default="", help="comma list of letters whose note to read back")
 parser.add_argument("--clear-comments", action="store_true", help="remove every note this script drew")
-args = parser.parse_args()
-
-if not os.path.exists(args.socket):
-    sys.exit(f"Neovim socket not found: {args.socket}")
+args = None
 
 
 def nvim(*extra):
@@ -272,84 +268,95 @@ def note_items(letters, texts=None):
     return items
 
 
-if args.marks:
-    items = [parse(spec) for spec in filter(None, (s.strip() for s in args.marks.split(",")))]
-    script = ["local items = {"]
-    script += [
-        f"  {{ letter = {lua_string(i['letter'])}, file = {lua_string(i['file'])}, line = {i['line']} }},"
-        for i in items
-    ]
-    script += [
-        "}",
-        "for _, it in ipairs(items) do",
-        "  pcall(function()",
-        "    local buf = vim.fn.bufadd(it.file)",
-        "    vim.fn.bufload(buf)",
-        "    vim.api.nvim_buf_set_mark(buf, it.letter, it.line, 1, {})",
-        "  end)",
-        "end",
-    ]
-    run_lua("\n".join(script))
-    # Read the marks back: a mark that silently missed reads as one from an older
-    # review, and marks are shared through shada.
-    pending = [i for i in items if not landed(i)]
-    if pending:
-        detail = []
-        for i in pending:
-            buffer_number, line = position(i["letter"])
-            where = buffer_path(buffer_number) if buffer_number else "unset"
-            detail.append(f"{i['letter']}: expected {i['file']}:{i['line']}, got {where}:{line}")
-        sys.exit("marks not set: " + "; ".join(detail))
-    print(f"set {len(items)} mark(s): " + ", ".join(i["letter"] for i in items))
 
-if args.verify:
-    for letter in filter(None, (s.strip() for s in args.verify.split(","))):
+def main(argv=None):
+    global args
+    args = parser.parse_args(argv)
+    if not os.path.exists(args.socket):
+        sys.exit(f"Neovim socket not found: {args.socket}")
+
+    if args.marks:
+        items = [parse(spec) for spec in filter(None, (s.strip() for s in args.marks.split(",")))]
+        script = ["local items = {"]
+        script += [
+            f"  {{ letter = {lua_string(i['letter'])}, file = {lua_string(i['file'])}, line = {i['line']} }},"
+            for i in items
+        ]
+        script += [
+            "}",
+            "for _, it in ipairs(items) do",
+            "  pcall(function()",
+            "    local buf = vim.fn.bufadd(it.file)",
+            "    vim.fn.bufload(buf)",
+            "    vim.api.nvim_buf_set_mark(buf, it.letter, it.line, 1, {})",
+            "  end)",
+            "end",
+        ]
+        run_lua("\n".join(script))
+        # Read the marks back: a mark that silently missed reads as one from an older
+        # review, and marks are shared through shada.
+        pending = [i for i in items if not landed(i)]
+        if pending:
+            detail = []
+            for i in pending:
+                buffer_number, line = position(i["letter"])
+                where = buffer_path(buffer_number) if buffer_number else "unset"
+                detail.append(f"{i['letter']}: expected {i['file']}:{i['line']}, got {where}:{line}")
+            sys.exit("marks not set: " + "; ".join(detail))
+        print(f"set {len(items)} mark(s): " + ", ".join(i["letter"] for i in items))
+
+    if args.verify:
+        for letter in filter(None, (s.strip() for s in args.verify.split(","))):
+            buffer_number, line = position(letter)
+            print(f"{letter}=unset" if not buffer_number else f"{letter}={buffer_path(buffer_number)}:{line}")
+
+    if args.clear_comments:
+        print(run_lua(CLEAR_LUA))
+
+    comments = {}
+    for spec in args.comment:
+        parsed = comment_spec(spec)
+        comments[parsed["letter"]] = parsed["text"]
+
+    if comments:
+        print(run_lua(comments_lua(note_items(sorted(comments), comments))))
+
+    if args.inline:
+        letters = [s.strip() for s in args.inline.split(",") if s.strip()]
+        print(run_lua(inline_lua(note_items(letters))))
+
+    if args.verify_comments:
+        letters = [s.strip() for s in args.verify_comments.split(",") if s.strip()]
+        out = run_lua(verify_comments_lua(note_items(letters)))
+        for line in out.splitlines():
+            print(line)
+
+    if args.jump:
+        letter = args.jump.strip()
+        if len(letter) != 1 or not letter.isalpha():
+            sys.exit(f"mark letter must be a single letter: {letter!r}")
         buffer_number, line = position(letter)
-        print(f"{letter}=unset" if not buffer_number else f"{letter}={buffer_path(buffer_number)}:{line}")
+        if not buffer_number:
+            sys.exit(f"mark {letter} is not set in this Neovim")
+        # An expression, not keys: jumping must not depend on the mode the reader is in.
+        run_lua(f'vim.cmd("normal! `" .. {lua_string(letter)})')
+        here = nvim("--remote-expr", "expand('%:p') .. ':' .. line('.')")
+        print(f"jumped to {here.stdout.strip()}")
 
-if args.clear_comments:
-    print(run_lua(CLEAR_LUA))
+    if args.open:
+        path, _, line = args.open.rpartition(":")
+        if not path or not line.isdigit():
+            sys.exit(f"--open expects FILE:LINE, got {args.open!r}")
+        resolved = os.path.realpath(os.path.abspath(path))
+        if not os.path.isfile(resolved):
+            sys.exit(f"no such file: {resolved}")
+        count = file_line_count(resolved)
+        if int(line) > count:
+            sys.exit(f"{resolved} has {count} lines, cannot open line {line}")
+        run_lua(f'vim.cmd("edit +{int(line)} " .. vim.fn.fnameescape({lua_string(resolved)}))')
+        here = nvim("--remote-expr", "expand('%:p') .. ':' .. line('.')")
+        print(f"opened {here.stdout.strip()}")
 
-comments = {}
-for spec in args.comment:
-    parsed = comment_spec(spec)
-    comments[parsed["letter"]] = parsed["text"]
 
-if comments:
-    print(run_lua(comments_lua(note_items(sorted(comments), comments))))
-
-if args.inline:
-    letters = [s.strip() for s in args.inline.split(",") if s.strip()]
-    print(run_lua(inline_lua(note_items(letters))))
-
-if args.verify_comments:
-    letters = [s.strip() for s in args.verify_comments.split(",") if s.strip()]
-    out = run_lua(verify_comments_lua(note_items(letters)))
-    for line in out.splitlines():
-        print(line)
-
-if args.jump:
-    letter = args.jump.strip()
-    if len(letter) != 1 or not letter.isalpha():
-        sys.exit(f"mark letter must be a single letter: {letter!r}")
-    buffer_number, line = position(letter)
-    if not buffer_number:
-        sys.exit(f"mark {letter} is not set in this Neovim")
-    # An expression, not keys: jumping must not depend on the mode the reader is in.
-    run_lua(f'vim.cmd("normal! `" .. {lua_string(letter)})')
-    here = nvim("--remote-expr", "expand('%:p') .. ':' .. line('.')")
-    print(f"jumped to {here.stdout.strip()}")
-
-if args.open:
-    path, _, line = args.open.rpartition(":")
-    if not path or not line.isdigit():
-        sys.exit(f"--open expects FILE:LINE, got {args.open!r}")
-    resolved = os.path.realpath(os.path.abspath(path))
-    if not os.path.isfile(resolved):
-        sys.exit(f"no such file: {resolved}")
-    count = file_line_count(resolved)
-    if int(line) > count:
-        sys.exit(f"{resolved} has {count} lines, cannot open line {line}")
-    run_lua(f'vim.cmd("edit +{int(line)} " .. vim.fn.fnameescape({lua_string(resolved)}))')
-    here = nvim("--remote-expr", "expand('%:p') .. ':' .. line('.')")
-    print(f"opened {here.stdout.strip()}")
+if __name__ == "__main__":
+    main()

@@ -18,7 +18,6 @@ use eink_bridge::app::{AppState, build_app};
 use futures_util::{SinkExt, StreamExt};
 use http_body_util::BodyExt;
 use std::time::Duration;
-use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tower::ServiceExt;
 
@@ -364,17 +363,8 @@ async fn bytes_that_are_not_a_png_are_refused_before_they_are_stored() {
 
 async fn start_server() -> (String, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
-    let state = AppState::with_config(dir.path().to_path_buf(), 5);
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    tokio::spawn(axum::serve(listener, build_app(state)).into_future());
-    for _ in 0..200 {
-        if reqwest::get(format!("{url}/api/health")).await.is_ok() {
-            return (url, dir);
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("the test server never answered on {url}");
+    let (url, _) = common::serve(AppState::with_config(dir.path().to_path_buf(), 5)).await;
+    (url, dir)
 }
 
 async fn create_session_over_http(url: &str) -> String {

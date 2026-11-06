@@ -21,7 +21,7 @@ The shipped mechanism (below) is a **portable floor**, not the ceiling.
 | Client | Mechanism | Persistent? | Pushed? | Notes |
 |---|---|---|---|---|
 | Claude Code | MCP `notifications/claude/channel` via `eink-channel` server | yes | yes | Needs `--dangerously-load-development-channels` (a dev flag). Subscription recovers pending feedback. |
-| Any | Background `watch-feedback.py` (CLI WebSocket) | **no — rearm each event** | yes | Bounded job; harness completion wakes the agent. Works everywhere; PATH shadowing must be avoided (fixed). |
+| Any | Background `eink-watch-feedback` (CLI WebSocket) | **no — rearm each event** | yes | Bounded job; harness completion wakes the agent. Works everywhere; PATH shadowing must be avoided (fixed). |
 
 Limits: the portable watcher must be re-armed after every event and can time out
 mid-review; both paths live outside the agent runtime, so neither can inject a turn,

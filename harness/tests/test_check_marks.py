@@ -1,14 +1,10 @@
 """Every mark in a brief must point at a real line before the reader can tap it."""
-import importlib.util
 import pathlib
 import tempfile
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-spec = importlib.util.spec_from_file_location(
-    "check_marks", ROOT / "harness/skills/eink-pr/scripts/check_marks.py")
-check_marks = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(check_marks)
+from eink_harness import check_marks
 
 BRIEF = """## Marks
 

@@ -1570,14 +1570,26 @@ internal class PenOverlay(
         if (_bindGroups.isNotEmpty()) syncBindGroupsToWebView()
     }
 
-    fun consumeStrokes(consumed: org.json.JSONArray?) {
-        if (consumed == null || consumed.length() == 0) return
-        val points = (0 until consumed.length()).map { i ->
-            val stroke = consumed.getJSONArray(i)
+    /**
+     * Drop what the agent consumed, as named by a `version_updated` (or the stored copy of
+     * one). Ink is named by its points; an ink-free note (spoken) by its words and anchor.
+     * Idempotent: a replay names nothing that is still held.
+     */
+    fun consume(update: org.json.JSONObject?) {
+        val strokes = update?.optJSONArray("consumed_strokes")
+        val notes = update?.optJSONArray("consumed_notes")
+        if ((strokes?.length() ?: 0) == 0 && (notes?.length() ?: 0) == 0) return
+        val points = (0 until (strokes?.length() ?: 0)).map { i ->
+            val stroke = strokes!!.getJSONArray(i)
             (0 until stroke.length()).map { j ->
                 val p = stroke.getJSONArray(j)
                 p.getDouble(0).toFloat() to p.getDouble(1).toFloat()
             }
+        }.toSet()
+        val consumedNotes = (0 until (notes?.length() ?: 0)).map { i ->
+            val note = notes!!.getJSONObject(i)
+            val anchor = note.optJSONArray("anchor")
+            note.optString("text") to (0 until (anchor?.length() ?: 0)).map { anchor!!.getString(it) }
         }.toSet()
         val kept = mutableListOf<Stroke>()
         val indices = mutableMapOf<Int, Int>()
@@ -1585,6 +1597,10 @@ internal class PenOverlay(
             if (stroke.points !in points) { indices[i] = kept.size; kept.add(stroke) }
         }
         val groups = _bindGroups.mapNotNull { group ->
+            if (group.strokeIndices.isEmpty()) {
+                val named = group.recognizedText to group.elementRefs.map { it.text }
+                return@mapNotNull group.takeUnless { named in consumedNotes }
+            }
             val remaining = group.strokeIndices.mapNotNull { indices[it] }.toSet()
             if (remaining.isEmpty()) null else group.copy(strokeIndices = remaining)
         }

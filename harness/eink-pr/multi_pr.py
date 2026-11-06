@@ -14,22 +14,17 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import os
 from pathlib import Path
-import shutil
 import subprocess
 import sys
 import tempfile
 
 HERE = Path(__file__).resolve().parent
-SCRIPTS = HERE.parent / "skills/eink-pr/scripts"
 
-spec = importlib.util.spec_from_file_location("eink_registry", SCRIPTS / "registry.py")
-registry = importlib.util.module_from_spec(spec)
-sys.modules[spec.name] = registry
-spec.loader.exec_module(registry)
+sys.path.insert(0, str(HERE.parent))
+from eink_harness import registry  # noqa: E402
 
 TITLES = [
     "Add pagination to list sessions",

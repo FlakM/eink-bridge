@@ -11,7 +11,7 @@ at the agent as prose it can act on, not as a transcript it has to decode.
 > under it); the cleanup rules are deterministic and only `shorter`, `make it a question`
 > and a free instruction reach a model, through the guard; `longer` returns to the full
 > deterministic clean rather than asking the model; the wire format is in `docs/api.md`
-> "Voice". Setup is in `CLAUDE.md` "Voice setup".
+> "Voice". Setup is in [`setup.md`](setup.md).
 
 > Vocabulary: this is speech **to** text. The other direction (text to speech) is the
 > `play` control in Phase E; everything below is voice input. Calling the whole thing

@@ -10,6 +10,24 @@ use http_body_util::BodyExt;
 use std::path::PathBuf;
 use tower::ServiceExt;
 
+/// Serve `state` on a random loopback port and wait until it answers.
+///
+/// With `ConnectInfo`, so a loopback caller is seen as one: without it every caller is
+/// "unknown" and treated as remote, which quietly disables `/source`.
+pub async fn serve(state: AppState) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let app = build_app(state).into_make_service_with_connect_info::<std::net::SocketAddr>();
+    let handle = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    for _ in 0..500 {
+        if reqwest::get(format!("{url}/api/health")).await.is_ok() {
+            return (url, handle);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("the test server never answered on {url}");
+}
+
 pub fn test_app(state_dir: PathBuf) -> Router {
     let mut state = AppState::new(state_dir);
     // Retries are real behaviour, but a test that waits 5.25 s to observe one is a test

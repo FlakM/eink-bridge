@@ -165,49 +165,6 @@ internal object Page {
     }
 
     /**
-     * Where an element is on the device's screen, for a tap.
-     *
-     * The page is laid out in CSS pixels and drawn into a WebView of some other width, so
-     * the mapping is device px per CSS px = `webView.width / viewport.width` — the same
-     * number the app's ink transform uses. `visualViewport.scale` alone is not it: on this
-     * emulator it reads 1 while the page is drawn at a third of a CSS pixel per device px.
-     */
-    fun centerOnScreen(webView: WebView, elementIndex: Int): Pair<Float, Float> {
-        val raw = eval(
-            webView,
-            """
-            (function () {
-              var el = document.querySelectorAll(
-                'h1, h2, h3, p, li, pre, blockquote, td, th, table, ul, ol, img, .diagram-block, .snippet-block, .steps-block, .diff-block'
-              )[$elementIndex];
-              if (!el) return JSON.stringify(null);
-              var r = el.getBoundingClientRect();
-              var vv = window.visualViewport;
-              return JSON.stringify({
-                x: (r.left + r.right) / 2,
-                y: (r.top + r.bottom) / 2,
-                vw: vv ? vv.width : window.innerWidth,
-                vh: vv ? vv.height : window.innerHeight,
-                scale: vv ? vv.scale : 1
-              });
-            })()
-            """.trimIndent(),
-        ) ?: throw AssertionError("could not locate element $elementIndex")
-        val point = org.json.JSONObject(raw)
-        var size = IntArray(2)
-        var origin = IntArray(2)
-        InstrumentationRegistry.getInstrumentation().runOnMainSync {
-            webView.getLocationOnScreen(origin)
-            size = intArrayOf(webView.width, webView.height)
-        }
-        val viewportWidth = point.optDouble("vw", size[0].toDouble()).toFloat().takeIf { it > 0f }
-            ?: size[0].toFloat()
-        val perCss = size[0].toFloat() / viewportWidth
-        return (origin[0] + point.getDouble("x").toFloat() * perCss) to
-            (origin[1] + point.getDouble("y").toFloat() * perCss)
-    }
-
-    /**
      * Which element the page would pick for a point, as the ink and the voice aim both do.
      *
      * This is the function that did not exist: `findNearestElement` called it by name and
@@ -223,19 +180,4 @@ internal object Page {
 
     /** The element map, as raw JSON, for the coordinates the page itself computed. */
     fun elementAt(webView: WebView, index: Int): org.json.JSONObject = elements(webView).getJSONObject(index)
-
-    /** Which elements the tablet has bound to a note, by the attribute the JS bridge sets. */
-    fun boundElements(webView: WebView): List<String> {
-        val raw = eval(
-            webView,
-            """
-            JSON.stringify(Array.prototype.map.call(
-              document.querySelectorAll('[data-bind-color]'),
-              function (el) { return el.tagName + ': ' + (el.textContent || '').trim().slice(0, 40); }
-            ))
-            """.trimIndent(),
-        ) ?: return emptyList()
-        val array = JSONArray(raw)
-        return (0 until array.length()).map { array.getString(it) }
-    }
 }

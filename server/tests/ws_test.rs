@@ -1,3 +1,4 @@
+mod common;
 use eink_bridge::app::{AppState, build_app};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
@@ -6,30 +7,11 @@ use tokio::net::TcpListener;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 async fn start_server() -> (String, tokio::task::JoinHandle<()>) {
-    let dir = tempfile::tempdir().unwrap();
-    let state = AppState::with_config(dir.keep(), 5);
-    let app = build_app(state);
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let url = format!("http://{addr}");
-    let handle = tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-    wait_until_ready(&url).await;
-    (url, handle)
-}
-
-/// Wait until the server is accepting connections instead of guessing how long it needs:
-/// a loaded machine can take much longer than the usual 50 ms, and a test that fails
-/// because of that teaches people to ignore failures.
-async fn wait_until_ready(url: &str) {
-    for _ in 0..500 {
-        if reqwest::get(format!("{url}/api/health")).await.is_ok() {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-    panic!("the test server never answered on {url}");
+    common::serve(AppState::with_config(
+        tempfile::tempdir().unwrap().keep(),
+        5,
+    ))
+    .await
 }
 
 async fn create_session(url: &str) -> String {
@@ -168,6 +150,73 @@ async fn feedback_is_only_acknowledged_by_matching_id_and_consumes_array_indices
     assert!(snapshot["pending"].is_null());
     assert_eq!(
         snapshot["last_content_update"]["consumed_strokes"],
+        json!([[[1.0, 2.0], [3.0, 4.0]]])
+    );
+    handle.abort();
+}
+
+/// A spoken note has no strokes, so only `consumed_notes` can tell the tablet it was read.
+#[tokio::test]
+async fn a_consumed_voice_note_is_named_and_an_unconsumed_one_is_not() {
+    let (url, handle) = start_server().await;
+    let id = create_session(&url).await;
+    let client = reqwest::Client::new();
+    let note = |text: &str, block: &str| {
+        json!({
+            "anchor": {"type": "explicit", "elements": [{"section_id": null, "tag": "P", "text": block}]},
+            "strokes": [],
+            "recognized_text": text,
+            "source": "voice",
+            "voice": {"raw": text}
+        })
+    };
+    client
+        .post(format!("{url}/api/sessions/{id}/request_update"))
+        .json(&json!({"annotations": [
+            note("needs an example", "Second"),
+            {"anchor": null, "strokes": [[[1, 2], [3, 4]]], "recognized_text": "ink"},
+            note("keep this", "First"),
+        ]}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let pending = client
+        .get(format!("{url}/api/sessions/{id}/feedback"))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    client
+        .put(format!("{url}/api/sessions/{id}/content"))
+        .json(&json!({
+            "content": "# Fixed",
+            "feedback_id": pending["pending"]["feedback_id"],
+            "consumed_annotations": [0, 1],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let update = client
+        .get(format!("{url}/api/sessions/{id}/feedback"))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap()["last_content_update"]
+        .clone();
+    assert_eq!(
+        update["consumed_notes"],
+        json!([{"text": "needs an example", "anchor": ["Second"]}])
+    );
+    assert_eq!(
+        update["consumed_strokes"],
         json!([[[1.0, 2.0], [3.0, 4.0]]])
     );
     handle.abort();

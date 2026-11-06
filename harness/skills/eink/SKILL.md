@@ -126,9 +126,9 @@ Claude instance must be able to run beside the first.
 SERVER_URL="${EINK_SERVER_URL:-http://localhost:3333}"
 SESSION_ID=$(eink-review --server "$SERVER_URL" push --async <file>)
 # Launch the next command with the harness's background tool, using a unique ready file:
-python3 <skill-base>/scripts/watch-feedback.py <session-id> --server "$SERVER_URL" --timeout 120 --ready-file <unique-ready-file>
+eink-watch-feedback <session-id> --server "$SERVER_URL" --timeout 120 --ready-file <unique-ready-file>
 # Then confirm the actual WebSocket handshake with a foreground command:
-python3 <skill-base>/scripts/watch-feedback.py --wait-ready <unique-ready-file>
+eink-watch-feedback --wait-ready <unique-ready-file>
 ```
 
 Run push in the foreground to obtain the ID, then launch the observer command through
@@ -385,7 +385,7 @@ Write on the page, or reply **LGTM** / **CHANGES**.
 
 Each answer is its own paragraph (a blank line between them). Consecutive lines join into
 one block, and one block is one anchor: the pen cannot land on *Why* without catching
-*What changed*, and `review.py lint` rejects a merged open.
+*What changed*, and `eink-pr-review lint` rejects a merged open.
 
 Two rules earn the page its keep, and neither is optional:
 

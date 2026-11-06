@@ -18,12 +18,63 @@ class PenOverlayTest {
         mock.simulateStroke(listOf(10f to 20f, 30f to 40f))
         mock.simulateStroke(listOf(50f to 60f, 70f to 80f))
         overlay.loadBindGroups(listOf(BindGroup(42, Color.RED, setOf(1), listOf(1), emptyList(), 50f, 60f)))
-        overlay.consumeStrokes(org.json.JSONArray("[[[10,20],[30,40]]]"))
+        overlay.consume(consumedInk)
         assertEquals(1, buf.size)
         assertEquals(50f to 60f, buf.strokes.single().points.first())
         assertEquals(setOf(0), overlay.bindGroups.single().strokeIndices)
-        overlay.consumeStrokes(org.json.JSONArray("[[[10,20],[30,40]]]"))
+        overlay.consume(consumedInk)
         assertEquals("replayed instructions must be idempotent", 1, buf.size)
+    }
+
+    private val consumedInk = org.json.JSONObject("""{"consumed_strokes":[[[10,20],[30,40]]]}""")
+
+    private fun spoken(id: Int, text: String, block: String) = BindGroup(
+        id, Color.RED, emptySet(), listOf(0), listOf(ElementRef(null, "P", block)), 0f, 0f,
+        recognizedText = text, source = "voice",
+    )
+
+    /** What the socket hands the overlay is what the server said was consumed. */
+    @Test fun aParsedRewriteDropsTheInkAndTheNoteItConsumed() {
+        val (overlay, buf, mock) = buildOverlay()
+        mock.simulateStroke(listOf(10f to 20f, 30f to 40f))
+        mock.simulateStroke(listOf(50f to 60f, 70f to 80f))
+        overlay.loadBindGroups(listOf(
+            BindGroup(1, Color.RED, setOf(1), listOf(1), emptyList(), 50f, 60f),
+            spoken(2, "needs an example", "Second."),
+            spoken(3, "keep me", "First."),
+        ))
+        val event = WsEvent.parse(
+            """{"type":"version_updated","version":2,"consumed_strokes":[[[10,20],[30,40]]],
+               "consumed_notes":[{"text":"needs an example","anchor":["Second."]}]}"""
+        ) as WsEvent.VersionUpdated
+        overlay.consume(event.consumed)
+        assertEquals(1, buf.size)
+        assertEquals(listOf(1, 3), overlay.bindGroups.map { it.id })
+    }
+
+    /** Consuming ink must not take a spoken note the agent never read with it. */
+    @Test fun consumingInkKeepsAnUnconsumedSpokenNote() {
+        val (overlay, _, mock) = buildOverlay()
+        mock.simulateStroke(listOf(10f to 20f, 30f to 40f))
+        overlay.loadBindGroups(listOf(spoken(1, "needs an example", "Second")))
+        overlay.consume(consumedInk)
+        assertEquals(listOf("needs an example"), overlay.bindGroups.map { it.recognizedText })
+    }
+
+    /** A spoken note has no strokes: only its words and its block can say it was read. */
+    @Test fun aConsumedSpokenNoteIsRemovedAndItsNeighbourKept() {
+        val (overlay, _, _) = buildOverlay()
+        overlay.loadBindGroups(listOf(
+            spoken(1, "needs an example", "Second"),
+            spoken(2, "needs an example", "First"),
+        ))
+        val update = org.json.JSONObject(
+            """{"consumed_notes":[{"text":"needs an example","anchor":["Second"]}]}""",
+        )
+        overlay.consume(update)
+        assertEquals(listOf(2), overlay.bindGroups.map { it.id })
+        overlay.consume(update)
+        assertEquals("replayed instructions must be idempotent", listOf(2), overlay.bindGroups.map { it.id })
     }
 
     // ── The pen must come back after a mode change or a rotation ────────────────

@@ -15,7 +15,7 @@ class WebSocketClient(
     private val serverUrl: String,
     private val sessionId: String,
     private val token: String? = null,
-    private val onMessage: (type: String, json: JSONObject) -> Unit,
+    private val onMessage: (WsEvent) -> Unit,
     private val onClosed: () -> Unit,
 ) {
     private val handler = android.os.Handler(android.os.Looper.getMainLooper())
@@ -40,14 +40,9 @@ class WebSocketClient(
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
-                try {
-                    val json = JSONObject(text)
-                    val type = json.optString("type", "")
-                    Log.d(TAG, "message type=$type session=$sessionId")
-                    onMessage(type, json)
-                } catch (e: Exception) {
-                    Log.w(TAG, "failed to parse message session=$sessionId", e)
-                }
+                val event = WsEvent.parse(text)
+                Log.d(TAG, "message ${text.take(200)} session=$sessionId")
+                if (event != null) onMessage(event)
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {

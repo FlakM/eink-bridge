@@ -76,7 +76,7 @@ class AppFlowTest {
         scenario = ActivityScenario.launch(MainActivity::class.java)
         var activity: MainActivity? = null
         scenario!!.onActivity { activity = it }
-        return activity!!.also { App.attach(it) }
+        return activity!!
     }
 
     @Test
@@ -195,49 +195,8 @@ class AppFlowTest {
         open(activity, title)
         Page.awaitElementMap(activity.webView)
 
-        val index = Page.elementTexts(activity.webView).indexOfFirst {
-            it.contains("second paragraph")
-        }
-        assertTrue("the second paragraph is not on the page", index >= 0)
-        val box = Page.elementAt(activity.webView, index)
-        val cx = ((box.getDouble("l") + box.getDouble("r")) / 2).toFloat()
-        val cy = ((box.getDouble("t") + box.getDouble("b")) / 2).toFloat()
-
-        val overlay = activity.overlayForTest()
-            ?: throw AssertionError("the reader has no overlay")
-        App.onMain { activity.setToolMode(ToolMode.VOICE) }
-        App.onMain {
-            overlay.onVoiceTarget = null // no microphone in this test
-            overlay.pickVoiceTargetAtForTest(cx, cy)
-        }
-
-        val groups = awaitGroups(activity)
-        assertEquals("the tap bound ${groups.size} blocks", 1, groups.size)
-        val group = groups.single()
-        assertTrue(
-            "bound to the wrong block: ${group.elementRefs.map { it.text }}",
-            group.elementRefs.any { it.text.contains("second paragraph") },
-        )
-
-        // What the tray hands back when the server answers `done`.
         val note = "the second paragraph needs an example"
-        App.onMain {
-            overlay.setVoiceNote(
-                group.id,
-                note,
-                "blocker",
-                """{"raw":"$note","seconds":2.4,"severity":"blocker"}""",
-            )
-        }
-        // The card is the reader-visible half: the words have to reach the page, not just
-        // the submission. It is drawn by the same JS that draws every other block.
-        val deadline = System.currentTimeMillis() + 10_000
-        var cards = emptyList<String>()
-        while (System.currentTimeMillis() < deadline && cards.none { it.contains("needs an example") }) {
-            cards = Page.voiceCards(activity.webView)
-            if (cards.none { it.contains("needs an example") }) Thread.sleep(200)
-        }
-        assertTrue("the page never drew the note's card: $cards", cards.any { it.contains("needs an example") })
+        speakAt(activity, "second paragraph", note)
 
         App.onMain { activity.submitForTest() }
 
@@ -258,6 +217,72 @@ class AppFlowTest {
                 anchored.getJSONObject(it).getString("text").contains("second paragraph")
             },
         )
+    }
+
+    /**
+     * The conversation the tablet exists for: the reader speaks a note and presses Update,
+     * the agent reads it, says what it is doing, and answers with a rewrite that names the
+     * note it used. The tablet shows each step and lets go of the note once it is answered.
+     *
+     * The last step is the bug this pins: a spoken note has no ink, so "consumed" named
+     * by strokes could not reach it, and the note stayed on the page to be sent again.
+     */
+    @Test
+    fun aReaderAndAnAgentTakeATurnEach() {
+        val id = newSession()
+        val activity = launch()
+        assertTrue("the session list did not show it", awaitSession(activity, title))
+        open(activity, title)
+        Page.awaitElementMap(activity.webView)
+        awaitTabletListening(id)
+
+        val note = "the second paragraph needs an example"
+        speakAt(activity, "second paragraph", note)
+        App.onMain { activity.findViewById<android.view.View>(R.id.btnRequestUpdate).performClick() }
+
+        val pending = awaitPending(id)
+        val annotations = pending.getJSONArray("annotations")
+        assertEquals("the agent got ${annotations.length()} notes", 1, annotations.length())
+        assertEquals("the agent heard other words", note, annotations.getJSONObject(0).optString("recognized_text"))
+        assertTrue(
+            "the tablet does not say it is waiting: \"${updateLabel(activity)}\"",
+            awaitLabel(activity) { it.startsWith("Waiting for agent") },
+        )
+
+        val feedbackId = pending.getString("feedback_id")
+        val working = "Writing the example"
+        ServerUnderTest.progress(id, feedbackId, working, step = 1, of = 2)
+        assertTrue(
+            "the agent's progress never reached the tablet: \"${updateLabel(activity)}\"",
+            awaitLabel(activity) { it == working },
+        )
+
+        val added = "For example, a reader asks and an agent answers."
+        ServerUnderTest.answer(
+            id,
+            "# $title\n\nThe first paragraph is here to be tapped at.\n\n$added\n",
+            feedbackId,
+            version = pending.getInt("version"),
+            consumed = listOf(0),
+        )
+
+        val deadline = System.currentTimeMillis() + 20_000
+        var texts = emptyList<String>()
+        while (System.currentTimeMillis() < deadline && texts.none { it.contains(added) }) {
+            texts = runCatching { Page.elementTexts(activity.webView) }.getOrElse { emptyList() }
+            if (texts.none { it.contains(added) }) Thread.sleep(200)
+        }
+        assertTrue("the page never showed the answer: $texts", texts.any { it.contains(added) })
+        assertTrue(
+            "the button still describes work that is done: \"${updateLabel(activity)}\"",
+            awaitLabel(activity) { it == "Update" },
+        )
+        assertTrue(
+            "the answered note is still held and would be sent again: " +
+                "${activity.boundGroupsForTest().map { it.recognizedText }}",
+            awaitNoGroups(activity),
+        )
+        assertTrue("the server still has the request open", ServerUnderTest.feedback(id).isNull("pending"))
     }
 
     /**
@@ -507,6 +532,86 @@ class AppFlowTest {
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
+    /**
+     * Speak a note at the block containing [block], the way the tray does once the server
+     * answers `done`, and wait for the page to draw its card. The microphone is not
+     * opened: what it does is not what these tests ask.
+     */
+    private fun speakAt(activity: MainActivity, block: String, note: String) {
+        val index = Page.elementTexts(activity.webView).indexOfFirst { it.contains(block) }
+        assertTrue("\"$block\" is not on the page", index >= 0)
+        val box = Page.elementAt(activity.webView, index)
+        val cx = ((box.getDouble("l") + box.getDouble("r")) / 2).toFloat()
+        val cy = ((box.getDouble("t") + box.getDouble("b")) / 2).toFloat()
+
+        val overlay = activity.overlayForTest()
+            ?: throw AssertionError("the reader has no overlay")
+        App.onMain { activity.setToolMode(ToolMode.VOICE) }
+        App.onMain {
+            overlay.onVoiceTarget = null
+            overlay.pickVoiceTargetAtForTest(cx, cy)
+        }
+
+        val groups = awaitGroups(activity)
+        assertEquals("the tap bound ${groups.size} blocks", 1, groups.size)
+        val group = groups.single()
+        assertTrue(
+            "bound to the wrong block: ${group.elementRefs.map { it.text }}",
+            group.elementRefs.any { it.text.contains(block) },
+        )
+        App.onMain {
+            overlay.setVoiceNote(
+                group.id,
+                note,
+                "blocker",
+                """{"raw":"$note","seconds":2.4,"severity":"blocker"}""",
+            )
+        }
+        // The card is the reader-visible half: the words have to reach the page, not just
+        // the submission. It is drawn by the same JS that draws every other block.
+        val deadline = System.currentTimeMillis() + 10_000
+        var cards = emptyList<String>()
+        while (System.currentTimeMillis() < deadline && cards.none { it.contains(note) }) {
+            cards = Page.voiceCards(activity.webView)
+            if (cards.none { it.contains(note) }) Thread.sleep(200)
+        }
+        assertTrue("the page never drew the note's card: $cards", cards.any { it.contains(note) })
+    }
+
+    private fun updateLabel(activity: MainActivity): String {
+        var text = ""
+        App.onMain { text = activity.findViewById<android.widget.Button>(R.id.btnRequestUpdate).text.toString() }
+        return text
+    }
+
+    private fun awaitLabel(activity: MainActivity, timeoutMs: Long = 15_000, done: (String) -> Boolean): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (done(updateLabel(activity))) return true
+            Thread.sleep(100)
+        }
+        return false
+    }
+
+    /** The reader's request, once the server has stored it for the agent. */
+    private fun awaitPending(id: String, timeoutMs: Long = 20_000): org.json.JSONObject {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            ServerUnderTest.feedback(id).optJSONObject("pending")?.let { return it }
+            Thread.sleep(200)
+        }
+        throw AssertionError("the agent was never handed the reader's notes")
+    }
+
+    private fun awaitNoGroups(activity: MainActivity, timeoutMs: Long = 10_000): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (activity.boundGroupsForTest().isEmpty()) return true
+            Thread.sleep(100)
+        }
+        return false
+    }
+
     private fun newSession(): String =
         ServerUnderTest.createSession(title, document).also { sessions += it }
 
@@ -535,30 +640,6 @@ class AppFlowTest {
             Thread.sleep(200)
         }
         throw AssertionError("the reader never opened: ${App.webViewUrl(activity.webView)}")
-    }
-
-    /** The tray's line, once the UI thread has had a chance to write it. */
-    private fun awaitVoiceState(activity: MainActivity, timeoutMs: Long = 5_000): String {
-        val deadline = System.currentTimeMillis() + timeoutMs
-        var text = ""
-        while (System.currentTimeMillis() < deadline && text.isEmpty()) {
-            text = activity.voiceStateForTest()
-            if (text.isEmpty()) Thread.sleep(100)
-        }
-        return text
-    }
-
-    /** What the tablet itself has bound, which is the state the page is drawn from. */
-    private fun awaitBound(activity: MainActivity, timeoutMs: Long = 10_000): List<String> {
-        val deadline = System.currentTimeMillis() + timeoutMs
-        var bound = emptyList<String>()
-        while (System.currentTimeMillis() < deadline && bound.isEmpty()) {
-            bound = activity.boundGroupsForTest().map { group ->
-                group.elementRefs.joinToString(" | ") { it.text }
-            }
-            if (bound.isEmpty()) Thread.sleep(200)
-        }
-        return bound
     }
 
     /**

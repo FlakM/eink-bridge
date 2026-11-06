@@ -1,6 +1,6 @@
 # Overnight plan — 2026-10-19
 
-Implementing [`FIXME.md`](../FIXME.md) in its stated order. This file is the decision log:
+Implementing [`FIXME.md`](FIXME.md) in its stated order. This file is the decision log:
 each entry records what I chose *before* writing the code, what I rejected, and how the
 choice is proved. Outcomes are appended as items land.
 

@@ -1,28 +1,12 @@
-use eink_bridge::app::{AppState, build_app};
-use std::time::Duration;
-use tokio::net::TcpListener;
+mod common;
+use eink_bridge::app::AppState;
 
 async fn start_server() -> (String, tokio::task::JoinHandle<()>) {
-    let dir = tempfile::tempdir().unwrap();
-    let state = AppState::with_config(dir.keep(), 5);
-    let app = build_app(state);
-
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let url = format!("http://{addr}");
-
-    let handle = tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-    // Wait for readiness rather than guessing: a loaded machine can take far longer than
-    // 50 ms, and a test that fails for that reason teaches people to ignore failures.
-    for _ in 0..500 {
-        if tokio::net::TcpStream::connect(addr).await.is_ok() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    (url, handle)
+    common::serve(AppState::with_config(
+        tempfile::tempdir().unwrap().keep(),
+        5,
+    ))
+    .await
 }
 
 /// Full round-trip: CLI push -> mock device detects + submits -> CLI receives notes

@@ -31,10 +31,10 @@ Pick the socket in this order, and say which one you used:
 
 ```bash
 # a mark letter from a review brief ("go to B")
-python3 <eink-pr-base>/scripts/nvim_marks.py --socket "$EINK_PR_SOCKET" --jump B
+eink-pr-marks --socket "$EINK_PR_SOCKET" --jump B
 
 # an explicit reference, absolute or relative to the worktree
-python3 <eink-pr-base>/scripts/nvim_marks.py --socket "$EINK_PR_SOCKET" --open server/src/app.rs:170
+eink-pr-marks --socket "$EINK_PR_SOCKET" --open server/src/app.rs:170
 ```
 
 Both commands verify the target first and exit non-zero with a clear message when the

@@ -399,6 +399,11 @@ pub fn openapi_spec() -> serde_json::Value {
                             }
                         }
                     }
+                },
+                "delete": {
+                    "summary": "Purge finished sessions",
+                    "description": "Removes submitted, cancelled and expired sessions and their files; active and starred ones stay.",
+                    "responses": {"200": {"description": "{purged: <count>}"}}
                 }
             },
             "/api/sessions/{id}": {
@@ -460,6 +465,41 @@ pub fn openapi_spec() -> serde_json::Value {
                     }
                 }
             },
+            "/api/ocr": {
+                "post": {
+                    "summary": "Recognise handwriting",
+                    "description": "JSON {strokes, pressures?}: strokes are arrays of [x,y] points. Answers the recognised text.",
+                    "responses": {"200": {"description": "Recognised text"}, "400": {"description": "Too many strokes or points"}, "503": {"description": "No OCR engine configured"}}
+                }
+            },
+            "/api/sessions/{id}/annotation/{index}": {
+                "get": {
+                    "summary": "A submitted annotation image",
+                    "description": "The PNG of the reader's ink; the addresses are in `annotation_urls` of the result.",
+                    "responses": {"200": {"description": "image/png"}, "404": {"description": "Session or image not found"}}
+                }
+            },
+            "/api/sessions/{id}/callback": {
+                "put": {
+                    "summary": "Register a webhook for this session's feedback",
+                    "description": "JSON {url}. Loopback callers only; the url must be http(s) on this machine unless EINK_CALLBACK_ALLOW_REMOTE=1.",
+                    "responses": {"204": {"description": "Registered"}, "400": {"description": "Refused url"}, "403": {"description": "Not a loopback caller"}, "404": {"description": "Session not found"}}
+                }
+            },
+            "/api/sessions/{id}/progress": {
+                "post": {
+                    "summary": "Say what the agent is doing with the reader's feedback",
+                    "description": "JSON {feedback_id, message, step?, of?}. Shown on the tablet in place of 'Waiting for agent' and cleared by the content update that names the same feedback_id.",
+                    "responses": {"204": {"description": "Accepted"}, "400": {"description": "Empty or over-long message, or a bad step/of"}, "404": {"description": "Session not found"}, "409": {"description": "feedback_id is not the pending request"}}
+                }
+            },
+            "/api/sessions/{id}/source": {
+                "get": {
+                    "summary": "Lines around a path:line reference",
+                    "description": "Query ref=<path:line>, context?=<n, max 20>. Read only from the checkout a loopback CLI pushed from.",
+                    "responses": {"200": {"description": "The snippet"}, "400": {"description": "Bad reference"}, "404": {"description": "No checkout, or the file is outside it"}}
+                }
+            },
             "/api/sessions/{id}/feedback": {
                 "get": {
                     "summary": "Recover durable pending feedback and latest content-update instructions",
@@ -515,10 +555,10 @@ pub fn openapi_spec() -> serde_json::Value {
                     }
                 }
             },
-            "/api/sessions/{id}/voice/{capture}.wav": {
+            "/api/sessions/{id}/voice/{name}": {
                 "get": {
                     "summary": "The audio of a spoken note",
-                    "description": "What the reader said, as 16 kHz mono WAV, kept with the session and removed with it. The name is the capture id from the `final` frame; anything else is a 404.",
+                    "description": "What the reader said, as 16 kHz mono WAV, kept with the session and removed with it. The name is `<capture>.wav`, the capture id from the `final` frame; anything else is a 404.",
                     "responses": {
                         "200": {"description": "audio/wav, nosniff, no-store"},
                         "404": {"description": "Session or capture not found"}
@@ -593,7 +633,7 @@ pub fn openapi_spec() -> serde_json::Value {
                 },
                 "put": {
                     "summary": "Rewrite content, optionally acknowledge a feedback request",
-                    "description": "JSON {content,expected_version?,feedback_id?,consumed_annotations?} or plain markdown. consumed_annotations are zero-based indices of incorporated notes, require matching feedback_id, and resolve to consumed_strokes for native clients. Unacknowledged feedback survives manual edits.",
+                    "description": "JSON {content,expected_version?,feedback_id?,consumed_annotations?} or plain markdown. consumed_annotations are zero-based indices of incorporated notes, require matching feedback_id, and resolve to consumed_strokes (ink) and consumed_notes (ink-free notes) for native clients. Unacknowledged feedback survives manual edits.",
                     "responses": {"200": {"description": "New version"}, "400": {"description": "Invalid feedback ID or annotation index"}, "404": {"description": "Session not found"}, "409": {"description": "Stale version or terminal session"}}
                 }
             },

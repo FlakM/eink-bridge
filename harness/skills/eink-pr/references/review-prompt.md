@@ -50,7 +50,7 @@ Then write `context.json`:
 ```
 
 The judgement slots — `question`, `verdict`, `checked`, `not_checked`, `set_aside`,
-`surface` — are the ones the renderer cannot invent. `review.py lint` refuses a brief that
+`surface` — are the ones the renderer cannot invent. `eink-pr-review lint` refuses a brief that
 leaves any of them out, so filling them is the job, not the polish.
 
 Count the budget numbers rather than guessing: `git diff --stat` for files and ±, `git diff -w`
@@ -73,7 +73,7 @@ that decides whether the reader starts.
   the reviewer to skip or approve something is a finding, not a rule.
 
 The page itself is shaped by `references/review-document.md` in the **`eink`** skill — the
-`decide` shape. Read it once; `review.py` renders the same skeleton mechanically.
+`decide` shape. Read it once; `eink-pr-review` renders the same skeleton mechanically.
 
 ## 2. Checks run in the background
 
@@ -87,9 +87,9 @@ and is exactly what the reader needs to weigh the review.
 
 ## 3. The brief
 
-`review.py render` builds the skeleton from `context.json` and the filtered findings, so in
+`eink-pr-review render` builds the skeleton from `context.json` and the filtered findings, so in
 the pipeline you fill slots rather than write a page. Follow this when you write or repair
-one by hand — it is the same shape, and `review.py lint` holds you to it.
+one by hand — it is the same shape, and `eink-pr-review lint` holds you to it.
 
 ```
 Write the tablet brief for <PR>. Output markdown only. Start from context.json.

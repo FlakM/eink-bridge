@@ -6,19 +6,18 @@
 //!
 //! The runbook tells the reader to check this gauge when feedback stops arriving. A gauge
 //! that never returns to zero would send them looking for connections that are not there.
-use eink_bridge::app::{AppState, build_app};
+mod common;
+use eink_bridge::app::AppState;
 use std::time::Duration;
-use tokio::net::TcpListener;
 use tokio_tungstenite::connect_async;
 
 async fn start_server() -> String {
-    let dir = tempfile::tempdir().unwrap();
-    let state = AppState::with_config(dir.keep(), 5);
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    tokio::spawn(axum::serve(listener, build_app(state)).into_future());
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    url
+    common::serve(AppState::with_config(
+        tempfile::tempdir().unwrap().keep(),
+        5,
+    ))
+    .await
+    .0
 }
 
 async fn create_session(url: &str) -> String {

@@ -137,11 +137,44 @@ internal object ServerUnderTest {
         }
     }
 
-    /** The detail record, which is where a submitted session's annotations live. */    fun detail(id: String): JSONObject {
-        val request = Request.Builder().url("$url/api/sessions/$id").build()
+    /** What the agent sees waiting for it: `pending` is the reader's last request, or null. */
+    fun feedback(id: String): JSONObject {
+        val request = Request.Builder().url("$url/api/sessions/$id/feedback").build()
         client.newCall(request).execute().use { response ->
-            check(response.isSuccessful) { "read session failed: ${response.code}" }
+            check(response.isSuccessful) { "read feedback failed: ${response.code}" }
             return JSONObject(response.body!!.string())
+        }
+    }
+
+    /** A status line while the agent works, the way `eink-review progress` sends one. */
+    fun progress(id: String, feedbackId: String, message: String, step: Int, of: Int) {
+        val body = JSONObject()
+            .put("feedback_id", feedbackId)
+            .put("message", message)
+            .put("step", step)
+            .put("of", of)
+        val request = Request.Builder()
+            .url("$url/api/sessions/$id/progress")
+            .post(body.toString().toRequestBody("application/json".toMediaType()))
+            .build()
+        client.newCall(request).execute().use { response ->
+            check(response.isSuccessful) { "progress failed: ${response.code}" }
+        }
+    }
+
+    /** The agent's answer: a rewrite that says which of the reader's notes it used. */
+    fun answer(id: String, markdown: String, feedbackId: String, version: Int, consumed: List<Int>) {
+        val body = JSONObject()
+            .put("content", markdown)
+            .put("feedback_id", feedbackId)
+            .put("expected_version", version)
+            .put("consumed_annotations", org.json.JSONArray(consumed))
+        val request = Request.Builder()
+            .url("$url/api/sessions/$id/content")
+            .put(body.toString().toRequestBody("application/json".toMediaType()))
+            .build()
+        client.newCall(request).execute().use { response ->
+            check(response.isSuccessful) { "answer failed: ${response.code}" }
         }
     }
 

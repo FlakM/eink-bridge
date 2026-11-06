@@ -3,15 +3,11 @@
 These pin the rules that keep the tablet readable: only relevant feedback survives,
 and a brief cannot be delivered if it is verbose, hedged, or non-actionable.
 """
-import importlib.util
 from pathlib import Path
 import tempfile
 import unittest
 
-SCRIPTS = Path(__file__).resolve().parents[1] / "skills/eink-pr/scripts"
-spec = importlib.util.spec_from_file_location("eink_review", SCRIPTS / "review.py")
-review = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(review)
+from eink_harness import review
 
 
 def finding(**overrides):
@@ -569,8 +565,6 @@ class ShapeTests(unittest.TestCase):
         self.assertNotIn("missing-interfaces", rules)
 
     def test_a_finding_on_a_contract_outranks_one_on_the_implementation(self):
-        import json
-        from pathlib import Path
         contract = {"file": "proto/session.proto", "line": 12, "severity": "medium",
                     "confidence": 0.9, "claim": "the scope field is required but defaults to empty"}
         implementation = dict(contract, file="services/auth/src/main.rs", line=88)

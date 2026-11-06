@@ -1,4 +1,5 @@
-use eink_bridge::app::{AppState, build_app};
+mod common;
+use eink_bridge::app::AppState;
 use std::time::Duration;
 use tokio::net::TcpListener;
 
@@ -58,42 +59,14 @@ async fn observer_reconnects_without_a_one_second_pause() {
 }
 
 async fn start_server() -> (String, tokio::task::JoinHandle<()>) {
-    let dir = tempfile::tempdir().unwrap();
     // One second of long-poll: long enough that "there is no result yet" is measured
     // rather than assumed, short enough that the pending-result tests do not spend two
     // seconds each waiting to be told so.
-    let state = AppState::with_config(dir.keep(), 1);
-    let app = build_app(state);
-
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let url = format!("http://{addr}");
-
-    let handle = tokio::spawn(async move {
-        // Without ConnectInfo every caller looks unknown, and an unknown caller is
-        // treated as remote -- which quietly disabled `/source` in these tests.
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await
-        .unwrap();
-    });
-    wait_until_ready(&url).await;
-    (url, handle)
-}
-
-/// Wait until the server is accepting connections instead of guessing how long it needs:
-/// a loaded machine can take much longer than the usual 50 ms, and a test that fails
-/// because of that teaches people to ignore failures.
-async fn wait_until_ready(url: &str) {
-    for _ in 0..500 {
-        if reqwest::get(format!("{url}/api/health")).await.is_ok() {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-    panic!("the test server never answered on {url}");
+    common::serve(AppState::with_config(
+        tempfile::tempdir().unwrap().keep(),
+        1,
+    ))
+    .await
 }
 
 /// Submit a session with typed notes via HTTP.

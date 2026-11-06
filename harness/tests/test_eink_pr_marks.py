@@ -8,12 +8,13 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
-HELPER = ROOT / "harness/skills/eink-pr/scripts/nvim_marks.py"
+HELPER = [sys.executable, "-m", "eink_harness.nvim_marks"]
 NEED = ["nvim"]
 
 
@@ -44,8 +45,8 @@ class MarksTests(unittest.TestCase):
         self.dir.cleanup()
 
     def run_helper(self, *args):
-        return subprocess.run(["python3", str(HELPER), "--socket", self.socket, *args],
-                              capture_output=True, text=True, timeout=30)
+        return subprocess.run([*HELPER, "--socket", self.socket, *args],
+                              cwd=ROOT / "harness", capture_output=True, text=True, timeout=30)
 
     def nvim_expr(self, expression):
         return subprocess.run(["nvim", "--server", self.socket, "--remote-expr", expression],
@@ -74,8 +75,8 @@ class MarksTests(unittest.TestCase):
         self.assertRegex(result.stderr, r"cannot mark line 999|marks not set")
 
     def test_missing_socket_is_a_loud_failure(self):
-        result = subprocess.run(["python3", str(HELPER), "--socket", str(self.root / "gone.sock"),
-                                 "--marks", f"D:{self.file}:1"], capture_output=True, text=True)
+        result = subprocess.run([*HELPER, "--socket", str(self.root / "gone.sock"),
+                                 "--marks", f"D:{self.file}:1"], cwd=ROOT / "harness", capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("socket not found", result.stderr)
 

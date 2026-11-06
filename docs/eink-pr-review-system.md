@@ -27,7 +27,7 @@ tests rather than trusted to prose.
 
 ## Findings schema
 
-Every reviewer subagent emits the same shape; `review.py` validates it.
+Every reviewer subagent emits the same shape; `eink-pr-review` validates it.
 
 ```json
 {
@@ -50,7 +50,7 @@ A finding without a file, a line, a claim, a refutation and an action is dropped
 not actionable, so it does not belong on the tablet. `verified` is set by the blind
 verifier (SKILL.md §5c), not by the lens.
 
-## Filter rules (deterministic, in `review.py`)
+## Filter rules (deterministic, in `eink-pr-review`)
 
 1. Drop structurally invalid findings (missing file/line/claim/refutation/action).
 2. Drop findings the verifier did not mark, or marked `refuted`.
@@ -70,7 +70,7 @@ verifier (SKILL.md §5c), not by the lens.
 
 Two layers, because "brief and human" needs both a floor and taste:
 
-- **Floor (deterministic lint, `review.py lint`)**: word budget per bullet and per
+- **Floor (deterministic lint, `eink-pr-review lint`)**: word budget per bullet and per
   sentence, banned filler ("basically", "note that", "in order to", "robust"), no
   trailing summary, no raw diff dumps, and every important piece must carry an
   action verb. A failing lint blocks delivery — this is the rule the tests pin.
@@ -97,9 +97,9 @@ A registry file records live reviews so a second run reattaches instead of dupli
 | Piece | Path | Role |
 |---|---|---|
 | orchestrator | `harness/skills/eink-pr/SKILL.md` | scenarios, subagent dispatch, gates |
-| filter / render / lint | `harness/skills/eink-pr/scripts/review.py` | the deterministic rules |
-| per-review keys + registry | `harness/skills/eink-pr/scripts/registry.py` | concurrency, reattach |
-| marks / jump / open | `harness/skills/eink-pr/scripts/nvim_marks.py` | editor side |
+| filter / render / lint | `harness/eink_harness/review.py` | the deterministic rules |
+| per-review keys + registry | `harness/eink_harness/registry.py` | concurrency, reattach |
+| marks / jump / open | `harness/eink_harness/nvim_marks.py` | editor side |
 | navigation skill | `harness/skills/jump/SKILL.md` | references ↔ editor |
 | brevity editor | `harness/agents/ihaveadhd.md` | the taste pass |
 | scenarios | `harness/eink-pr/scenarios/*.json`, `briefs/*.md` | fixtures |

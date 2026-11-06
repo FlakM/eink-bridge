@@ -4,7 +4,7 @@ The tablet is not a place to read a diff. It is a place to **decide about a chan
 the code one tap away and a pen in hand. This file is the recipe for that page.
 
 Read this before writing any review document. `eink-pr` renders the same skeleton from
-`review.py`; a harness test keeps the two from drifting apart.
+`eink-pr-review`; a harness test keeps the two from drifting apart.
 
 ## Why this shape and not a summary
 

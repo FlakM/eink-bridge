@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eink-harness"
+version = "0.1.0"
+description = "Command-line tools the eink skills call"
+requires-python = ">=3.11"
+
+[project.scripts]
+eink-pr-review = "eink_harness.review:main"
+eink-pr-marks = "eink_harness.nvim_marks:main"
+eink-pr-check-marks = "eink_harness.check_marks:main"
+eink-pr-comments = "eink_harness.pr_comments:main"
+eink-watch-feedback = "eink_harness.watch_feedback:main"
+
+[tool.setuptools]
+packages = ["eink_harness"]

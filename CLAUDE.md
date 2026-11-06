@@ -29,121 +29,11 @@ The CLI (`eink-review push`) polls `GET /api/sessions/{id}/result` in a loop:
 - On timeout, the server responds with 204 (no change); the CLI retries.
 - The CLI has its own `--timeout` (default 30 minutes) bounding total wait time.
 
-## OCR setup
+## OCR and voice setup
 
-Handwriting recognition uses **Ollama** with `qwen2.5vl:7b` (vision model). Tesseract is not used.
-
-### Prerequisites
-
-1. Install Ollama — on NixOS add to `configuration.nix`:
-   ```nix
-   services.ollama = {
-     enable = true;
-     package = pkgs-unstable.ollama;
-     environmentVariables = {
-       OLLAMA_NUM_PARALLEL = "4";  # allow concurrent annotation OCR
-     };
-   };
-   ```
-   Then `sudo nixos-rebuild switch`.
-
-2. Pull the model (one-time):
-   ```bash
-   ollama pull qwen2.5vl:7b
-   ```
-
-3. Verify it's running:
-   ```bash
-   curl http://localhost:11434/api/ps
-   ```
-
-### Configuration
-
-| Env var | Default | Description |
-|---|---|---|
-| `EINK_OLLAMA_URL` | `http://localhost:11434` | Ollama base URL |
-| `EINK_OLLAMA_MODEL` | `qwen2.5vl:7b` | Model name |
-| `EINK_OCR_DEBUG` | unset | If set, saves PNG to `/tmp/eink-ocr-*.png` |
-| `EINK_OCR_TIMEOUT_SECONDS` | `120` (max 300) | Bound on one local OCR attempt |
-| `EINK_OCR_INTERACTIVE_TIMEOUT_SECONDS` | `20` (max 120) | The shorter bound for a call a reader is waiting on |
-
-Both bounds fall back to their default on an unusable value; a `0` would abandon every
-attempt before it was sent, which reads as "the model never answers".
-
-### Timing
-
-Each OCR call logs the provider that won, whether the cache answered, and wall time at
-`INFO`; prompt-eval and token-eval timings are at `DEBUG`:
-```
-INFO OCR complete provider="ollama" cache_hit=false wall_ms=1823
-```
-
-Typical latency on CPU with `qwen2.5vl:7b`: 1–4 s per annotation group.
-
-### OCR handwriting tests
-
-```bash
-cargo test --test ocr_handwriting_test -- --ignored
-```
-
-Tests use PNG fixtures cropped from a real Boox tablet screenshot (`tests/fixtures/ocr/`).
-They require Ollama to be running with the vision model loaded.
-A `tokio::sync::Mutex` serialises the calls so concurrent tests don't saturate the model.
-Once `OLLAMA_NUM_PARALLEL=4` is active in the NixOS service, parallelism is handled by Ollama itself.
-
-### Gotcha: coloured ink
-
-The OCR engine renders strokes as **black on white** before sending to Ollama. The test
-fixtures were converted to greyscale for the same reason — Ollama's vision model returns
-empty output for brightly coloured (e.g. pink) handwriting.
-
-## Voice setup
-
-Spoken notes use **whisper.cpp** for speech to text and **piper** to read a note back.
-Both run on this machine; the hosted recogniser is an opt-in fallback.
-
-```bash
-nix profile add nixpkgs#whisper-cpp nixpkgs#piper-tts
-mkdir -p ~/.local/share/eink-bridge/models && cd ~/.local/share/eink-bridge/models
-curl -LO https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin   # multilingual
-curl -LO https://huggingface.co/rhasspy/piper-voices/resolve/main/pl/pl_PL/darkman/medium/pl_PL-darkman-medium.onnx
-curl -LO https://huggingface.co/rhasspy/piper-voices/resolve/main/pl/pl_PL/darkman/medium/pl_PL-darkman-medium.onnx.json
-curl -LO https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx
-curl -LO https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json
-systemctl --user enable --now whisper-asr   # ~/.config/systemd/user/whisper-asr.service, port 8090
-```
-
-| Env var | Default | Description |
-|---|---|---|
-| `EINK_ASR_URL` | `http://127.0.0.1:8090` | whisper-server; empty disables voice |
-| `EINK_ASR_MODEL` | `small` | Label recorded in the note's provenance |
-| `EINK_ASR_LANGUAGE` | `auto` | `auto` detects per capture and pins the first answer; `pl`, `en` or `pl,en` pins the first of the list |
-| `EINK_ASR_TIMEOUT_SECONDS` | `30` (max 120) | Bound on one transcription |
-| `EINK_ASR_OPENAI_ENABLED` | unset | `1` adds OpenAI `whisper-1` as the fallback (same key as OCR) |
-| `EINK_VOICE_LLM_PROVIDER` | `openai` when a key is configured, else `ollama` | Which model rewrites a spoken edit |
-| `EINK_VOICE_LLM_URL` / `EINK_VOICE_LLM_MODEL` | `https://api.openai.com/v1` + `gpt-4.1-mini`, or the OCR Ollama | The cleaner for edits, and its model |
-| `EINK_VOICE_LLM_ENABLED` | unset | `0` turns the cleaner off; the deterministic verbs still work |
-| `EINK_PIPER_VOICE` | unset | An `.onnx` voice; set it to enable `POST .../speech` |
-| `EINK_PIPER_BIN` | `piper` | The binary, when it is not on the service's PATH |
-
-The service gets the piper variables from
-`~/.config/systemd/user/eink-serve.service.d/voice.conf`. The model is the **multilingual**
-`small`, not `small.en`: the same tablet is used in Polish and English, and an English-only
-model cannot be asked for anything else. Accuracy against English still saturates from tiny
-to medium and the errors that remain are lexical, which the document vocabulary repairs
-deterministically — see `docs/voice-comments.md`.
-
-The cleaner that rewrites a spoken edit runs on the **hosted** model when a key is present,
-because it sits on the reader's critical path: a rewrite took 2.0 s through `gpt-4.1-mini`
-and 9.9 s through the house `qwen2.5vl:7b` on the same note. Neither is believed until
-`clean::guard` has checked that it invented no word. The initial note never touches a model
-at all — `clean::clean` is rules.
-
-Partials are transcribed off the websocket's receive loop, one at a time, and stop after
-20 s of audio; transcribing inline used to stop the audio being read for the length of the
-call, which is what made the tray look frozen. Expect the first words about 2 s after the
-reader starts talking: whisper encodes a 30 s window whatever the clip length, so ~1.5 s is
-the floor per answer on this CPU.
+Handwriting is read by Ollama (`qwen2.5vl:7b`), speech by whisper.cpp and piper, all on
+this machine. Install steps, every `EINK_OCR_*` / `EINK_ASR_*` / `EINK_VOICE_*` variable,
+the coloured-ink gotcha and the latency budget are in [`docs/setup.md`](docs/setup.md).
 
 ## Security notes
 
@@ -200,31 +90,31 @@ just ci            # full CI check
 ```
 
 `just test-emulator` is the instrumented suite: a headless emulator, a server on a
-temporary state directory, and thirteen tests that drive the real app — the list, the
-rendered page and its element map, the page's own nearest-element search, submit, a spoken
-note landing on the block it was aimed at (card and server payload), a picture served from
-its own session, a mermaid diagram actually drawn, an agent's rewrite reaching the open
-page, a review submitted elsewhere sending the tablet back, the screenshot round trip, an
-unreachable server said so, back to the list, and the voice tray's buttons. It is the only
-layer that exercises a real WebView and the JS bridge, which is where two silent bugs
-lived (a page function that did not exist, and a layout inflated as the wrong button
-class). CI runs it on every push; it needs `/dev/kvm`. The emulator and its system image
-are a gigabyte, so they live in their own shell (`nix develop .#emulator`); the recipe
-enters it, and the other jobs keep the small SDK.
+temporary state directory, and tests that drive the real app — the list, the rendered page
+and its element map, the page's own nearest-element search, submit, a spoken note landing
+on the block it was aimed at (card and server payload), a full reader↔agent turn (note,
+Update, the agent's progress line, a rewrite that consumes the note and lets go of it on
+the tablet), a picture served from its own session, a mermaid diagram actually drawn, an
+agent's rewrite reaching the open page, a review submitted elsewhere sending the tablet
+back, the screenshot round trip, an unreachable server said so, back to the list, and the
+voice tray's buttons. It is the only layer that exercises a real WebView and the JS
+bridge, which is where two silent bugs lived (a page function that did not exist, and a
+layout inflated as the wrong button class). CI runs it on every push; it needs `/dev/kvm`.
+The emulator and its system image are a gigabyte, so they live in their own shell (`nix
+develop .#emulator`); the recipe enters it, and the other jobs keep the small SDK.
 
 `just watch-emulator` is the same run with the emulator's window open, so the app can be
 watched being driven; both recipes take a filter (`just test-emulator
 'AppFlowTest#<method>'`) and a filter that matches no test fails rather than reporting a
 green run with nothing in it.
 
-`just test` is the gate: the Rust suite (404 tests across 25 binaries, about three
-seconds), the tablet's 285 JVM tests, and the 85 harness tests. The server part is fast
-enough to run before every commit because `cargo nextest` runs the binaries in parallel,
-against 28 s when `cargo test` ran them one after another. `just test-server` is what to
-run while editing the server; gradle's test task is up-to-date-aware, so a second
-`just test` with no Kotlin change costs only the server and harness time.
-`server/.config/nextest.toml` leaves retries at zero on purpose -- a flaky test is a bug
-worth seeing, not a nuisance to paper over.
+`just test` is the gate: the Rust suite (about three seconds), the tablet's JVM tests, and
+the harness tests. The server part is fast enough to run before every commit because
+`cargo nextest` runs the binaries in parallel, against 28 s when `cargo test` ran them one
+after another. `just test-server` is what to run while editing the server; gradle's test
+task is up-to-date-aware, so a second `just test` with no Kotlin change costs only the
+server and harness time. `server/.config/nextest.toml` leaves retries at zero on purpose
+-- a flaky test is a bug worth seeing, not a nuisance to paper over.
 
 ## Quick test loop -- use this for validation
 
@@ -298,6 +188,10 @@ cargo nextest run --test webhook_test
 
 Start a real TCP server on a random port, spawn `eink-review` and `eink-mock-device` as child processes.
 
+A test that needs a real socket gets one from `tests/common::serve(state)`: a random
+loopback port, `ConnectInfo` (so loopback-only routes like `/source` work), and a health
+poll instead of a sleep. Do not write another `start_server`.
+
 ```bash
 cargo nextest run --test e2e_test
 cargo nextest run --test cli_integration_test
@@ -321,7 +215,7 @@ just test-android        # Android unit tests only (no coverage)
 Use `/coverage` skill for automated analysis of gaps.
 
 Last measured: **91.6% of Rust lines** — and **~95%** of everything that is not an
-entrypoint or a benchmark. Together with 285 Android unit tests and every mutation caught
+entrypoint or a benchmark. Together with the Android unit tests and every mutation caught
 by `just test-mutations`.
 
 Two caveats when reading the number. Subprocess runs do count (the CLI and mock device are
@@ -347,6 +241,8 @@ be exercised in a unit test without racing every other test in the binary.
 | Annotation / highlighting / tap behaviour | `just test-render` then `just test-mutations` |
 | Snippet, diff, steps or fence handling | `cargo test render::tests::parse_chunks` / `a_snippet` / `a_line_mark` |
 | Document images (`image/` refs, `--image`, upload) | `cargo test images::` then `cargo test --test api_edge_test` and `--test cli_integration_test` |
+| The reader↔agent turn (Update, progress, consumed notes) | `cargo test --test ws_test`, `just test-android` (`PenOverlayTest`), `just harness-test` (`test_agent_round_trip`), then `just test-emulator 'AppFlowTest#aReaderAndAnAgentTakeATurnEach'` |
+| A new or renamed `/api` route | `cargo test --lib route_spec` (every route must be in `openapi_spec`), then `just eval-update` |
 | Screenshots of the tablet (`eink-review screenshot`) | `cargo test --test screenshot_test` then `cargo test --test cli_integration_test screenshot`; `just test-android` for the capture |
 | Spoken notes (`voice/`, the tray, the card) | `cargo test voice::` then `cargo test --test voice_test`; `just test-render` for the card; `just test-android` for the tray |
 | Relocating notes after an edit | `cargo test reanchor::tests` |
@@ -355,6 +251,8 @@ be exercised in a unit test without racing every other test in the binary.
 | OCR: strokes, providers, the engine | `cargo test ocr::` then `cargo test --test ocr_handwriting_test -- --ignored` |
 | WebSocket gauge leak | `cargo test --test ws_metrics_test` |
 | The tablet's own logic | `just test-android` |
+| The tablet's socket messages (`WsEvent`) | `just test-android` (`WsEventTest`) |
+| Harness tools, skills, the nix module | `just harness-test`, `nix build .#harness-tools`, then build the host with `--override-input eink-bridge path:$PWD` |
 | Android end to end (app + server + WebView) | `just test-emulator` — needs `/dev/kvm`, boots a headless AVD and its own server from `nix develop .#emulator` |
 | WebSocket heartbeat / half-open sockets | `cargo test --test ws_heartbeat_test` |
 | Startup failures (port in use) | `cargo test --test startup_test` |
@@ -538,7 +436,7 @@ label values are escaped: one malformed line and the whole batch is rejected, si
 ### The tablet (`android/`)
 
 ```bash
-just test-android        # all JVM unit tests (285 of them)
+just test-android        # all JVM unit tests
 just coverage-android    # JaCoCo report
 ```
 
@@ -586,6 +484,24 @@ just lint          # cargo fmt + clippy
 ```
 
 ## Deployment
+
+The flake exports `homeManagerModules.default`, which is how a machine gets everything:
+
+```nix
+imports = [ inputs.eink-bridge.homeManagerModules.default ];
+programs.eink-bridge = {
+  enable = true;          # eink-review, the harness tools, the MCP channel, ~/.claude links
+  server.enable = true;   # the eink-serve user service (Linux)
+  server.environment = { EINK_OCR_OPENAI_ENABLED = "true"; };
+  server.environmentFiles = [ "/run/secrets/eink-openai.env" ];
+};
+```
+
+The skills run harness commands by name (`eink-pr-review`, `eink-pr-marks`,
+`eink-pr-check-marks`, `eink-pr-comments`, `eink-watch-feedback`). They are the
+`eink_harness` Python package in `harness/` (`packages.harness-tools`), declared in
+`harness/pyproject.toml`; `test_every_tool_a_skill_runs_is_installed` fails when a skill
+names a command the package does not install. Its pure unit tests also run in the nix build.
 
 ```bash
 just deploy        # nix build + restart systemd service
@@ -678,12 +594,6 @@ not a constant buried in the logic.
 Every waiting request parks a task and a `Notify` for up to `long_poll_seconds` (30 s by
 default), and the notifier is cleaned up on submit, cancel and expiry. Fine for a handful
 of observers; it would need a rethink for hundreds.
-
-### Directory removal still runs under the lock
-
-Session writes are queued and land in `spawn_blocking`, but `remove_dir_all` in `delete`
-and `purge_finished` still runs inside the write guard. A purge of hundreds of sessions
-stalls every other mutation for its duration.
 
 ### OCR timeouts are per process, not per session
 

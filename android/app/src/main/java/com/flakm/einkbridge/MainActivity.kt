@@ -28,7 +28,6 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.collect
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import org.json.JSONObject
 import com.onyx.android.sdk.api.device.epd.EpdController
 import com.onyx.android.sdk.api.device.epd.UpdateMode
 import org.json.JSONTokener
@@ -674,8 +673,8 @@ class MainActivity : AppCompatActivity() {
             serverUrl = serverUrl,
             sessionId = sessionId,
             token = sessionRepo.token(),
-            onMessage = { type, json -> runOnUiThread {
-                if (currentSessionId == sessionId) handleWsMessage(type, json)
+            onMessage = { event -> runOnUiThread {
+                if (currentSessionId == sessionId) handleWsMessage(event)
             } },
             onClosed = { Log.w(TAG, "ws onClosed session=$sessionId") },
         ).also { it.connect() }
@@ -892,7 +891,7 @@ class MainActivity : AppCompatActivity() {
                         val snapshot = org.json.JSONObject(body)
                         withContext(Dispatchers.Main) {
                             if (currentSessionId == sessionId) {
-                                penOverlay?.consumeStrokes(snapshot.optJSONObject("last_content_update")?.optJSONArray("consumed_strokes"))
+                                penOverlay?.consume(snapshot.optJSONObject("last_content_update"))
                                 penOverlay?.let { sessionRepo.saveStrokes(sessionId, it.buf) }
                             }
                         }
@@ -1175,10 +1174,6 @@ class MainActivity : AppCompatActivity() {
 
     internal fun submitForTest() = submitAndGoBack()
 
-    /** What the voice tray is telling the reader, verbatim. */
-    internal fun voiceStateForTest(): String =
-        findViewById<TextView>(R.id.voiceState).text.toString()
-
     internal fun boundGroupsForTest(): List<BindGroup> = penOverlay?.bindGroupsForTest().orEmpty()
 
     /** The overlay that owns the ink, for the paths the stylus would reach. */
@@ -1244,12 +1239,11 @@ class MainActivity : AppCompatActivity() {
             .notify(NOTIFICATION_ID_UPDATE, notification)
     }
 
-    internal fun handleWsMessage(type: String, json: JSONObject) {
-        Log.d(TAG, "handleWsMessage type=$type session=$currentSessionId json=${json.toString().take(200)}")
+    internal fun handleWsMessage(event: WsEvent) {
+        Log.d(TAG, "handleWsMessage $event session=$currentSessionId")
         runOnUiThread {
-            when (type) {
-                "version_updated" -> {
-                    val version = json.optInt("version")
+            when (event) {
+                is WsEvent.VersionUpdated -> {
                     // The line and the bar described work that is now done. Reset them
                     // before the session check: a version can land after the reader has
                     // gone back to the list, and the button must not keep saying
@@ -1257,7 +1251,7 @@ class MainActivity : AppCompatActivity() {
                     findViewById<Button>(R.id.btnRequestUpdate).text = "Update"
                     findViewById<ProgressBar>(R.id.agentProgress).visibility = View.GONE
                     val sid = currentSessionId ?: return@runOnUiThread
-                    if (version <= loadedVersion) return@runOnUiThread
+                    if (event.version <= loadedVersion) return@runOnUiThread
                     val sentAt = annotationSentAt
                     if (sentAt != 0L) {
                         val roundTripMs = SystemClock.elapsedRealtime() - sentAt
@@ -1267,63 +1261,56 @@ class MainActivity : AppCompatActivity() {
                         scope.launch { MetricsReporter.push(pushgatewayUrl) }
                     }
                     penOverlay?.also { overlay ->
-                        overlay.consumeStrokes(json.optJSONArray("consumed_strokes"))
+                        overlay.consume(event.consumed)
                         sessionRepo.saveStrokes(sid, overlay.buf)
                     }
-                    Log.i(TAG, "version_updated: version=$version — reloading webview")
-                    loadedVersion = version
+                    Log.i(TAG, "version_updated: version=${event.version} — reloading webview")
+                    loadedVersion = event.version
                     ocrOverlay.visibility = View.GONE
                     savedScrollY = webView.scrollY
                     loadSessionPage(sid)
                     showRoutineStatus("Document updated")
                     notifyDocumentUpdated()
                 }
-                "session_submitted" -> {
+                WsEvent.SessionSubmitted -> {
                     Log.i(TAG, "session_submitted: going back to session list")
                     showRoutineStatus("Review submitted")
                     showSessionList()
                     startPolling()
                 }
-                "agent_progress" -> {
+                is WsEvent.AgentProgress -> {
                     // Status, not prose: the agent says what it is doing while it works,
                     // in place of the static "Waiting for agent…".
-                    val message = json.optString("message")
-                    if (message.isNotBlank()) {
-                        Log.i(TAG, "agent_progress: $message")
-                        findViewById<Button>(R.id.btnRequestUpdate).text = message
-                        findViewById<TextView>(R.id.processingStatus).text = message
+                    if (event.message.isNotBlank()) {
+                        Log.i(TAG, "agent_progress: ${event.message}")
+                        findViewById<Button>(R.id.btnRequestUpdate).text = event.message
+                        findViewById<TextView>(R.id.processingStatus).text = event.message
                         ocrOverlay.visibility = View.VISIBLE
                     }
                     val bar = findViewById<ProgressBar>(R.id.agentProgress)
-                    val step = json.optInt("step")
-                    val of = json.optInt("of")
-                    if (step > 0 && of > 0) {
-                        bar.max = of
-                        bar.progress = step
+                    val progress = event.bar
+                    if (progress != null) {
+                        bar.max = progress.of
+                        bar.progress = progress.step
                         bar.visibility = View.VISIBLE
                     } else {
                         bar.visibility = View.GONE
                     }
                 }
-                "annotation_result" -> {
-                    val version = json.optInt("version")
-                    Log.i(TAG, "annotation_result: version=$version — waiting for document update")
+                is WsEvent.AnnotationResult -> {
+                    Log.i(TAG, "annotation_result: version=${event.version} — waiting for document update")
                     ocrOverlay.visibility = View.GONE
                     findViewById<ProgressBar>(R.id.agentProgress).visibility = View.GONE
                     findViewById<Button>(R.id.btnRequestUpdate).text = "Waiting for agent…"
                     showRoutineStatus("Feedback saved · awaiting reply")
                 }
-                "screenshot_requested" -> {
-                    val requestId = json.optString("request_id")
-                    if (requestId.isNotEmpty()) sendScreenshot(requestId)
-                }
-                "error" -> {
-                    val errMsg = json.optString("message", "Unknown error")
-                    Log.w(TAG, "server error: $errMsg")
+                is WsEvent.ScreenshotRequested -> sendScreenshot(event.requestId)
+                is WsEvent.Error -> {
+                    Log.w(TAG, "server error: ${event.message}")
                     ocrOverlay.visibility = View.GONE
-                    Toast.makeText(this, errMsg, Toast.LENGTH_LONG).show()
+                    Toast.makeText(this, event.message, Toast.LENGTH_LONG).show()
                 }
-                else -> Log.w(TAG, "unhandled ws message type=$type")
+                is WsEvent.Unknown -> Log.w(TAG, "unhandled ws message type=${event.type}")
             }
         }
     }

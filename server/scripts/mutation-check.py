@@ -30,6 +30,12 @@ CLII = SERVER / "src/cli.rs"
 APII = SERVER / "src/api.rs"
 IMAGES = SERVER / "src/images.rs"
 APPI = SERVER / "src/app.rs"
+APP_AUTH = SERVER / "src/app/auth.rs"
+APP_FEEDBACK = SERVER / "src/app/feedback.rs"
+APP_MEDIA = SERVER / "src/app/media.rs"
+APP_MULTIPART = SERVER / "src/app/multipart.rs"
+APP_SESSIONS = SERVER / "src/app/sessions.rs"
+APP_SOURCE = SERVER / "src/app/source.rs"
 METRICS = SERVER / "src/metrics.rs"
 WSI = SERVER / "src/ws.rs"
 OCRI = SERVER / "src/ocr.rs"
@@ -43,8 +49,11 @@ SESSIONI = SERVER / "src/session.rs"
 SUBMISSION = SERVER.parent / "android/app/src/main/java/com/flakm/einkbridge/SubmissionManager.kt"
 SESSIONVM = SERVER.parent / "android/app/src/main/java/com/flakm/einkbridge/SessionViewModel.kt"
 PENOVERLAY = SERVER.parent / "android/app/src/main/java/com/flakm/einkbridge/PenOverlay.kt"
+WSEVENT = SERVER.parent / "android/app/src/main/java/com/flakm/einkbridge/WsEvent.kt"
 STROKEVIEW = SERVER.parent / "android/app/src/main/java/com/flakm/einkbridge/StrokeView.kt"
 THEME = SERVER / "assets/eink-theme.tmTheme"
+HARNESS = SERVER.parent / "harness"
+HARNESS_PYPROJECT = HARNESS / "pyproject.toml"
 
 
 # Tests in a binary crate are invisible to `--lib`; they run against the bin target.
@@ -58,6 +67,7 @@ TARGETS = {
     "remove_forgets_the_session_and_deletes_its_files": "--test api_edge_test",
     "a_submission_with_a_broken_field_is_told_which_field": "--test api_edge_test",
     "an_acknowledgement_must_name_the_feedback_it_consumes": "--test api_edge_test",
+    "a_consumed_voice_note_is_named_and_an_unconsumed_one_is_not": "--test ws_test",
     "metrics_are_served_in_the_format_prometheus_scrapes": "--test api_edge_test",
     "server_side_ocr_is_optional_and_says_so": "--test api_edge_test",
     "a_request_id_cannot_name_a_file_outside_the_session": "--test screenshot_test",
@@ -99,7 +109,7 @@ TARGETS = {
 
 def target_for(test: str) -> str:
     # A gradle case names its class in the test slot, since the class *is* the selector.
-    if test.startswith("gradle:"):
+    if test.startswith(("gradle:", "python:")):
         return test
     return TARGETS.get(test, "--lib")
 
@@ -132,9 +142,24 @@ def gradle_is_green(class_name: str) -> bool:
     return False
 
 
+def python_is_green(name: str) -> bool:
+    """Run one harness unittest, named `module.Class.method` under harness/tests."""
+    proc = subprocess.run(
+        [sys.executable, "-m", "unittest", f"tests.{name}"],
+        cwd=HARNESS,
+        capture_output=True,
+        text=True,
+    )
+    if not re.search(r"Ran [1-9]\d* test", proc.stderr):
+        raise NoTestsRan(f"{name} ran no tests: {proc.stderr[-400:]}")
+    return proc.returncode == 0
+
+
 def suite_is_green(test: str = "", target: str = "--lib") -> bool:  # noqa: D401
     if target.startswith("gradle:"):
         return gradle_is_green(target.split(":", 1)[1])
+    if target.startswith("python:"):
+        return python_is_green(target.split(":", 1)[1])
     proc = subprocess.run(
         ["cargo", "test", *target.split(), "--quiet", test],
         cwd=SERVER,
@@ -249,6 +274,45 @@ def whiten_a_scope(doc, saved):
 
 CASES = [
     (
+        "a consumed spoken note is not named to the tablet",
+        text_edit(
+            APP_FEEDBACK,
+            """            consumed_notes.extend(crate::ws::ConsumedNote::from_annotation(annotation));
+""",
+            "",
+        ),
+        "a_consumed_voice_note_is_named_and_an_unconsumed_one_is_not",
+    ),
+    (
+        "the tablet keeps a spoken note the agent consumed",
+        text_edit(
+            PENOVERLAY,
+            """                return@mapNotNull group.takeUnless { named in consumedNotes }""",
+            """                return@mapNotNull group""",
+        ),
+        "gradle:PenOverlayTest",
+    ),
+    (
+        "consuming ink drops every spoken note with it",
+        text_edit(
+            PENOVERLAY,
+            """            if (group.strokeIndices.isEmpty()) {
+                val named""",
+            """            if (false) {
+                val named""",
+        ),
+        "gradle:PenOverlayTest",
+    ),
+    (
+        "a route is served that the openapi spec does not describe",
+        text_edit(
+            APII,
+            """            "/api/sessions/{id}/progress": {""",
+            """            "/api/sessions/{id}/progresz": {""",
+        ),
+        "every_api_route_is_in_the_openapi_spec",
+    ),
+    (
         "the voice guard believes whatever the cleaner says",
         text_edit(
             VOICE_CLEAN,
@@ -307,7 +371,7 @@ CASES = [
     (
         "the screenshot route serves any file name it is given",
         text_edit(
-            APPI,
+            APP_MEDIA,
             """    Path((id, request_id)): Path<(String, String)>,
 ) -> Response {
     if !is_request_id(&request_id) {
@@ -323,7 +387,7 @@ CASES = [
     (
         "a screenshot nobody asked for is stored",
         text_edit(
-            APPI,
+            APP_MEDIA,
             """        if pending.get(&id).map(|request| request.id.as_str()) != Some(request_id.as_str()) {
             return (""",
             """        if pending.get(&id).map(|request| request.id.as_str()) != Some(request_id.as_str()) && false {
@@ -334,7 +398,7 @@ CASES = [
     (
         "a screenshot request counts the agent's observer as a tablet",
         text_edit(
-            APPI,
+            APP_MEDIA,
             "    let delivered = state.tablets_listening(&id) > 0;\n",
             "    let delivered = state.ws_senders.read().await.contains_key(&id) || true;\n",
         ),
@@ -343,7 +407,7 @@ CASES = [
     (
         "an answered screenshot request is handed out again",
         text_edit(
-            APPI,
+            APP_MEDIA,
             # The anchor is the formatter's, not the author's: rustfmt rewrapped this
             # chain, and the harness kept looking for the one-line version.
             """    if pending
@@ -670,7 +734,7 @@ CASES = [
     (
         "the remove request goes back to only cancelling",
         text_edit(
-            APPI,
+            APP_SESSIONS,
             """    Query(params): Query<DeleteParams>,
 ) -> Response {
     if params.remove {""",
@@ -683,7 +747,7 @@ CASES = [
     (
         "a multipart verdict is dropped again",
         text_edit(
-            APPI,
+            APP_MULTIPART,
             """            "verdict" => {""",
             """            "verdict_ignored" => {""",
         ),
@@ -702,7 +766,7 @@ CASES = [
     (
         "an out-of-range annotation index is accepted",
         text_edit(
-            APPI,
+            APP_FEEDBACK,
             """            else {
                 return bad_request("consumed annotation index is out of range".into());
             };""",
@@ -760,7 +824,7 @@ CASES = [
     (
         "the ocr endpoint answers an empty transcription without an engine",
         text_edit(
-            APPI,
+            APP_FEEDBACK,
             """            return (StatusCode::SERVICE_UNAVAILABLE, "OCR engine not available").into_response();""",
             """            return Json(serde_json::json!({ "text": "" })).into_response();""",
         ),
@@ -814,7 +878,7 @@ CASES = [
     (
         "an annotation path may point outside the session",
         text_edit(
-            APPI,
+            APP_MEDIA,
             "    candidate.starts_with(&root).then_some(candidate)",
             "    Some(candidate)",
         ),
@@ -865,7 +929,7 @@ CASES = [
     (
         "removing a live review is allowed again",
         text_edit(
-            APPI,
+            APP_SESSIONS,
             """            if live {
                 return (
                     StatusCode::CONFLICT,""",
@@ -942,7 +1006,7 @@ CASES = [
     (
         "a page ignores its own cursor and repeats itself",
         text_edit(
-            APPI,
+            APP_SESSIONS,
             """        if let Some((starred, micros, id)) = &after {""",
             """        if let Some((starred, micros, id)) = None::<&(bool, i64, String)> {""",
         ),
@@ -951,7 +1015,7 @@ CASES = [
     (
         "a page size of zero is served",
         text_edit(
-            APPI,
+            APP_SESSIONS,
             """    if params.limit == Some(0) {
         return (StatusCode::BAD_REQUEST, "limit must be at least 1").into_response();
     }""",
@@ -962,7 +1026,7 @@ CASES = [
     (
         "the sort loses its tiebreaker",
         text_edit(
-            APPI,
+            APP_SESSIONS,
             "    (session.starred, session.updated_at, session.id.clone())",
             "    (session.starred, session.updated_at, String::new())",
         ),
@@ -1009,6 +1073,24 @@ CASES = [
             "    val isSuccessful get() = this is Http",
         ),
         "gradle:SubmissionManagerTest",
+    ),
+    (
+        "a skill runs a harness command that is not installed",
+        text_edit(
+            HARNESS_PYPROJECT,
+            'eink-pr-marks = "eink_harness.nvim_marks:main"',
+            'eink-pr-mark = "eink_harness.nvim_marks:main"',
+        ),
+        "python:test_harness_assets.SkillTests.test_every_tool_a_skill_runs_is_installed",
+    ),
+    (
+        "the socket forgets which spoken notes a rewrite consumed",
+        text_edit(
+            WSEVENT,
+            """listOf("consumed_strokes", "consumed_notes")""",
+            """listOf("consumed_strokes")""",
+        ),
+        "gradle:WsEventTest",
     ),
     (
         "a partial page counts as a complete one",
@@ -1147,7 +1229,7 @@ CASES = [
     (
         "progress outlives the update it describes",
         text_edit(
-            APPI,
+            APP_FEEDBACK,
             """            if mgr.clear_progress(&id, feedback_id.as_deref()) {""",
             """            if mgr.clear_progress(&id, None) {""",
         ),
@@ -1156,7 +1238,7 @@ CASES = [
     (
         "the token gate lets a remote caller through",
         text_edit(
-            APPI,
+            APP_AUTH,
             """    if !authorized {""",
             """    if false && !authorized {""",
         ),

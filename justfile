@@ -235,11 +235,11 @@ harness-deps:
 
 # portable OpenCode watcher and Claude MCP-channel contracts
 test-delivery: harness-deps
-    python3 -m unittest discover -s harness/tests -v
+    python3 -m unittest discover -s harness/tests -t harness -v
 
 # all harness tests: delivery, marks, review core, registry, assets
 harness-test: harness-deps
-    python3 -m unittest discover -s harness/tests -v
+    python3 -m unittest discover -s harness/tests -t harness -v
 
 # deterministic e-ink PR review scenarios (no model, no network)
 eink-pr-scenarios *args='':

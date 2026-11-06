@@ -18,7 +18,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -28,12 +27,10 @@ import sys
 import tempfile
 
 HERE = Path(__file__).resolve().parent
-SCRIPTS = HERE.parent / "skills/eink-pr/scripts"
 SCENARIOS = HERE / "scenarios"
 
-spec = importlib.util.spec_from_file_location("eink_review", SCRIPTS / "review.py")
-review = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(review)
+sys.path.insert(0, str(HERE.parent))
+from eink_harness import review  # noqa: E402
 
 
 def load_scenarios():

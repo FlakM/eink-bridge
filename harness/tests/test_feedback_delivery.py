@@ -6,6 +6,7 @@ from pathlib import Path
 import queue
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -13,6 +14,7 @@ import urllib.error
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[2]
+WATCH = [sys.executable, "-m", "eink_harness.watch_feedback"]
 
 
 class DeliveryTests(unittest.TestCase):
@@ -27,11 +29,11 @@ class DeliveryTests(unittest.TestCase):
             fake.write_text("#!/usr/bin/env python3\n" + "\n".join(
                 f"print({'EVENT:ANNOTATION_RESULT ' + json.dumps(e)!r}, flush=True)" for e in events))
             fake.chmod(0o755)
-            result = subprocess.run(["python3", str(ROOT / "harness/skills/eink/scripts/watch-feedback.py"),
+            result = subprocess.run([*WATCH,
                                      "session", "--after-feedback", "old", "--eink-review", str(fake),
                                      "--ready-file", str(Path(directory)/"ready.json")],
                                     env={**os.environ, "PATH": directory + ":" + os.environ["PATH"]},
-                                    capture_output=True, text=True, timeout=10)
+                                    cwd=ROOT / "harness", capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(len(result.stdout.splitlines()), 1)
             event = json.loads(result.stdout.partition(" ")[2])
@@ -47,18 +49,17 @@ class DeliveryTests(unittest.TestCase):
             fake.write_text("#!/usr/bin/env python3\nimport sys,time\nprint('EVENT:WATCH_READY session_id=session',file=sys.stderr,flush=True)\ntime.sleep(30)\n")
             fake.chmod(0o755)
             ready = Path(directory)/"ready.json"
-            script = str(ROOT/"harness/skills/eink/scripts/watch-feedback.py")
-            observer = subprocess.Popen(["python3",script,"session","--eink-review",str(fake),"--ready-file",str(ready)],
-                env={**os.environ,"PATH":directory+":"+os.environ["PATH"]},stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+            observer = subprocess.Popen([*WATCH,"session","--eink-review",str(fake),"--ready-file",str(ready)],
+                env={**os.environ,"PATH":directory+":"+os.environ["PATH"]},cwd=ROOT/"harness",stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
             try:
-                checked = subprocess.run(["python3",script,"--wait-ready",str(ready)],capture_output=True,text=True,timeout=8)
+                checked = subprocess.run([*WATCH,"--wait-ready",str(ready)],cwd=ROOT/"harness",capture_output=True,text=True,timeout=8)
                 self.assertEqual(checked.returncode,0,checked.stderr)
                 self.assertEqual(json.loads(checked.stdout)["state"],"ready")
                 self.assertIsNone(observer.poll())
                 observer.terminate()
                 observer.wait(timeout=5)
                 self.assertEqual(json.loads(ready.read_text())["state"],"ended")
-                checked = subprocess.run(["python3",script,"--wait-ready",str(ready)],capture_output=True,text=True,timeout=2)
+                checked = subprocess.run([*WATCH,"--wait-ready",str(ready)],cwd=ROOT/"harness",capture_output=True,text=True,timeout=2)
                 self.assertNotEqual(checked.returncode,0,"Ended observers must not be announced as connected")
             finally:
                 if observer.poll() is None:
@@ -77,10 +78,10 @@ class DeliveryTests(unittest.TestCase):
             real = Path(directory) / "real-eink-review"
             real.write_text("#!/usr/bin/env python3\nprint('EVENT:WATCH_ENDED session_id=session exit=1', flush=True)\n")
             real.chmod(0o755)
-            result = subprocess.run(["python3", str(ROOT / "harness/skills/eink/scripts/watch-feedback.py"),
+            result = subprocess.run([*WATCH,
                                      "session", "--eink-review", str(real)],
                                     env={**os.environ, "PATH": str(stale) + ":" + os.environ["PATH"]},
-                                    capture_output=True, text=True, timeout=10)
+                                    cwd=ROOT / "harness", capture_output=True, text=True, timeout=10)
             self.assertNotIn("WRONG CLI", result.stdout)
             self.assertIn(f"cli={real}", result.stdout)
 
@@ -88,8 +89,8 @@ class DeliveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             ready=Path(directory)/"ready.json"
             ready.write_text('{"state":"ready","session_id":"old"}')
-            result=subprocess.run(["python3",str(ROOT/"harness/skills/eink/scripts/watch-feedback.py"),
-                "new","--ready-file",str(ready)],capture_output=True,text=True,timeout=2)
+            result=subprocess.run([*WATCH,
+                "new","--ready-file",str(ready)],cwd=ROOT/"harness",capture_output=True,text=True,timeout=2)
             self.assertNotEqual(result.returncode,0)
             self.assertIn("fresh ready file",result.stderr)
 

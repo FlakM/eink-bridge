@@ -3,7 +3,6 @@ package com.flakm.einkbridge
 import android.view.View
 import android.widget.Button
 import android.widget.ProgressBar
-import org.json.JSONObject
 import androidx.test.core.app.ActivityScenario
 import org.junit.After
 import org.junit.Assert.*
@@ -356,12 +355,7 @@ class MainActivityTest {
     @Test fun agentProgressReplacesWaitingAndVersionUpdatedResetsIt() {
         scenario.onActivity { activity ->
             activity.handleWsMessage(
-                "agent_progress",
-                JSONObject()
-                    .put("feedback_id", "f1")
-                    .put("message", "Rewriting *Checks*")
-                    .put("step", 2)
-                    .put("of", 4)
+                WsEvent.AgentProgress("Rewriting *Checks*", WsEvent.AgentProgress.Bar(2, 4))
             )
             val button = activity.findViewById<Button>(R.id.btnRequestUpdate)
             assertEquals("Rewriting *Checks*", button.text.toString())
@@ -370,7 +364,7 @@ class MainActivityTest {
             assertEquals(4, bar.max)
             assertEquals(2, bar.progress)
 
-            activity.handleWsMessage("version_updated", JSONObject().put("version", 7))
+            activity.handleWsMessage(WsEvent.VersionUpdated(7, null))
             assertEquals("the rewrite landed, so the button is an action again", "Update", button.text.toString())
             assertEquals(View.GONE, bar.visibility)
         }

@@ -20,6 +20,33 @@ pub enum ClientMessage {
     Subscribe,
 }
 
+/// An ink-free note the agent consumed, identified the way the tablet holds it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ConsumedNote {
+    pub text: String,
+    pub anchor: Vec<String>,
+}
+
+impl ConsumedNote {
+    /// The note an annotation carries, when it has words and no strokes.
+    pub fn from_annotation(annotation: &serde_json::Value) -> Option<Self> {
+        let inked = annotation["strokes"]
+            .as_array()
+            .is_some_and(|s| !s.is_empty());
+        let text = annotation["recognized_text"].as_str().filter(|_| !inked)?;
+        let anchor = annotation["anchor"]["elements"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e["text"].as_str().map(str::to_owned))
+            .collect();
+        Some(Self {
+            text: text.to_owned(),
+            anchor,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {
@@ -29,6 +56,9 @@ pub enum ServerMessage {
         consumed_annotations: Vec<i32>,
         #[serde(skip_serializing_if = "Vec::is_empty", default)]
         consumed_strokes: Vec<Vec<[f64; 2]>>,
+        /// Consumed notes that carry no ink (spoken ones), which `consumed_strokes` cannot name.
+        #[serde(skip_serializing_if = "Vec::is_empty", default)]
+        consumed_notes: Vec<ConsumedNote>,
     },
     SessionSubmitted {
         result: Box<SessionResultResponse>,
@@ -334,12 +364,21 @@ mod tests {
             version: 3,
             consumed_annotations: vec![0, 2],
             consumed_strokes: vec![vec![[1.0, 2.0]]],
+            consumed_notes: vec![ConsumedNote {
+                text: "say why".into(),
+                anchor: vec!["The second paragraph".into()],
+            }],
         })
         .unwrap();
         assert_eq!(version["type"], "version_updated");
         assert_eq!(version["version"], 3);
         assert_eq!(version["consumed_annotations"][1], 2);
         assert_eq!(version["consumed_strokes"][0][0][0], 1.0);
+        assert_eq!(version["consumed_notes"][0]["text"], "say why");
+        assert_eq!(
+            version["consumed_notes"][0]["anchor"][0],
+            "The second paragraph"
+        );
 
         let error = serde_json::to_value(ServerMessage::Error {
             message: "cancelled".into(),
@@ -357,6 +396,7 @@ mod tests {
             version: 2,
             consumed_annotations: Vec::new(),
             consumed_strokes: Vec::new(),
+            consumed_notes: Vec::new(),
         })
         .unwrap();
         assert!(message.get("consumed_annotations").is_none());

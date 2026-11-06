@@ -11,8 +11,11 @@
     flake-utils.url = "github:numtide/flake-utils";
   };
 
-  outputs = { nixpkgs, flake-utils, rust-overlay, crane, ... }:
-    flake-utils.lib.eachDefaultSystem (system:
+  outputs = { self, nixpkgs, flake-utils, rust-overlay, crane, ... }:
+    {
+      homeManagerModules.default = import ./nix/hm-module.nix self;
+    }
+    // flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs {
           inherit system;
@@ -140,6 +143,23 @@
           '';
         };
 
+        # The commands the skills run. The unit tests that need nothing but Python run
+        # here; the ones that start a server or Neovim stay in `just harness-test`.
+        harnessTools = pkgs.python3Packages.buildPythonApplication {
+          pname = "eink-harness";
+          version = "0.1.0";
+          pyproject = true;
+          src = ./harness;
+          build-system = [ pkgs.python3Packages.setuptools ];
+          pythonImportsCheck = [ "eink_harness.review" "eink_harness.watch_feedback" ];
+          checkPhase = ''
+            runHook preCheck
+            python -m unittest tests.test_eink_pr_review tests.test_eink_pr_registry \
+              tests.test_check_marks tests.test_pr_comments tests.test_harness_assets
+            runHook postCheck
+          '';
+        };
+
         harness = pkgs.stdenvNoCC.mkDerivation {
           name = "eink-bridge-harness";
           src = ./harness;
@@ -156,11 +176,12 @@
           default = einkBridge;
           eink-bridge = einkBridge;
           inherit harness einkChannel;
+          harness-tools = harnessTools;
         };
 
         devShells.default = androidShell {
           sdkPath = "${androidSdk}/libexec/android-sdk";
-          extraPackages = [ androidSdk einkBridge einkChannel ];
+          extraPackages = [ androidSdk einkBridge einkChannel harnessTools ];
         };
 
         # The instrumented suite's shell: the same tools, plus an emulator and a

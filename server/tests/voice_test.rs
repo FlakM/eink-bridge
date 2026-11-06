@@ -10,7 +10,7 @@
 mod common;
 
 use axum::{Router, extract::Multipart, routing::post};
-use eink_bridge::app::{AppState, build_app};
+use eink_bridge::app::AppState;
 use eink_bridge::voice::{SAMPLE_RATE, Voice, asr::Asr, llm::Cleaner, tts::Tts};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -99,16 +99,8 @@ async fn start_server(fake: Option<&Fake>) -> (String, tempfile::TempDir) {
             Some(Tts::new(fixture("fake-piper.sh"), fixture("voice.onnx"))),
         )
     });
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    tokio::spawn(axum::serve(listener, build_app(state)).into_future());
-    for _ in 0..200 {
-        if reqwest::get(format!("{url}/api/health")).await.is_ok() {
-            return (url, dir);
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("the test server never answered on {url}");
+    let (url, _) = common::serve(state).await;
+    (url, dir)
 }
 
 async fn create_session(url: &str) -> String {

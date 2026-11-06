@@ -46,6 +46,7 @@ head -5 /home/flakm/.claude/skills/eink/SKILL.md
 ## Notes
 
 - `nix_dots` home-manager is wired into `nixos-rebuild switch` — no separate `home-manager switch` needed.
-- Skills from the harness are deployed as read-only symlinks into `~/.claude/skills/`.
+- `nix_dots` imports `homeManagerModules.default` from this flake (`programs.eink-bridge`): skills are read-only symlinks into `~/.claude/skills/`, and the commands they run (`eink-pr-review`, `eink-watch-feedback`, ...) are on PATH.
+- To try a change before pushing: `nixos-rebuild build --flake .#amd-pc --override-input eink-bridge path:/home/flakm/programming/flakm/eink-bridge`.
 - If only server code changed (not harness/skills), also run `just deploy` in `eink-bridge` to restart the service.
 - The flake uses `github:FlakM/eink-bridge` so all machines (including work mac) can evaluate the flake. Always push before bumping the lock.
